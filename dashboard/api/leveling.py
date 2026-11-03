@@ -281,21 +281,47 @@ def _reward_audience(data):
 @require_api_permission(LEVEL_ADMIN)
 def add_leveling_reward():
     guild_id = get_session_guild_id()
-    data     = request.json
+    data     = request.json or {}
     audience = _reward_audience(data)
     if audience is None:
-        return jsonify({"success": False, "error": "Audience must be 'everyone' or 'boosters'"})
+        return jsonify({"success": False, "error": "Audience must be 'everyone' or 'boosters'"}), 400
+
+    role_id = data.get("role_id")
+    if not role_id:
+        return jsonify({"success": False, "error": "Role is required"}), 400
+    str_role = str(role_id).strip()
+
+    from dashboard.utils.role_validation import validate_assignable_role
+    valid, err = validate_assignable_role(guild_id, str_role)
+    if not valid:
+        return jsonify({"success": False, "error": f"Invalid Reward Role: {err}"}), 400
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO leveling_rewards (guild_id, level, role_id, audience)
-                VALUES (?, ?, ?, ?)
-            """, (guild_id, int(data.get("level")), data.get("role_id"), audience))
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute("""
+                    SELECT 1 FROM leveling_blacklist_roles
+                    WHERE guild_id = ? AND (role_id = ? OR role_id = ?)
+                """, (guild_id, str_role, int(str_role) if str_role.isdigit() else str_role))
+                if await cursor.fetchone():
+                    await db.execute("ROLLBACK")
+                    return {"success": False, "error": "This role is blacklisted from earning XP and cannot be configured as a Level reward."}
 
-    run_async(save())
-    return jsonify({"success": True})
+                await db.execute("""
+                    INSERT INTO leveling_rewards (guild_id, level, role_id, audience)
+                    VALUES (?, ?, ?, ?)
+                """, (guild_id, int(data.get("level")), str_role, audience))
+                await db.commit()
+                return {"success": True}
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    result = run_async(save())
+    if not result.get("success"):
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 @api_bp.route("/leveling/reward/<int:reward_id>", methods=["DELETE"])
@@ -726,18 +752,48 @@ def get_blacklist():
 @require_api_permission(LEVEL_ADMIN)
 def add_blacklist():
     guild_id = get_session_guild_id()
-    data     = request.json
+    data     = request.json or {}
+    raw_role = data.get("role_id")
+    if not raw_role:
+        return jsonify({"success": False, "error": "Role is required"}), 400
+    str_role = str(raw_role).strip()
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO leveling_blacklist_roles (guild_id, role_id)
-                VALUES (?, ?)
-            """, (guild_id, data.get("role_id")))
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                # Check collision with leveling_rewards
+                cursor = await db.execute("""
+                    SELECT 1 FROM leveling_rewards
+                    WHERE guild_id = ? AND (role_id = ? OR role_id = ?)
+                """, (guild_id, str_role, int(str_role) if str_role.isdigit() else str_role))
+                if await cursor.fetchone():
+                    await db.execute("ROLLBACK")
+                    return {"success": False, "error": "This role is configured as a Level reward and cannot be blacklisted."}
 
-    run_async(save())
-    return jsonify({"success": True})
+                # Check duplicate in leveling_blacklist_roles
+                cursor = await db.execute("""
+                    SELECT 1 FROM leveling_blacklist_roles
+                    WHERE guild_id = ? AND (role_id = ? OR role_id = ?)
+                """, (guild_id, str_role, int(str_role) if str_role.isdigit() else str_role))
+                if await cursor.fetchone():
+                    await db.execute("ROLLBACK")
+                    return {"success": False, "error": "Role is already blacklisted"}
+
+                await db.execute("""
+                    INSERT INTO leveling_blacklist_roles (guild_id, role_id)
+                    VALUES (?, ?)
+                """, (guild_id, str_role))
+                await db.commit()
+                return {"success": True}
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    result = run_async(save())
+    if not result.get("success"):
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 @api_bp.route("/leveling/blacklist/<int:entry_id>", methods=["DELETE"])
@@ -754,6 +810,77 @@ def delete_blacklist(entry_id: int):
 
     run_async(delete())
     return jsonify({"success": True})
+
+
+# ── Member Blacklist (Phase D3) ─────────────────────────────────────────────
+
+@api_bp.route("/leveling/member-blacklist", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_member_blacklist_api():
+    guild_id = get_session_guild_id()
+    from utils.level_claims import get_member_blacklist_entries
+    entries = run_async(get_member_blacklist_entries(guild_id))
+    return jsonify({"success": True, "members": entries})
+
+
+@api_bp.route("/leveling/member-blacklist", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def add_member_blacklist_api():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    raw_uid  = data.get("user_id")
+    reason   = str(data.get("reason", "") or "").strip()
+    try:
+        user_id = int(str(raw_uid).strip())
+        if user_id <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Invalid user_id"}), 400
+
+    actor_id = current_user_id()
+    from utils.level_claims import blacklist_member
+    result = run_async(blacklist_member(guild_id, user_id, actor_id=actor_id, reason=reason))
+    if not result.get("success"):
+        status = 409 if result.get("already_blacklisted") else 400
+        return jsonify(result), status
+
+    log_action(guild_id, f"Blacklisted member {user_id}: {reason or 'no reason'}", "leveling")
+    return jsonify(result)
+
+
+@api_bp.route("/leveling/member-blacklist/<int:user_id>", methods=["DELETE"])
+@require_api_permission(LEVEL_ADMIN)
+def remove_member_blacklist_api(user_id: int):
+    guild_id = get_session_guild_id()
+    actor_id = current_user_id()
+    from utils.level_claims import unblacklist_member
+    result = run_async(unblacklist_member(guild_id, user_id, actor_id=actor_id))
+    if not result.get("success"):
+        status = 404 if result.get("not_blacklisted") else 400
+        return jsonify(result), status
+
+    log_action(guild_id, f"Unblacklisted member {user_id}", "leveling")
+    return jsonify(result)
+
+
+@api_bp.route("/leveling/member-blacklist/retry-roles", methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def retry_member_blacklist_roles_api():
+    guild_id = get_session_guild_id()
+    data     = request.json or {}
+    raw_uid  = data.get("user_id")
+    try:
+        user_id = int(str(raw_uid).strip())
+        if user_id <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "Invalid user_id"}), 400
+
+    from utils.level_claims import retry_blacklist_role_removal
+    result = run_async(retry_blacklist_role_removal(guild_id, user_id))
+    if not result.get("success"):
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 # ── Prestige (finalized Prestige system) ────────────────────────────────────
@@ -832,10 +959,22 @@ def add_prestige_role_api():
     try:
         tier = int(data.get("tier"))
     except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "tier must be a number"})
+        return jsonify({"success": False, "error": "tier must be a number"}), 400
     role_id = data.get("role_id")
     if tier <= 0 or not role_id:
-        return jsonify({"success": False, "error": "tier and role_id are required"})
+        return jsonify({"success": False, "error": "tier and role_id are required"}), 400
+
+    async def get_existing_role():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("SELECT role_id FROM prestige_roles WHERE guild_id=? AND tier=?", (guild_id, tier))
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    existing_role_id = run_async(get_existing_role())
+    from dashboard.utils.role_validation import validate_assignable_role
+    valid, err = validate_assignable_role(guild_id, role_id, existing_role_id)
+    if not valid:
+        return jsonify({"success": False, "error": f"Invalid Prestige Role: {err}"}), 400
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -844,7 +983,7 @@ def add_prestige_role_api():
                 VALUES (?, ?, ?)
                 ON CONFLICT(guild_id, tier) DO UPDATE SET
                     role_id = excluded.role_id
-            """, (guild_id, tier, role_id))
+            """, (guild_id, tier, str(role_id)))
             await db.commit()
 
     run_async(save())

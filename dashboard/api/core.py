@@ -20,35 +20,41 @@ from dashboard.api import api_bp
 @require_api_permission(LEVEL_MODERATOR)
 def get_guild_roles():
     guild_id  = get_session_guild_id()
-    bot_token = os.getenv("DISCORD_TOKEN", "")
-    if not bot_token:
-        return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    resp = _req.get(
-        f"https://discord.com/api/v10/guilds/{guild_id}/roles",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
-    )
-    if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
-    roles = resp.json()
+    from dashboard.utils.role_validation import fetch_guild_roles_and_bot_member, compute_role_assignability
+    roles, bot_member, err = fetch_guild_roles_and_bot_member(guild_id)
+    if err:
+        return jsonify({"results": [], "error": err})
+
+    info = compute_role_assignability(guild_id, roles or [], bot_member)
+    enriched_roles = info["roles"]
+
     def sort_key(r):
         if r["id"] == str(guild_id): return (2, 0)
-        if r.get("managed"):         return (1, -r["position"])
-        return (0, -r["position"])
-    roles.sort(key=sort_key)
+        if r.get("managed"):         return (1, -r.get("position", 0))
+        return (0, -r.get("position", 0))
+    enriched_roles.sort(key=sort_key)
+
     # Contract consumed by nero-select.js: ``id`` + ``text``/``name`` (the
-    # display string) + ``color`` (hex or null). ``text`` and ``name`` carry
-    # the same value so the picker is robust to which one it reads; ``color``
-    # is null (not 0) for the default @everyone role so the frontend falls
-    # back to its own neutral dot instead of rendering a black one.
-    return jsonify({"results": [{
-        "id":       r["id"],
-        "name":     r["name"],
-        "text":     r["name"],
-        "color":    f"#{r['color']:06x}" if r["color"] else None,
-        "position": r["position"],
-        "managed":  r.get("managed", False),
-    } for r in roles]})
+    # display string) + ``color`` (hex or null) + assignability metadata.
+    return jsonify({
+        "results": [{
+            "id":                  r["id"],
+            "name":                r["name"],
+            "text":                r["name"],
+            "color":               f"#{r['color']:06x}" if r.get("color") else None,
+            "position":            r.get("position", 0),
+            "managed":             r.get("managed", False),
+            "assignable":          r.get("assignable", True),
+            "unassignable_reason": r.get("unassignable_reason"),
+            "unassignable_label":  r.get("unassignable_label"),
+        } for r in enriched_roles],
+        "bot_top_role": {
+            "id":       info["bot_top_role"]["id"],
+            "name":     info["bot_top_role"].get("name", "Nero"),
+            "position": info["bot_top_role"].get("position", 0),
+        } if info.get("bot_top_role") else None,
+        "has_manage_roles": info.get("has_manage_roles", False),
+    })
 
 
 @api_bp.route("/guild/channels")
@@ -66,27 +72,45 @@ def get_guild_channels():
     if resp.status_code != 200:
         return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
     channels = resp.json()
-    TYPE_ICON = {0:"💬",2:"🔊",4:"📁",5:"📢",10:"🧵",11:"🧵",12:"🧵",13:"🎙️",15:"📋"}
-    TYPE_NAME = {0:"text",2:"voice",4:"category",5:"announcement",13:"stage",15:"forum"}
-    categories = {c["id"]: c["name"] for c in channels if c["type"] == 4}
+    TYPE_ICON = {0: "#", 2: "speaker", 4: "folder", 5: "megaphone", 10: "thread", 11: "thread", 12: "thread", 13: "mic", 15: "forum"}
+    TYPE_NAME = {0: "text", 2: "voice", 4: "category", 5: "announcement", 10: "thread", 11: "thread", 12: "thread", 13: "stage", 15: "forum"}
+
+    categories = {}
+    cat_positions = {}
+    for c in channels:
+        if c.get("type") == 4:
+            cid_str = str(c.get("id"))
+            categories[cid_str] = c.get("name", "Category")
+            cat_positions[cid_str] = c.get("position", 0)
+
     results = []
     for ch in channels:
-        if ch["type"] == 4:
+        if ch.get("type") == 4:
             continue
-        # Same contract as the roles endpoint above: ``id`` +
-        # ``text``/``name`` + ``type_icon``. The icon is a short emoji that
-        # nero-select.js stamps onto the <option> as data-type-icon, so the
-        # picker shows a type glyph next to every channel name.
+        parent_id = str(ch.get("parent_id")) if ch.get("parent_id") else None
+        cat_name = categories.get(parent_id, "") if parent_id else ""
+        cat_pos = cat_positions.get(parent_id, 9999) if parent_id else 9999
+
         results.append({
-            "id":        ch["id"],
-            "name":      ch["name"],
-            "text":      ch["name"],
-            "type_icon": TYPE_ICON.get(ch["type"], "💬"),
-            "category":  categories.get(str(ch.get("parent_id", "")), ""),
-            "type":      TYPE_NAME.get(ch["type"], "text"),
+            "id":                str(ch.get("id")),
+            "name":              ch.get("name", ""),
+            "text":              ch.get("name", ""),
+            "type_icon":         TYPE_ICON.get(ch.get("type", 0), "#"),
+            "category":          cat_name,
+            "category_id":       parent_id,
+            "category_position": cat_pos,
+            "type":              TYPE_NAME.get(ch.get("type", 0), "text"),
+            "raw_type":          ch.get("type", 0),
+            "position":          ch.get("position", 0),
         })
-    type_order = {"text":0,"announcement":1,"voice":2,"stage":3,"forum":4}
-    results.sort(key=lambda c: (type_order.get(c["type"], 9), c["text"].lower()))
+
+    # Sort channels by Discord category position, then channel position, then name
+    results.sort(key=lambda c: (
+        c["category_position"],
+        c["category"].lower() if c["category"] else "zzzz",
+        c["position"],
+        c["text"].lower()
+    ))
     return jsonify({"results": results})
 
 

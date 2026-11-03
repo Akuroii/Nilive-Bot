@@ -304,6 +304,13 @@ def add_twitch_config():
             "TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET aren't set on Railway — "
             "this entry will save but won't check live status until they are.")
 
+    give_role_id = data.get("give_role_id")
+    if give_role_id:
+        from dashboard.utils.role_validation import validate_assignable_role
+        valid, err = validate_assignable_role(guild_id, give_role_id)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid Give Role: {err}"}), 400
+
     async def save():
         await engine.ensure_tables()
         async with aiosqlite.connect(DB_PATH) as db:
@@ -315,7 +322,7 @@ def add_twitch_config():
             """, (guild_id, username, discord_channel_id,
                   data.get("custom_message") or None,
                   mention_role_id, mention_type,
-                  data.get("give_role_id") or None))
+                  give_role_id or None))
             await db.commit()
 
     run_async(save())
@@ -381,6 +388,18 @@ def save_twitch_settings(entry_id: int):
         return jsonify({"success": False, "error": "A Discord channel is required"})
 
     mention_type = _clean_mention_type(data.get("mention_type"))
+    give_role_id = data.get("give_role_id")
+    if give_role_id:
+        async def get_curr_give():
+            async with aiosqlite.connect(DB_PATH) as db:
+                c = await db.execute("SELECT give_role_id FROM twitch_config WHERE id = ? AND guild_id = ?", (entry_id, guild_id))
+                row = await c.fetchone()
+                return row[0] if row else None
+        curr_give = run_async(get_curr_give())
+        from dashboard.utils.role_validation import validate_assignable_role
+        valid, err = validate_assignable_role(guild_id, give_role_id, curr_give)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid Give Role: {err}"}), 400
 
     async def save():
         await engine.ensure_tables()
@@ -393,7 +412,7 @@ def save_twitch_settings(entry_id: int):
                 WHERE id = ? AND guild_id = ?
             """, (discord_channel_id, data.get("custom_message") or None,
                   data.get("mention_role_id") or None, mention_type,
-                  data.get("give_role_id") or None,
+                  give_role_id or None,
                   data.get("role_duration_hours") or None,
                   entry_id, guild_id))
             await db.commit()

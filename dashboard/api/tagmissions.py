@@ -84,6 +84,20 @@ def api_tagmissions_save():
     if reward_type in ("role", "temp_role") and not data.get("reward_role_id"):
         return jsonify({"success": False,
                          "error": "This reward type requires a role."}), 400
+    if reward_type in ("role", "temp_role") and data.get("reward_role_id"):
+        reward_role = data.get("reward_role_id")
+        existing_role = None
+        if row_id:
+            async def get_curr_tm_role():
+                async with aiosqlite.connect(DB_PATH) as db:
+                    c = await db.execute("SELECT reward_role_id FROM tag_missions WHERE id=? AND guild_id=?", (row_id, guild_id))
+                    r = await c.fetchone()
+                    return r[0] if r else None
+            existing_role = run_async(get_curr_tm_role())
+        from dashboard.utils.role_validation import validate_assignable_role
+        valid, err = validate_assignable_role(guild_id, reward_role, existing_role)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid Mission Reward Role: {err}"}), 400
     if reward_type == "temp_role" and not data.get("reward_duration_hours"):
         return jsonify({"success": False,
                          "error": "Temporary roles need a duration in hours."}), 400

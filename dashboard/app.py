@@ -101,10 +101,11 @@ print("Database ready (dashboard process).")
 
 
 _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+_GLOBAL_API_ENDPOINTS = {"api_user_servers", "api_invite_bot"}
 
 
 @app.before_request
-def _enforce_csrf_app_level():
+def _enforce_csrf_and_guild_context():
     if not request.path.startswith("/api/"):
         return
     if request.method not in _CSRF_SAFE_METHODS:
@@ -115,22 +116,38 @@ def _enforce_csrf_app_level():
                 "success": False,
                 "error": "CSRF validation failed. Refresh the page and try again.",
             }), 403
-    # A stale dashboard tab may submit a valid session cookie for a different
-    # server. The optional header is sent by the current dashboard frontend;
-    # requests without it keep the pre-existing API contract.
-    if request.endpoint in {"api_user_servers", "api_invite_bot"}:
+
+    # Guild context consistency check on guild-scoped API endpoints
+    if request.endpoint in _GLOBAL_API_ENDPOINTS:
         return
-    client_gid = request.headers.get("X-Guild-ID")
-    if client_gid is not None:
-        client_gid = client_gid.strip()
-        if (not client_gid.isascii() or not client_gid.isdigit() or len(client_gid) > 19
-                or not 0 < int(client_gid) <= 2**63 - 1):
-            return jsonify({"success": False, "error": "Malformed guild context header",
-                            "code": "MALFORMED_GUILD_CONTEXT"}), 400
-        active_gid = session.get("guild_id")
-        if active_gid is not None and str(active_gid) != str(int(client_gid)):
-            return jsonify({"success": False, "error": "Active server changed in another window.",
-                            "code": "GUILD_CONTEXT_MISMATCH"}), 409
+
+    raw_client_gid = request.headers.get("X-Guild-ID")
+    if raw_client_gid is not None:
+        raw_client_gid = raw_client_gid.strip()
+        if raw_client_gid:
+            try:
+                client_gid = int(raw_client_gid)
+            except (TypeError, ValueError):
+                return jsonify({
+                    "success": False,
+                    "error": "Malformed guild context header",
+                    "code": "MALFORMED_GUILD_CONTEXT"
+                }), 400
+
+            session_gid = session.get("guild_id")
+            try:
+                session_gid_int = int(session_gid) if session_gid else None
+            except (TypeError, ValueError):
+                session_gid_int = None
+
+            if session_gid_int and client_gid != session_gid_int:
+                return jsonify({
+                    "success": False,
+                    "error": "Active server changed in another window.",
+                    "code": "GUILD_CONTEXT_MISMATCH",
+                    "expected_guild_id": client_gid,
+                    "active_guild_id": session_gid,
+                }), 409
 
 
 def render(template, **ctx):
@@ -236,6 +253,7 @@ def inject_environment():
     return {
         "nero_environment": NERO_ENVIRONMENT,
         "is_staging": NERO_ENVIRONMENT == "staging",
+        "is_demo": os.getenv("DASHBOARD_DEMO_LOGIN") == "1",
     }
 
 
@@ -441,15 +459,12 @@ def server_select():
 @app.route("/select-guild/<int:guild_id>", methods=["GET", "POST"])
 @login_required
 def select_guild(guild_id: int):
-    if not 0 < guild_id <= 2**63 - 1:
-        abort(400)
-    if request.method == "POST":
-        import secrets
-        token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
-        expected = session.get("csrf_token", "")
-        if not token or not expected or not secrets.compare_digest(token.encode(), expected.encode()):
-            abort(403)
     user_id = current_user_id()
+
+    if request.method == "POST":
+        token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+        if not token or token != session.get("csrf_token"):
+            abort(403)
 
     async def check():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -474,27 +489,33 @@ def select_guild(guild_id: int):
     if not level:
         abort(403)
 
-    # Preserve old links, but never change the selected guild on a safe
-    # request: an explicit CSRF-protected POST is required to switch.
-    if request.method in ("GET", "HEAD"):
-        return render_template(
-            "context_switch.html", target_guild_id=guild_id,
-            current_guild_id=session.get("guild_id"), next_url="",
-            switch_confirmation=True, **get_current_user_context())
-
     set_session_guild(guild_id)
     session["user_level"] = level
 
     access_token = session.get("access_token", "")
+    guild_name = ""
     if access_token:
         guilds = fetch_discord_guilds(access_token)
         gdata  = next((g for g in guilds if int(g["id"]) == guild_id), None)
-        session["guild_name"] = gdata["name"] if gdata else ""
+        if gdata:
+            guild_name = gdata.get("name", "")
+    if not guild_name:
+        from dashboard.auth import fetch_bot_guilds_full
+        bot_guilds = fetch_bot_guilds_full()
+        bgdata = next((g for g in bot_guilds if int(g["id"]) == guild_id), None)
+        if bgdata:
+            guild_name = bgdata.get("name", "")
 
-    next_url = request.form.get("next", "") if request.method == "POST" else ""
-    if (next_url.startswith("/") and not next_url.startswith("//")
-            and "\\" not in next_url and not any(ord(c) < 32 or ord(c) == 127 for c in next_url)):
+    session["guild_name"] = guild_name or f"Server {guild_id}"
+    guild_map = session.get("guild_name_map", {})
+    guild_map[str(guild_id)] = session["guild_name"]
+    session["guild_name_map"] = guild_map
+
+    # Open-redirect safe return destination
+    next_url = request.args.get("next") or request.form.get("next")
+    if next_url and next_url.startswith("/") and not next_url.startswith("//") and not next_url.startswith("/\\"):
         return redirect(next_url)
+
     return redirect(url_for("index"))
 
 
@@ -507,40 +528,97 @@ def api_user_servers():
         guild_permissions_can_manage_server, fetch_bot_guilds_full,
     )
 
+    user_id = current_user_id()
     access_token = session.get("access_token", "")
-    if not access_token:
-        return jsonify({"servers": []})
+    user_guilds = fetch_discord_guilds(access_token) if access_token else []
+    bot_guilds_list = fetch_bot_guilds_full()
+    bot_guilds = {int(g["id"]): g for g in bot_guilds_list}
 
-    guilds     = fetch_discord_guilds(access_token)
-    # BUGFIX: this used to source name/icon purely from the user's own
-    # OAuth guild list (fetch_discord_guilds) and only use the bot's
-    # guild data for the is_bot_member flag. Confirmed by screenshot
-    # that this OAuth list can carry icon: null for a guild that does
-    # have one set (name and bot-installed status came through fine,
-    # icon specifically didn't) — root cause on Discord's side wasn't
-    # pinned down, so rather than depend on that diagnosis, guilds the
-    # bot is actually in now use the bot's own (bot-token) view of
-    # name/icon instead, which is already proven reliable — same data
-    # /server-select's developer-bypass view already uses. Guilds the
-    # bot ISN'T in still fall back to the OAuth data, same as before.
-    bot_guilds = {int(g["id"]): g for g in fetch_bot_guilds_full()}
+    # Fetch explicit user grants from database
+    async def get_grants():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute("""
+                SELECT guild_id, permission_level FROM dashboard_users
+                WHERE user_id = ? AND enabled = 1
+            """, (user_id,))
+            return {row[0]: row[1] for row in await cursor.fetchall()}
 
+    db_grants = run_async(get_grants())
+    super_admin = is_trusted_super_admin(user_id)
+
+    guild_dict = {}
+
+    # 1. Process user's Discord guilds
+    for g in user_guilds:
+        gid = int(g["id"])
+        can_manage = guild_permissions_can_manage_server(g.get("permissions"))
+        is_bot = gid in bot_guilds
+        grant = db_grants.get(gid) or (LEVEL_OWNER if super_admin and is_bot else None)
+
+        if grant or can_manage:
+            bdata = bot_guilds.get(gid)
+            guild_dict[gid] = {
+                "id": gid,
+                "name": (bdata or g).get("name", "Unknown Server"),
+                "icon": (bdata or g).get("icon"),
+                "is_bot_member": is_bot,
+                "can_manage": can_manage,
+                "has_dashboard_access": grant is not None,
+                "permission_level": grant,
+                "is_owner": bool(g.get("owner", False)),
+            }
+
+    # 2. If super-admin or has grants in bot guilds not in user_guilds list
+    for gid, bdata in bot_guilds.items():
+        if gid not in guild_dict:
+            grant = db_grants.get(gid) or (LEVEL_OWNER if super_admin else None)
+            if grant:
+                guild_dict[gid] = {
+                    "id": gid,
+                    "name": bdata.get("name", "Unknown Server"),
+                    "icon": bdata.get("icon"),
+                    "is_bot_member": True,
+                    "can_manage": False,
+                    "has_dashboard_access": True,
+                    "permission_level": grant,
+                    "is_owner": False,
+                }
+
+    # 3. Include any lingering DB grants for servers not present in OAuth or bot lists
+    for gid, grant in db_grants.items():
+        if gid not in guild_dict:
+            guild_dict[gid] = {
+                "id": gid,
+                "name": f"Server {gid}",
+                "icon": None,
+                "is_bot_member": False,
+                "can_manage": False,
+                "has_dashboard_access": True,
+                "permission_level": grant,
+                "is_owner": False,
+            }
+
+    # 4. Categorize
     servers = []
-    for g in guilds:
-        if not guild_permissions_can_manage_server(g.get("permissions")):
-            continue
-        gid      = int(g["id"])
-        bot_data = bot_guilds.get(gid)
-        servers.append({
-            "id":            gid,
-            # Discord snowflakes exceed JavaScript's exact integer range.
-            "id_str":        str(gid),
-            "name":          (bot_data or g).get("name", "Unknown Server"),
-            "icon":          (bot_data or g).get("icon"),
-            "is_bot_member": bot_data is not None,
-        })
+    for gid, s in guild_dict.items():
+        if s["has_dashboard_access"] and s["is_bot_member"]:
+            s["category"] = "active"
+        elif s["can_manage"] and not s["is_bot_member"]:
+            s["category"] = "invite"
+        elif s["has_dashboard_access"] and not s["is_bot_member"]:
+            s["category"] = "dangling"
+        else:
+            s["category"] = "access_required"
+        servers.append(s)
 
-    servers.sort(key=lambda s: (not s["is_bot_member"], s["name"].lower()))
+    # Cache name map in session for fast lookup
+    guild_map = session.get("guild_name_map", {})
+    for s in servers:
+        guild_map[str(s["id"])] = s["name"]
+    session["guild_name_map"] = guild_map
+
+    category_order = {"active": 0, "invite": 1, "dangling": 2, "access_required": 3}
+    servers.sort(key=lambda s: (category_order.get(s["category"], 99), s["name"].lower()))
     return jsonify({"servers": servers})
 
 
@@ -860,7 +938,10 @@ def health():
 @require_page("moderation_view")
 def moderation():
     guild_id = get_session_guild_id()
+    valid_tabs = {"logs", "punishments", "warnings", "thresholds"}
     tab      = request.args.get("tab", "logs")
+    if tab not in valid_tabs:
+        tab = "logs"
     page     = int(request.args.get("page", 1))
     per_page = 50
 
@@ -1685,6 +1766,23 @@ def config_general():
             await db.commit()
 
     if request.method == "POST":
+        raw_gid = request.form.get("guild_id")
+        ctx     = get_current_user_context()
+        if not raw_gid:
+            return render("config/general.html", settings=request.form.to_dict(), error="Missing guild context in form submission.", **ctx), 400
+        try:
+            form_gid = int(raw_gid)
+        except (TypeError, ValueError):
+            return render("config/general.html", settings=request.form.to_dict(), error="Malformed guild context in form submission.", **ctx), 400
+
+        if form_gid != guild_id:
+            return render("config/general.html",
+                          settings=request.form.to_dict(),
+                          conflict_guild_id=form_gid,
+                          active_guild_id=guild_id,
+                          error="Server context mismatch: Form was submitted for a different server than the active session.",
+                          **ctx), 409
+
         run_async(save_settings(request.form.to_dict()))
         log_action(guild_id, "Updated general settings", "config_general")
         return redirect(url_for("config_general") + "?saved=1")
@@ -1748,6 +1846,39 @@ def config_welcome():
             await db.commit()
 
     if request.method == "POST":
+        raw_gid = request.form.get("guild_id")
+        ctx     = get_current_user_context()
+        if not raw_gid:
+            return render("config/welcome.html", config=request.form.to_dict(), error="Missing guild context in form submission.", **ctx), 400
+        try:
+            form_gid = int(raw_gid)
+        except (TypeError, ValueError):
+            return render("config/welcome.html", config=request.form.to_dict(), error="Malformed guild context in form submission.", **ctx), 400
+
+        if form_gid != guild_id:
+            return render("config/welcome.html",
+                          config=request.form.to_dict(),
+                          conflict_guild_id=form_gid,
+                          active_guild_id=guild_id,
+                          error="Server context mismatch: Form was submitted for a different server than the active session.",
+                          **ctx), 409
+
+        # Server-side delta role assignability validation (WS2)
+        from dashboard.utils.role_validation import validate_assignable_role
+        curr_cfg = run_async(get_config())
+        new_auto = request.form.get("auto_role_id")
+        new_rules = request.form.get("rules_role_id")
+
+        if new_auto and str(new_auto).strip() != str(curr_cfg.get("auto_role_id") or "").strip():
+            valid, err = validate_assignable_role(guild_id, new_auto, curr_cfg.get("auto_role_id"))
+            if not valid:
+                return render("config/welcome.html", config=request.form.to_dict(), error=f"Invalid Auto-Role: {err}", **ctx), 400
+
+        if new_rules and str(new_rules).strip() != str(curr_cfg.get("rules_role_id") or "").strip():
+            valid, err = validate_assignable_role(guild_id, new_rules, curr_cfg.get("rules_role_id"))
+            if not valid:
+                return render("config/welcome.html", config=request.form.to_dict(), error=f"Invalid Rules Gate Role: {err}", **ctx), 400
+
         run_async(save_config(request.form.to_dict()))
         log_action(guild_id, "Updated welcome settings", "config_welcome")
         return redirect(url_for("config_welcome") + "?saved=1")
@@ -1801,6 +1932,39 @@ def config_boost():
             await db.commit()
 
     if request.method == "POST":
+        raw_gid = request.form.get("guild_id")
+        ctx     = get_current_user_context()
+        if not raw_gid:
+            return render("config/boost.html", config=request.form.to_dict(), error="Missing guild context in form submission.", **ctx), 400
+        try:
+            form_gid = int(raw_gid)
+        except (TypeError, ValueError):
+            return render("config/boost.html", config=request.form.to_dict(), error="Malformed guild context in form submission.", **ctx), 400
+
+        if form_gid != guild_id:
+            return render("config/boost.html",
+                          config=request.form.to_dict(),
+                          conflict_guild_id=form_gid,
+                          active_guild_id=guild_id,
+                          error="Server context mismatch: Form was submitted for a different server than the active session.",
+                          **ctx), 409
+
+        # Server-side delta role assignability validation (WS2)
+        from dashboard.utils.role_validation import validate_assignable_role
+        curr_cfg = run_async(get_config())
+        new_b1 = request.form.get("boost1_role_id")
+        new_b2 = request.form.get("boost2_role_id")
+
+        if new_b1 and str(new_b1).strip() != str(curr_cfg.get("boost1_role_id") or "").strip():
+            valid, err = validate_assignable_role(guild_id, new_b1, curr_cfg.get("boost1_role_id"))
+            if not valid:
+                return render("config/boost.html", config=request.form.to_dict(), error=f"Invalid 1st Boost Role: {err}", **ctx), 400
+
+        if new_b2 and str(new_b2).strip() != str(curr_cfg.get("boost2_role_id") or "").strip():
+            valid, err = validate_assignable_role(guild_id, new_b2, curr_cfg.get("boost2_role_id"))
+            if not valid:
+                return render("config/boost.html", config=request.form.to_dict(), error=f"Invalid 2nd Boost Role: {err}", **ctx), 400
+
         run_async(save_config(request.form.to_dict()))
         log_action(guild_id, "Updated boost config", "config_boost")
         return redirect(url_for("config_boost") + "?saved=1")
@@ -2656,6 +2820,35 @@ def config_access():
         if not submitted_token or submitted_token != session.get("csrf_token"):
             abort(403)
 
+        raw_gid = request.form.get("guild_id")
+        ctx     = get_current_user_context()
+        users   = run_async(get_users())
+
+        async def resolve():
+            from utils.discord_user_cache import resolve_users
+            ids = [u[1] for u in users]
+            if not ids:
+                return {}
+            return await resolve_users(guild_id, ids)
+
+        user_map = run_async(resolve())
+
+        if not raw_gid:
+            return render("config/access.html", users=users, user_map=user_map, error="Missing guild context in form submission.", **ctx), 400
+        try:
+            form_gid = int(raw_gid)
+        except (TypeError, ValueError):
+            return render("config/access.html", users=users, user_map=user_map, error="Malformed guild context in form submission.", **ctx), 400
+
+        if form_gid != guild_id:
+            return render("config/access.html",
+                          users=users,
+                          user_map=user_map,
+                          conflict_guild_id=form_gid,
+                          active_guild_id=guild_id,
+                          error="Server context mismatch: Form was submitted for a different server than the active session.",
+                          **ctx), 409
+
         action = request.form.get("action")
         if action == "add":
             uid   = int(request.form.get("user_id", 0))
@@ -2766,6 +2959,17 @@ def api_edit_member():
                             "already-delivered rewards and take the member's "
                             "correction lease. Nothing was changed."),
                     }
+                if xp > old_xp:
+                    from utils.xp_calculator import is_member_blacklisted
+                    if await is_member_blacklisted(guild_id, int(user_id), db=db):
+                        await db.execute("ROLLBACK")
+                        return {
+                            "success": False,
+                            "error": (
+                                "This member is blacklisted from receiving positive "
+                                "XP grants. Unblacklist the member before increasing "
+                                "their XP. Nothing was changed."),
+                        }
                 # Tolerant on purpose: a database that predates the claim tables
                 # has no claims to attribute, and a missing column must not turn a
                 # routine member edit into a 500.
@@ -3104,7 +3308,16 @@ def api_delete_custom_command(cmd_id: int):
 @require_page("reactionroles")
 def api_save_rr_panel():
     guild_id = get_session_guild_id()
-    data     = request.json
+    data     = request.json or {}
+
+    buttons = data.get("buttons", [])
+    from dashboard.utils.role_validation import validate_assignable_role
+    for btn in buttons:
+        btn_role = btn.get("role") or btn.get("role_id")
+        if btn_role:
+            valid, err = validate_assignable_role(guild_id, btn_role)
+            if not valid:
+                return jsonify({"success": False, "error": f"Invalid Button Role ({btn_role}): {err}"}), 400
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
@@ -3119,7 +3332,7 @@ def api_save_rr_panel():
                 data.get("desc"),
                 data.get("color"),
                 data.get("channel"),
-                json.dumps(data.get("buttons", [])),
+                json.dumps(buttons),
                 int(data.get("exclusive", 0)),
                 int(data.get("max_roles", 0)),
                 int(bool(data.get("require_confirmation"))),

@@ -766,6 +766,16 @@ async def reconcile_role_progression(member, guild_id: int, user_id: int, *,
     "blocked": bool}``. Failures are role IDs with an explanatory string.
     """
     await ensure_tables()
+    from utils.xp_calculator import is_member_blacklisted
+    if await is_member_blacklisted(guild_id, user_id):
+        return {
+            "restored": [],
+            "removed": [],
+            "failed": [],
+            "blocked": True,
+            "withheld": [{"reason": "member is blacklisted from leveling progression"}]
+        }
+
     from utils import level_ops as ops
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         cursor = await db.execute("""
@@ -1195,6 +1205,12 @@ async def claim_available(guild_id: int, user_id: int, *,
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            from utils.xp_calculator import is_member_blacklisted
+            if await is_member_blacklisted(guild_id, user_id, db=db):
+                await db.execute("ROLLBACK")
+                result["blocked"] = "Member is blacklisted from claiming Level rewards."
+                return result
+
             # Eligibility is the member's CURRENT level, read in the same write
             # transaction as the reservation: a correction that lowers XP and
             # takes the member's lease cannot race this, and the answer cannot go
@@ -1324,6 +1340,9 @@ async def claim_available(guild_id: int, user_id: int, *,
         try:
             if member is None:
                 raise RuntimeError("Member not available for role delivery")
+            from utils.xp_calculator import is_member_blacklisted
+            if await is_member_blacklisted(guild_id, user_id):
+                raise RuntimeError("Member is blacklisted from receiving Level reward roles")
             await deliver_role(
                 member, row["payload"]["role_id"],
                 f"Level {row['reward_level']} reward")
@@ -1344,6 +1363,22 @@ async def claim_available(guild_id: int, user_id: int, *,
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
+                from utils.xp_calculator import is_member_blacklisted
+                if await is_member_blacklisted(guild_id, user_id, db=db):
+                    # Member was blacklisted while deliver_role was in flight on Discord.
+                    # Compensate: mark claim failed and remove the prohibited Level role.
+                    if await _mark(db, row["id"], token, "failed", "Member blacklisted during delivery"):
+                        result["failed"].append(row["id"])
+                    await db.commit()
+                    try:
+                        guild = getattr(member, "guild", None)
+                        role = guild.get_role(int(row["payload"]["role_id"])) if guild else None
+                        if role is not None and role in getattr(member, "roles", []):
+                            await member.remove_roles(role, reason="[Leveling Blacklist] In-flight race compensation")
+                    except Exception as comp_exc:
+                        print(f"[LEVEL CLAIM] In-flight race role compensation error: {comp_exc}")
+                    continue
+
                 if await _mark(db, row["id"], token, "fulfilled"):
                     result["fulfilled"].append(row["id"])
                     result["delivered_roles"] += 1
@@ -1357,6 +1392,9 @@ async def claim_available(guild_id: int, user_id: int, *,
         try:
             if member is None:
                 raise RuntimeError("Member not available for role delivery")
+            from utils.xp_calculator import is_member_blacklisted
+            if await is_member_blacklisted(guild_id, user_id):
+                raise RuntimeError("Member is blacklisted from receiving Level reward roles")
             await deliver_role(
                 member, int(payload["role_id"]),
                 f"Level {row['reward_level']} reward")
@@ -1377,6 +1415,19 @@ async def claim_available(guild_id: int, user_id: int, *,
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
+                from utils.xp_calculator import is_member_blacklisted
+                if await is_member_blacklisted(guild_id, user_id, db=db):
+                    if await _mark(db, row["id"], token, "failed", "Member blacklisted during delivery"):
+                        result["failed"].append(row["id"])
+                    await db.commit()
+                    try:
+                        guild = getattr(member, "guild", None)
+                        role = guild.get_role(int(payload["role_id"])) if guild else None
+                        if role is not None and role in getattr(member, "roles", []):
+                            await member.remove_roles(role, reason="[Leveling Blacklist] In-flight race compensation")
+                    except Exception:
+                        pass
+                    continue
                 await db.execute(f"SAVEPOINT claim_{row['id']}")
                 try:
                     await _grant_inventory(
@@ -2469,3 +2520,391 @@ async def next_reward_level(guild_id: int, level: int, *,
     ahead = [reward_level for (reward_level, _track, _ref) in identities
              if int(reward_level) > int(level)]
     return min(ahead) if ahead else None
+
+
+# ─── Member Blacklist (Phase D3) ─────────────────────────────────────────────
+
+async def get_member_blacklist_entries(guild_id: int) -> list[dict]:
+    """Retrieve all blacklisted members for a guild."""
+    await ensure_tables()
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute("""
+            SELECT id, user_id, reason, created_by, created_at
+            FROM leveling_member_blacklist
+            WHERE guild_id = ?
+            ORDER BY id DESC
+        """, (int(guild_id),))
+        rows = await cursor.fetchall()
+    return [{
+        "id": r[0],
+        "user_id": r[1],
+        "reason": r[2] or "",
+        "created_by": r[3] or 0,
+        "created_at": str(r[4])
+    } for r in rows]
+
+
+async def _role_owned_outside_level(db, guild_id: int, user_id: int, role_id: int,
+                                    level_claim_ids) -> str | None:
+    """Why another system still justifies `role_id` for this member, else None.
+
+    The blacklist withholds what the Level system granted, nothing else. Recorded
+    ownership (other claims, temp roles, Shop inventory) is read through
+    `_role_granted_elsewhere`, with this member's Level claims for the role
+    excluded; a live timed Shop holding is added. MVP, Booster and Prestige roles
+    carry no per-member record, so a role configured as one of them cannot be
+    attributed to Level and is kept.
+    """
+    ids = sorted(int(c) for c in level_claim_ids)
+    shared = await _role_granted_elsewhere(
+        db, guild_id, user_id, role_id,
+        exclude_claim_id=ids[0], exclude_claim_ids=frozenset(ids))
+    if shared:
+        return shared
+    from utils.timed_ownership import is_expired
+    cursor = await db.execute(
+        "SELECT expires_at FROM timed_holdings "
+        "WHERE guild_id=? AND user_id=? AND role_id=? AND quantity>0",
+        (guild_id, user_id, int(role_id)))
+    for (expires_at,) in await cursor.fetchall():
+        if not is_expired(expires_at):
+            return "a live timed Shop holding"
+    cursor = await db.execute(
+        "SELECT 'the MVP role' FROM mvp_config WHERE guild_id=? AND mvp_role_id=? "
+        "UNION ALL SELECT 'a Booster role' FROM boost_config "
+        "WHERE guild_id=? AND (boost1_role_id=? OR boost2_role_id=?) "
+        "UNION ALL SELECT 'a Booster colour role' FROM boost_color_roles "
+        "WHERE guild_id=? AND role_id=? "
+        "UNION ALL SELECT 'a Prestige role' FROM prestige_roles "
+        "WHERE guild_id=? AND role_id=? LIMIT 1",
+        (guild_id, int(role_id), guild_id, int(role_id), int(role_id),
+         guild_id, int(role_id), guild_id, int(role_id)))
+    row = await cursor.fetchone()
+    return f"configured as {row[0]}" if row else None
+
+
+async def _level_roles_to_withhold(guild_id: int, user_id: int, member) -> tuple[list, list[dict]]:
+    """(roles to remove, roles kept with a reason) for a blacklisted member.
+
+    Provenance first: only a role a fulfilled Level claim granted is Level's to
+    withhold. A role merely configured as a reward may be held through some other
+    system, and the ledger cannot say which.
+    """
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute("""
+            SELECT id, payload_json FROM level_reward_claims
+            WHERE guild_id=? AND user_id=? AND track IN ('role', 'temp_role')
+              AND status='fulfilled'
+        """, (guild_id, user_id))
+        claim_rows = await cursor.fetchall()
+
+        claims_by_role: dict[int, set[int]] = {}
+        for claim_id, payload_raw in claim_rows:
+            try:
+                payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+                if isinstance(payload, dict) and "role_id" in payload:
+                    claims_by_role.setdefault(int(payload["role_id"]), set()).add(int(claim_id))
+            except Exception:
+                continue
+
+        held = {r.id: r for r in getattr(member, "roles", []) or []}
+        to_remove, kept = [], []
+        for rid, claim_ids in claims_by_role.items():
+            if rid not in held:
+                continue
+            other = await _role_owned_outside_level(db, guild_id, user_id, rid, claim_ids)
+            if other:
+                kept.append({"role_id": rid, "reason": other})
+            else:
+                to_remove.append(held[rid])
+    return to_remove, kept
+
+
+async def blacklist_member(guild_id: int, user_id: int, *,
+                           actor_id: int = 0, reason: str = "",
+                           bot = None,
+                           member = None) -> dict:
+    """Blacklist a member from earning XP, claiming rewards, and withhold their Level roles.
+
+    1. Persists the blacklist record immediately.
+    2. Identifies the Level reward roles the member holds (from fulfilled claims).
+    3. Strips only those Level reward roles, preserving unrelated roles (VIP, Mod, etc.).
+    4. Reports successful removals and partial failures (hierarchy/permissions).
+    """
+    await ensure_tables()
+    guild_id = int(guild_id)
+    user_id = int(user_id)
+    if guild_id <= 0 or user_id <= 0:
+        return {"success": False, "error": "Invalid guild_id or user_id"}
+
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute("""
+                SELECT 1 FROM leveling_member_blacklist
+                WHERE guild_id = ? AND user_id = ?
+            """, (guild_id, user_id))
+            if await cursor.fetchone():
+                await db.execute("ROLLBACK")
+                return {"success": False, "already_blacklisted": True,
+                        "error": "Member is already blacklisted"}
+
+            await db.execute("""
+                INSERT INTO leveling_member_blacklist
+                    (guild_id, user_id, reason, created_by, created_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (guild_id, user_id, reason or "", int(actor_id or 0)))
+            await db.execute(
+                "DELETE FROM leveling_blacklist_restores WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id))
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+    # Resolve Discord member & guild if available
+    guild = None
+    if member is not None:
+        guild = getattr(member, "guild", None)
+    elif bot is not None and hasattr(bot, "get_guild"):
+        guild = bot.get_guild(guild_id)
+        if guild is not None and hasattr(guild, "get_member"):
+            member = guild.get_member(user_id)
+
+    removed_roles: list[int] = []
+    failed_removals: list[dict] = []
+    kept_roles: list[dict] = []
+
+    if member is not None and guild is not None:
+        roles_to_remove, kept_roles = await _level_roles_to_withhold(guild_id, user_id, member)
+
+        for role in roles_to_remove:
+            if getattr(guild, "me", None) and getattr(guild.me, "top_role", None):
+                if role >= guild.me.top_role:
+                    failed_removals.append({
+                        "role_id": role.id,
+                        "error": "Role is higher than or equal to bot's top role in hierarchy"
+                    })
+                    continue
+            try:
+                audit_reason = f"[Leveling Blacklist] Member blacklisted: {reason or 'No reason provided'}"
+                await member.remove_roles(role, reason=audit_reason[:512])
+                removed_roles.append(role.id)
+            except Exception as exc:
+                failed_removals.append({
+                    "role_id": role.id,
+                    "error": str(exc)
+                })
+
+    return {
+        "success": True,
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "removed_roles": removed_roles,
+        "failed_removals": failed_removals,
+        "kept_roles": kept_roles,
+        "partial": len(failed_removals) > 0,
+        # The dashboard has no Discord cache; the bot's sweep strips the roles.
+        "role_cleanup": "applied" if (member is not None and guild is not None) else "deferred",
+    }
+
+
+async def unblacklist_member(guild_id: int, user_id: int, *,
+                             actor_id: int = 0,
+                             bot = None,
+                             member = None) -> dict:
+    """Unblacklist a member and restore eligible Level roles via D2 reconciliation.
+
+    1. Removes the blacklist record.
+    2. Runs `restore_reached_level_roles()` on the member to restore eligible Level roles
+       (highest set if exclusive ON, all accumulated if exclusive OFF).
+    3. Preserves all other member roles and claims.
+    """
+    await ensure_tables()
+    guild_id = int(guild_id)
+    user_id = int(user_id)
+
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute("""
+                DELETE FROM leveling_member_blacklist
+                WHERE guild_id = ? AND user_id = ?
+            """, (guild_id, user_id))
+            if cursor.rowcount == 0:
+                await db.execute("ROLLBACK")
+                return {"success": False, "not_blacklisted": True,
+                        "error": "Member is not blacklisted"}
+            await db.execute(
+                "INSERT OR IGNORE INTO leveling_blacklist_restores (guild_id, user_id) VALUES (?, ?)",
+                (guild_id, user_id))
+            await db.commit()
+        except Exception:
+            await db.execute("ROLLBACK")
+            raise
+
+    guild = None
+    if member is not None:
+        guild = getattr(member, "guild", None)
+    elif bot is not None and hasattr(bot, "get_guild"):
+        guild = bot.get_guild(guild_id)
+        if guild is not None and hasattr(guild, "get_member"):
+            member = guild.get_member(user_id)
+
+    reconciled_result = {"restored": [], "removed": [], "failed": [], "blocked": False}
+    restored_now = False
+    if member is not None:
+        reconciled_result = await restore_reached_level_roles(member, guild_id, user_id)
+        restored_now = not reconciled_result.get("failed") or bool(reconciled_result.get("blocked"))
+        if restored_now:
+            await _clear_restore(guild_id, user_id)
+
+    return {
+        "success": True,
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "reconciled": reconciled_result,
+        # Without a Discord member (dashboard call) the bot's sweep restores the roles.
+        "role_restore": "applied" if restored_now else "deferred",
+    }
+
+
+async def retry_blacklist_role_removal(guild_id: int, user_id: int, *,
+                                      bot = None,
+                                      member = None) -> dict:
+    """Retry removing Level reward roles from an active blacklisted member."""
+    await ensure_tables()
+    guild_id = int(guild_id)
+    user_id = int(user_id)
+
+    from utils.xp_calculator import is_member_blacklisted
+    if not await is_member_blacklisted(guild_id, user_id):
+        return {"success": False, "error": "Member is not blacklisted"}
+
+    guild = None
+    if member is not None:
+        guild = getattr(member, "guild", None)
+    elif bot is not None and hasattr(bot, "get_guild"):
+        guild = bot.get_guild(guild_id)
+        if guild is not None and hasattr(guild, "get_member"):
+            member = guild.get_member(user_id)
+
+    if member is None and bot is None:
+        # Dashboard call: no Discord cache here. The bot's sweep applies it.
+        return {"success": True, "deferred": True, "guild_id": guild_id, "user_id": user_id,
+                "removed_roles": [], "failed_removals": [], "kept_roles": [], "partial": False}
+    if member is None:
+        return {"success": False, "error": "Member not found in guild cache"}
+
+    roles_to_remove, kept_roles = await _level_roles_to_withhold(guild_id, user_id, member)
+
+    removed_roles: list[int] = []
+    failed_removals: list[dict] = []
+
+    for role in roles_to_remove:
+        if getattr(guild, "me", None) and getattr(guild.me, "top_role", None):
+            if role >= guild.me.top_role:
+                failed_removals.append({
+                    "role_id": role.id,
+                    "error": "Role is higher than or equal to bot's top role in hierarchy"
+                })
+                continue
+        try:
+            await member.remove_roles(role, reason="[Leveling Blacklist] Retry role cleanup")
+            removed_roles.append(role.id)
+        except Exception as exc:
+            failed_removals.append({
+                "role_id": role.id,
+                "error": str(exc)
+            })
+
+    return {
+        "success": True,
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "removed_roles": removed_roles,
+        "failed_removals": failed_removals,
+        "kept_roles": kept_roles,
+        "partial": len(failed_removals) > 0
+    }
+
+
+async def _clear_restore(guild_id: int, user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        await db.execute(
+            "DELETE FROM leveling_blacklist_restores WHERE guild_id = ? AND user_id = ?",
+            (int(guild_id), int(user_id)))
+        await db.commit()
+
+
+async def _member_or_confirmed_absent(guild, user_id: int):
+    """(member, absence_confirmed). A cache miss alone never proves the member left."""
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member, False
+    fetch = getattr(guild, "fetch_member", None)
+    if fetch is None:
+        return None, False
+    import discord
+    try:
+        return await fetch(user_id), False
+    except discord.NotFound:
+        return None, True
+    except discord.HTTPException:
+        return None, False
+
+
+_sweep_failures_logged: set = set()
+
+
+async def process_blacklist_roles(bot) -> dict:
+    """Bot-side half of the member blacklist (the dashboard only writes the database).
+
+    1. Every blacklisted member who is cached and holds Level-only roles loses them.
+       Roles another system also justifies are kept (see _role_owned_outside_level).
+       The sweep is idempotent, so a role that could not be removed is retried.
+    2. Every queued unblacklist gets its roles restored through
+       restore_reached_level_roles, and is dequeued only once that succeeded, or once
+       the member is confirmed to have left. A guild the bot cannot see yet keeps
+       its rows queued.
+    """
+    summary = {"stripped": 0, "restored": 0}
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        cursor = await db.execute("SELECT guild_id, user_id FROM leveling_member_blacklist")
+        blacklisted = await cursor.fetchall()
+        cursor = await db.execute("SELECT guild_id, user_id FROM leveling_blacklist_restores")
+        queued = await cursor.fetchall()
+
+    for guild_id, user_id in blacklisted:
+        try:
+            guild = bot.get_guild(guild_id)
+            member = guild.get_member(user_id) if guild is not None else None
+            if member is None:
+                continue
+            result = await retry_blacklist_role_removal(guild_id, user_id, bot=bot, member=member)
+            summary["stripped"] += len(result.get("removed_roles", []))
+            if result.get("failed_removals") and (guild_id, user_id) not in _sweep_failures_logged:
+                _sweep_failures_logged.add((guild_id, user_id))
+                print(f"[BLACKLIST SWEEP] guild={guild_id} user={user_id} could not remove "
+                      f"{result['failed_removals']}; retrying every sweep")
+        except Exception as exc:
+            print(f"[BLACKLIST SWEEP] guild={guild_id} user={user_id} removal failed: {exc!r}")
+
+    for guild_id, user_id in queued:
+        try:
+            guild = bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            member, left = await _member_or_confirmed_absent(guild, user_id)
+            if member is None and not left:
+                continue
+            if member is not None:
+                result = await restore_reached_level_roles(member, guild_id, user_id)
+                if result.get("failed") and not result.get("blocked"):
+                    continue
+                summary["restored"] += len(result.get("restored", []))
+            await _clear_restore(guild_id, user_id)
+        except Exception as exc:
+            print(f"[BLACKLIST SWEEP] guild={guild_id} user={user_id} restore failed: {exc!r}")
+    return summary
+

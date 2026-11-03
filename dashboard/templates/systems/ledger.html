@@ -6,7 +6,7 @@
 
 <div class="card">
     <div class="card-header">
-        <div class="card-title" style="margin:0">📒 Transaction Ledger</div>
+        <div class="card-title" style="margin:0"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-book"></use></svg> Transaction Ledger</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <input class="form-input" id="ledger-user" placeholder="Filter by User ID..." style="max-width:200px;">
             <select class="form-input" id="ledger-currency" style="width:130px;">
@@ -15,7 +15,7 @@
                 <option value="diamonds">{{ currency_icon_text(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</option>
                 <option value="xp">XP</option>
             </select>
-            <button class="btn btn-secondary" onclick="loadLedger()">🔄 Refresh</button>
+            <button class="btn btn-secondary" onclick="loadLedger()"><svg class="btn-icon-svg" aria-hidden="true"><use href="#nero-i-refresh"></use></svg> Refresh</button>
         </div>
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">

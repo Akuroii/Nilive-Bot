@@ -6,9 +6,9 @@
 <div style="display:flex;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
     {% for tab, label in [
-        ('items',    '🛒 Items'),
-        ('history',  '📋 Purchases'),
-        ('temproles','⏱️ Temp Roles')
+        ('items',    'Items'),
+        ('history',  'Purchases'),
+        ('temproles','Temp Roles')
     ] %}
     <button onclick="switchTab('{{ tab }}')"
             id="tab-{{ tab }}"
@@ -23,7 +23,7 @@
 <!-- ITEMS TAB -->
 <div id="tab-content-items" class="tab-content">
     <div class="card">
-        <div class="card-title">➕ Add Shop Item</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Shop Item</div>
         <div style="display:grid;
                     grid-template-columns:1fr 1fr;gap:16px;">
             <div class="form-group">
@@ -138,7 +138,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🛒 Shop Items</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-shop"></use></svg> Shop Items</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
@@ -214,7 +214,7 @@
 <div id="tab-content-history" class="tab-content"
      style="display:none;">
     <div class="card">
-        <div class="card-title">📋 Purchase History</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-file"></use></svg> Purchase History</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
@@ -241,7 +241,7 @@
 <div id="tab-content-temproles" class="tab-content"
      style="display:none;">
     <div class="card">
-        <div class="card-title">⏱️ Active Temp Roles</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-clock"></use></svg> Active Temp Roles</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             These roles will be auto-removed when they expire.
         </p>

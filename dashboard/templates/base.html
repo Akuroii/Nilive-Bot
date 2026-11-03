@@ -138,6 +138,9 @@
     .sidebar { width: 260px; }
 }
 </style>
+<!-- The shared embed helper is intentionally parsed before any page-level
+     inline script. Both legacy builders use it, including on HTMX swaps. -->
+<script src="{{ url_for('static', filename='js/embed-composer.js') }}"></script>
 {% block extra_head %}{% endblock %}
 </head>
 <body>

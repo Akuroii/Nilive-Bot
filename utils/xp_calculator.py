@@ -71,6 +71,31 @@ async def is_role_blacklisted(guild_id: int, member_role_ids: list[int]) -> bool
     return any(rid in blacklisted_role_ids for rid in member_role_ids)
 
 
+async def is_member_blacklisted(guild_id: int, user_id: int,
+                                db: aiosqlite.Connection | None = None) -> bool:
+    """Check if a member (guild_id, user_id) is in leveling_member_blacklist."""
+    if not guild_id or not user_id:
+        return False
+    try:
+        if db is not None:
+            cursor = await db.execute("""
+                SELECT 1 FROM leveling_member_blacklist
+                WHERE guild_id = ? AND user_id = ?
+            """, (int(guild_id), int(user_id)))
+            row = await cursor.fetchone()
+            return row is not None
+        async with aiosqlite.connect(DB_PATH, timeout=10) as conn:
+            cursor = await conn.execute("""
+                SELECT 1 FROM leveling_member_blacklist
+                WHERE guild_id = ? AND user_id = ?
+            """, (int(guild_id), int(user_id)))
+            row = await cursor.fetchone()
+            return row is not None
+    except aiosqlite.OperationalError:
+        # Table might not exist yet before migration
+        return False
+
+
 # The effective Leveling config: every setting the engine reads, at the value
 # the engine uses when the guild has no row at all. Values mirror the schema
 # defaults in database.py's leveling_config table (and the .get(...) fallbacks
@@ -137,6 +162,8 @@ async def calculate_message_xp(
     *,
     ignore_message_toggle: bool = False,
 ) -> int:
+    if user_id is not None and await is_member_blacklisted(guild_id, user_id):
+        return 0
     config = await get_leveling_config(guild_id)
     if (not ignore_message_toggle
             and not config.get("message_xp_enabled", 1)):

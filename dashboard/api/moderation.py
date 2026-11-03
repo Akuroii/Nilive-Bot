@@ -98,7 +98,7 @@ def api_mod_edit_reason(log_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 UPDATE moderation_logs
-                SET reason = ?, updated_at = CURRENT_TIMESTAMP
+                SET reason = ?
                 WHERE id = ? AND guild_id = ?
             """, (reason, log_id, guild_id))
             await db.commit()
@@ -291,19 +291,20 @@ def api_mod_quick_action():
                 datetime.datetime.utcnow()
                 + datetime.timedelta(seconds=int(duration))
             ).isoformat()
+        target_display_name = data.get("user_display_name") or f"User {target_id}"
         async with aiosqlite.connect(DB_PATH) as db:
             if action == "warn":
                 await db.execute("""
                     INSERT INTO warnings
-                        (guild_id, user_id, moderator_id, reason, moderator_display_name)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (guild_id, target_id, mod_id, reason, mod_name))
+                        (guild_id, user_id, user_display_name, moderator_id, reason, moderator_display_name)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (guild_id, target_id, target_display_name, mod_id, reason, mod_name))
             await db.execute("""
                 INSERT INTO moderation_logs
-                    (guild_id, user_id, moderator_id, moderator_display_name,
+                    (guild_id, user_id, user_display_name, moderator_id, moderator_display_name,
                      action, reason, source, evidence_url, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'dashboard', ?, ?)
-            """, (guild_id, target_id, mod_id, mod_name,
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'dashboard', ?, ?)
+            """, (guild_id, target_id, target_display_name, mod_id, mod_name,
                   action, reason, evidence, expires))
             await db.commit()
 
@@ -338,7 +339,22 @@ def get_warning_thresholds():
 @require_api_permission(LEVEL_ADMIN)
 def save_warning_threshold():
     guild_id = get_session_guild_id()
-    data     = request.json
+    data     = request.json or {}
+
+    role_id = data.get("role_id")
+    if role_id:
+        existing_role = None
+        if data.get("id"):
+            async def get_curr_wt():
+                async with aiosqlite.connect(DB_PATH) as db:
+                    c = await db.execute("SELECT role_id FROM warning_thresholds WHERE id=? AND guild_id=?", (data["id"], guild_id))
+                    r = await c.fetchone()
+                    return r[0] if r else None
+            existing_role = run_async(get_curr_wt())
+        from dashboard.utils.role_validation import validate_assignable_role
+        valid, err = validate_assignable_role(guild_id, role_id, existing_role)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid Punish Role: {err}"}), 400
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:

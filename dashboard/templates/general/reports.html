@@ -29,11 +29,29 @@
 
 <div class="card">
     <div class="card-header">
-        <div class="card-title" style="margin:0">🚩 Reports</div>
+        <div class="card-title" style="margin:0"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-alert"></use></svg> Reports</div>
         <div style="display:flex;gap:8px;">
-            <a href="/reports?status=open"      class="btn {% if status == 'open' %}btn-primary{% else %}btn-secondary{% endif %}">Open</a>
-            <a href="/reports?status=resolved"  class="btn {% if status == 'resolved' %}btn-primary{% else %}btn-secondary{% endif %}">Resolved</a>
-            <a href="/reports?status=dismissed" class="btn {% if status == 'dismissed' %}btn-primary{% else %}btn-secondary{% endif %}">Dismissed</a>
+            <a href="/reports?status=open"
+               hx-get="/reports?status=open"
+               hx-target="#content-area"
+               hx-select="#content-area"
+               hx-swap="outerHTML"
+               hx-push-url="true"
+               class="btn {% if status == 'open' %}btn-primary{% else %}btn-secondary{% endif %}">Open</a>
+            <a href="/reports?status=resolved"
+               hx-get="/reports?status=resolved"
+               hx-target="#content-area"
+               hx-select="#content-area"
+               hx-swap="outerHTML"
+               hx-push-url="true"
+               class="btn {% if status == 'resolved' %}btn-primary{% else %}btn-secondary{% endif %}">Resolved</a>
+            <a href="/reports?status=dismissed"
+               hx-get="/reports?status=dismissed"
+               hx-target="#content-area"
+               hx-select="#content-area"
+               hx-swap="outerHTML"
+               hx-push-url="true"
+               class="btn {% if status == 'dismissed' %}btn-primary{% else %}btn-secondary{% endif %}">Dismissed</a>
         </div>
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">

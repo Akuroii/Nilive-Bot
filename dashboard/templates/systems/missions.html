@@ -5,7 +5,7 @@
 
 <div style="display:flex;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
-    {% for tab, label in [('missions','🗺️ Missions'),('log','📜 Recent Completions')] %}
+    {% for tab, label in [('missions','Missions'),('log','Recent Completions')] %}
     <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
@@ -18,7 +18,7 @@
 <!-- MISSIONS TAB -->
 <div id="tab-content-missions" class="tab-content">
     <div class="card">
-        <div class="card-title">➕ Add Mission</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Mission</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
             Reward is granted automatically the instant a member crosses the target —
             no separate claim step. Daily/weekly missions reset on their own each period.
@@ -27,11 +27,11 @@
         </p>
         <div class="form-row">
             <div class="form-group">
-                <label class="form-label">Name</label>
+                <label class="form-label" for="ms-name">Name</label>
                 <input class="form-input" id="ms-name" maxlength="100" placeholder="e.g. Chatterbox">
             </div>
             <div class="form-group">
-                <label class="form-label">Type</label>
+                <label class="form-label" for="ms-type">Type</label>
                 <select class="form-input" id="ms-type" onchange="toggleMsChannelField()">
                     <option value="messages">Messages sent</option>
                     <option value="words">Words typed</option>
@@ -40,11 +40,11 @@
                 </select>
             </div>
             <div class="form-group">
-                <label class="form-label">Target</label>
+                <label class="form-label" for="ms-target">Target</label>
                 <input class="form-input" id="ms-target" type="number" min="1" placeholder="e.g. 20">
             </div>
             <div class="form-group">
-                <label class="form-label">Period</label>
+                <label class="form-label" for="ms-period">Period</label>
                 <select class="form-input" id="ms-period">
                     <option value="daily">Daily</option>
                     <option value="weekly">Weekly</option>
@@ -52,7 +52,7 @@
                 </select>
             </div>
             <div class="form-group">
-                <label class="form-label">Reward type</label>
+                <label class="form-label" for="ms-reward-type">Reward type</label>
                 <select class="form-input" id="ms-reward-type" onchange="toggleMsDurationField()">
                     <option value="coins">{{ currency_icon_text(currency.coins.emoji) }} {{ currency.coins.name }}</option>
                     <option value="diamonds">{{ currency_icon_text(currency.diamonds.emoji) }} {{ currency.diamonds.name }}</option>
@@ -63,19 +63,19 @@
                 </select>
             </div>
             <div class="form-group">
-                <label class="form-label" id="ms-reward-value-label">Amount</label>
+                <label class="form-label" id="ms-reward-value-label" for="ms-reward-value">Amount</label>
                 <input class="form-input" id="ms-reward-value" placeholder="e.g. 500, a Role ID, or an item name">
             </div>
             <div class="form-group" id="ms-duration-field" style="display:none;">
-                <label class="form-label">Duration hours (temp_role only)</label>
+                <label class="form-label" for="ms-duration">Duration hours (temp_role only)</label>
                 <input class="form-input" id="ms-duration" type="number" min="1">
             </div>
             <div class="form-group" id="ms-channel-group">
-                <label class="form-label">Channel (optional)</label>
+                <label class="form-label" for="ms-channel">Channel (optional)</label>
                 <select class="nero-channel-picker form-input" id="ms-channel" data-value=""></select>
             </div>
             <div class="form-group" style="grid-column:1/-1;">
-                <label class="form-label">Description (optional)</label>
+                <label class="form-label" for="ms-desc">Description (optional)</label>
                 <input class="form-input" id="ms-desc" maxlength="200"
                        placeholder="Shown to members in /missions — the target and channel are added automatically">
             </div>
@@ -84,7 +84,7 @@
     </div>
 
     <div class="card">
-        <div class="card-title">🗺️ Configured Missions</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-target"></use></svg> Configured Missions</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>
@@ -101,7 +101,7 @@
 <!-- LOG TAB -->
 <div id="tab-content-log" class="tab-content" style="display:none;">
     <div class="card">
-        <div class="card-title">📜 Recent Completions</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-file"></use></svg> Recent Completions</div>
         <div class="table-wrap">
             <table class="table">
                 <thead>

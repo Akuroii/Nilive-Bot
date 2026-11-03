@@ -1,10 +1,22 @@
 {% extends "base.html" %}
-{% block title %}Embed Builder{% endblock %}
+{% block title %}Message & Role Studio{% endblock %}
 {% block content %}
-<span data-page-title="Embed Builder"></span>
+<span data-page-title="Message & Role Studio"></span>
 
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">
-    <div>
+<!-- Mobile Segmented Tabs Switcher (sticky at <=900px) -->
+<div class="eb-mobile-tabs" id="eb-mobile-tabs">
+    <button type="button" class="eb-mobile-tab active" data-tab="editor">
+        <svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-sliders"></use></svg>
+        Edit Message
+    </button>
+    <button type="button" class="eb-mobile-tab" data-tab="preview">
+        <svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-eye"></use></svg>
+        Live Preview <span id="eb-mobile-preview-badge" class="eb-mobile-badge" style="display:none;"></span>
+    </button>
+</div>
+
+<div class="eb-studio-grid">
+    <div class="eb-col-editor" id="eb-col-editor">
         <!-- ── CONTENT ─────────────────────────────────────────── -->
         <div class="card">
             <div class="eb-field-header">
@@ -27,7 +39,7 @@
         <!-- ── ATTACHMENTS ─────────────────────────────────────── -->
         <div class="card">
             <div class="eb-field-header">
-                <span class="eb-field-label">📎 ATTACHMENTS</span>
+                <span class="eb-field-label"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-file"></use></svg> ATTACHMENTS</span>
                 <span class="eb-counter" id="eb-attach-counter">0 / 10 &middot; 0MB / 25MB</span>
             </div>
             <p class="text-muted text-sm" style="margin-bottom:12px;">
@@ -43,16 +55,121 @@
         <!-- ── EMBEDS ───────────────────────────────────────────── -->
         <div class="card">
             <div class="eb-field-header">
-                <span class="eb-field-label">🎨 EMBEDS</span>
+                <span class="eb-field-label"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-sliders"></use></svg> EMBEDS</span>
                 <span class="eb-counter" id="eb-embed-counter">1 / 10</span>
             </div>
             <div id="eb-embeds-list"></div>
             <button type="button" class="btn btn-secondary" id="eb-add-embed" style="margin-top:4px;">+ Add Embed</button>
         </div>
 
+        <!-- ── INTERACTIVE BUTTONS & ROLE ASSIGNMENTS ──────────── -->
+        <div class="card" id="eb-buttons-card">
+            <div class="eb-field-header">
+                <span class="eb-field-label"><svg class="icon-inline" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-roles"></use></svg> INTERACTIVE ROLE COMPONENTS (BUTTONS & SELECT MENUS)</span>
+                <span class="eb-counter" id="eb-comp-counter">0 / 5 Rows</span>
+            </div>
+            <p class="text-muted text-sm" style="margin-bottom:14px;">
+                Attach Discord Action Rows containing interactive role buttons or String Select Menus (dropdowns) to give or remove roles when clicked. Discord allows up to 5 Action Rows per message (1 Select Menu or up to 5 buttons per row).
+            </p>
+
+            <!-- Prominent Component Creation Bar -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                <button type="button" class="btn btn-secondary" id="eb-add-select-btn" style="padding:12px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:600;border:1px dashed var(--border);">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-list"></use></svg>
+                    + Add String Select Menu
+                </button>
+                <button type="button" class="btn btn-secondary" id="eb-toggle-btn-form" style="padding:12px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:600;border:1px dashed var(--border);">
+                    <svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-zap"></use></svg>
+                    + Add Role Button
+                </button>
+            </div>
+
+            <!-- Role Button Creator Form -->
+            <div id="eb-btn-form-wrap" style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;">
+                <div style="font-weight:600;font-size:13px;color:var(--text);margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;">
+                    <span>Create Role Button</span>
+                    <span class="text-muted text-xs">Up to 5 buttons per row</span>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                    <div class="form-group">
+                        <label class="form-label">Button Label</label>
+                        <input class="form-input" id="eb-btn-label" placeholder="e.g. Gamer, Updates...">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Target Role</label>
+                        <select class="nero-role-picker form-input" id="eb-btn-role">
+                            <option value="">Select target role…</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Button Style</label>
+                        <select class="form-input" id="eb-btn-color">
+                            <option value="blurple">Primary (Blurple)</option>
+                            <option value="gray">Secondary (Grey)</option>
+                            <option value="green">Success (Green)</option>
+                            <option value="red">Danger (Red)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Emoji (optional)</label>
+                        <input class="form-input" id="eb-btn-emoji" placeholder="🎮, ⭐, or 🐻‍❄️">
+                    </div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px;">
+                    <div class="form-group">
+                        <label class="form-label">Required Role (optional)</label>
+                        <select class="nero-role-picker form-input" id="eb-btn-required">
+                            <option value="">None (open to all)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Expiry Days (0 = permanent)</label>
+                        <input class="form-input" type="number" id="eb-btn-expiry" value="0" min="0">
+                    </div>
+                </div>
+
+                <label class="form-check" style="margin-top:10px;margin-bottom:12px;">
+                    <input type="checkbox" id="eb-btn-booster"> Boosters only
+                </label>
+
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="button" class="btn btn-primary" id="eb-add-btn">+ Add Button to Row</button>
+                </div>
+            </div>
+
+            <!-- Panel Mode & Settings -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+                <div class="form-group">
+                    <label class="form-label">Panel Mode</label>
+                    <select class="form-input" id="eb-panel-exclusive">
+                        <option value="0">Multiple (pick many roles)</option>
+                        <option value="1">Exclusive (pick one role only)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Max Roles (0 = unlimited)</label>
+                    <input class="form-input" type="number" id="eb-panel-max" value="0" min="0">
+                </div>
+            </div>
+            <label class="form-check" style="margin-bottom:14px;">
+                <input type="checkbox" id="eb-panel-confirm"> Require confirmation before giving/removing roles
+            </label>
+
+            <!-- Configured buttons & select menus list -->
+            <div style="font-weight:600;font-size:13px;color:var(--text);margin-top:14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between;">
+                <span>Configured Action Rows</span>
+                <span id="eb-action-rows-status" class="text-muted text-xs">0 / 5 Rows</span>
+            </div>
+            <div id="eb-buttons-list" style="margin-top:6px;">
+                <span class="text-muted text-sm">No role buttons attached yet.</span>
+            </div>
+            <div id="eb-selects-list" style="margin-top:12px;"></div>
+        </div>
+
         <!-- ── SAVE / SEND ──────────────────────────────────────── -->
         <div class="card">
-            <div class="card-title">💾 Save / Send</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-save"></use></svg> Save & Send Studio</div>
             <div class="form-row">
                 <div class="form-group">
                     <label class="form-label">Send to channel</label>
@@ -60,12 +177,13 @@
                 </div>
                 <div class="form-group">
                     <label class="form-label">Save as template</label>
-                    <input class="form-input" id="eb-template-name" placeholder="e.g. welcome, rules...">
+                    <input class="form-input" id="eb-template-name" placeholder="e.g. welcome, rules, roles...">
                 </div>
             </div>
             <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
-                <button type="button" class="btn btn-primary" id="eb-send-btn">🚀 Send</button>
+                <button type="button" class="btn btn-primary" id="eb-send-btn"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-zap"></use></svg> Send Message to Discord</button>
                 <button type="button" class="btn btn-secondary" id="eb-save-template-btn">Save Template</button>
+                <button type="button" class="btn btn-secondary" id="eb-json-bridge-btn"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-code"></use></svg> JSON Bridge</button>
                 <button type="button" class="btn btn-secondary" id="eb-copy-json-btn">Copy JSON</button>
                 <span style="flex:1;"></span>
                 <button type="button" class="btn btn-icon btn-secondary" id="eb-undo-btn" title="Undo" aria-label="Undo">↩</button>
@@ -85,10 +203,62 @@
     </div>
 
     <!-- ── LIVE PREVIEW ─────────────────────────────────────────── -->
-    <div style="position:sticky;top:80px;">
+    <div class="eb-col-preview" id="eb-col-preview" style="position:sticky;top:80px;">
         <div class="card">
-            <div class="card-title">👁️ Live Preview</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-eye"></use></svg> Live Discord Preview</div>
             <div class="eb-preview-box" id="eb-preview"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ── JSON BRIDGE MODAL (IMPORT / EDIT / EXPORT) ──────────────── -->
+<div id="eb-json-modal" class="eb-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="eb-json-modal-title">
+    <div class="eb-modal-card">
+        <div class="eb-modal-header">
+            <div id="eb-json-modal-title" class="eb-modal-title">
+                <svg viewBox="0 0 24 24" style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-code"></use></svg>
+                JSON Bridge — Import, Edit & Export
+            </div>
+            <button type="button" class="eb-modal-close" id="eb-json-modal-close" aria-label="Close JSON Bridge">&times;</button>
+        </div>
+
+        <div class="eb-json-tabs">
+            <button type="button" class="eb-json-tab active" id="eb-json-tab-import" data-mode="import">Import JSON</button>
+            <button type="button" class="eb-json-tab" id="eb-json-tab-export-studio" data-mode="export-studio">Export Studio JSON</button>
+            <button type="button" class="eb-json-tab" id="eb-json-tab-export-discord" data-mode="export-discord">Export Discord Payload</button>
+        </div>
+
+        <div class="eb-json-body">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+                <span class="text-muted text-sm" id="eb-json-mode-desc">
+                    Paste raw JSON from Discord, Discohook, or Embed Generator.
+                </span>
+                <div style="display:flex;gap:6px;">
+                    <button type="button" class="btn btn-sm btn-secondary" id="eb-json-format-btn">Format JSON</button>
+                    <button type="button" class="btn btn-sm btn-secondary" id="eb-json-copy-clipboard-btn">Copy JSON</button>
+                    <button type="button" class="btn btn-sm btn-secondary" id="eb-json-download-btn">Download .json</button>
+                </div>
+            </div>
+
+            <textarea class="form-input eb-json-code-area" id="eb-json-input" spellcheck="false" placeholder="Paste your message or embed JSON here..."></textarea>
+
+            <div id="eb-json-report" class="eb-json-report">
+                <div class="eb-json-report-header">
+                    <span id="eb-json-status-badge" class="eb-json-badge success">Ready</span>
+                    <span id="eb-json-format-badge" class="eb-json-badge info">Discord Payload</span>
+                    <span class="text-muted text-sm" id="eb-json-summary-text" style="margin-left:auto;"></span>
+                </div>
+                <div id="eb-json-error-box" class="eb-json-error-box" style="display:none;"></div>
+                <div id="eb-json-warning-box" class="eb-json-warning-box" style="display:none;">
+                    <div style="font-weight:600;margin-bottom:4px;color:var(--text);">Compatibility Notices:</div>
+                    <ul id="eb-json-warning-list" class="eb-json-warning-list"></ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="eb-modal-footer">
+            <button type="button" class="btn btn-secondary" id="eb-json-cancel-btn">Cancel</button>
+            <button type="button" class="btn btn-primary" id="eb-json-apply-btn">Apply to Studio Editor</button>
         </div>
     </div>
 </div>
@@ -129,13 +299,30 @@
     <div class="eb-emoji-hover-bar" id="eb-emoji-hover-bar"><span class="eb-emoji-hover-empty">Pick an emoji…</span></div>
 </div>
 
-<script src="{{ url_for('static', filename='js/embed-composer.js') }}"></script>
 <script>
 (function () {
 // (no top-level functions: nothing to re-publish for markup handlers)
 
 (function() {
 'use strict';
+
+// Abort page-level document listeners before an HTMX navigation swaps this
+// editor away; returning to the page creates one fresh set, not duplicates.
+if (window.__NERO_EMBED_BUILDER_CLEANUP__) window.__NERO_EMBED_BUILDER_CLEANUP__();
+const __ebLifecycleController = new AbortController();
+function __ebCleanup() {
+    __ebLifecycleController.abort();
+    if (window.__NERO_EMBED_BUILDER_CLEANUP__ === __ebCleanup) {
+        delete window.__NERO_EMBED_BUILDER_CLEANUP__;
+    }
+}
+window.__NERO_EMBED_BUILDER_CLEANUP__ = __ebCleanup;
+document.body.addEventListener('htmx:beforeSwap', function(event) {
+    if (event.detail && event.detail.shouldSwap === false) return;
+    if (event.detail && event.detail.target && event.detail.target.id !== 'content-area') return;
+    __ebCleanup();
+}, { signal: __ebLifecycleController.signal });
+window.addEventListener('pagehide', __ebCleanup, { once: true, signal: __ebLifecycleController.signal });
 
 // ═══════════════════════════════════════════════════════════════
 // The per-embed editor, the Discord preview renderer, the payload
@@ -160,6 +347,7 @@ const MAX_EMBEDS = 10;
 const MAX_ATTACHMENTS = 10;
 const MAX_ATTACH_TOTAL_BYTES = 25 * 1024 * 1024;
 const MAX_CONTENT = 2000;
+const MAX_BUTTONS = 25;
 
 const blankEmbed = EC.blankEmbed;
 
@@ -167,12 +355,15 @@ let state = {
     content: '',
     embeds: [ blankEmbed() ],
 };
+let buttons = []; // { id, label, role_id, color, emoji, booster_only, required_role_id, expiry_days }
+let selectMenus = []; // { id, placeholder, min_values, max_values, options: [...] }
+let panelConfig = { exclusive: 0, max_roles: 0, require_confirmation: false };
 let attachments = []; // { id, name, type, size, blob }
 let activeEmbed = 0;
 
 // ═══════════════════════════════════════════════════════════════
-// INDEXEDDB DRAFT PERSISTENCE (content/embeds/attachments — client-
-// side only, nothing ever touches the server until Send is pressed)
+// INDEXEDDB DRAFT PERSISTENCE (content/embeds/attachments/buttons —
+// client-side only, nothing touches server until Send is pressed)
 // ═══════════════════════════════════════════════════════════════
 const IDB_NAME = 'nero_embedbuilder';
 const IDB_STORE = 'draft';
@@ -234,12 +425,12 @@ const saveDraft = debounce(async function() {
     await idbSet('composer', {
         content: state.content,
         embeds: state.embeds,
+        buttons: buttons,
+        selectMenus: selectMenus,
+        panelConfig: panelConfig,
         attachments: attachments.map(a => ({
             id: a.id, name: a.name, type: a.type, size: a.size,
             blob: a.blob, source: a.source || 'local',
-            // _previewUrl / _dataUrl / *_pending|error flags are transient
-            // on purpose: a blob: URI dies with the tab, and a base64 copy
-            // would double the draft size for nothing.
         })),
         ts: Date.now(),
     });
@@ -250,17 +441,12 @@ async function restoreDraft() {
     if (!draft) return;
     if (draft.content) state.content = draft.content;
     if (draft.embeds && draft.embeds.length) state.embeds = draft.embeds;
+    if (draft.buttons && Array.isArray(draft.buttons)) buttons = draft.buttons;
+    if (draft.selectMenus && Array.isArray(draft.selectMenus)) selectMenus = draft.selectMenus;
+    if (draft.panelConfig) panelConfig = { ...panelConfig, ...draft.panelConfig };
     if (draft.attachments && draft.attachments.length) {
-        // _previewUrl deliberately NOT restored — blob: URLs never survive
-        // a page reload, so each attachment gets a fresh one lazily on its
-        // next render (see getAttachmentPreviewUrl below). `source`
-        // defaults to 'local' for drafts saved before that field existed.
         attachments = draft.attachments.map(a => {
             const rec = { ...a, source: a.source || 'local' };
-            // Strip transient preview state defensively: a `_previewPending`
-            // that somehow survives (older build, manual storage edit) would
-            // otherwise pin the tile on "preview…" forever with no retry,
-            // because the resolver treats pending as "already in flight".
             rec._previewUrl = null;
             rec._dataUrl = null;
             rec._previewPending = false;
@@ -273,15 +459,20 @@ async function restoreDraft() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// UNDO / REDO (content + embeds only — attachments are large binary
-// blobs and are excluded from the history stack by design)
+// UNDO / REDO (content + embeds + buttons + select menus)
 // ═══════════════════════════════════════════════════════════════
 let history = [];
 let historyIndex = -1;
 let suppressHistory = false;
 
 function snapshotForHistory() {
-    return JSON.stringify({ content: state.content, embeds: state.embeds });
+    return JSON.stringify({
+        content: state.content,
+        embeds: state.embeds,
+        buttons: buttons,
+        selectMenus: selectMenus,
+        panelConfig: panelConfig,
+    });
 }
 
 const pushHistory = debounce(function() {
@@ -300,6 +491,9 @@ function applySnapshot(snap) {
     suppressHistory = true;
     state.content = parsed.content;
     state.embeds = parsed.embeds;
+    buttons = parsed.buttons || [];
+    selectMenus = parsed.selectMenus || [];
+    panelConfig = parsed.panelConfig || { exclusive: 0, max_roles: 0, require_confirmation: false };
     activeEmbed = Math.min(activeEmbed, state.embeds.length - 1);
     renderAll();
     suppressHistory = false;
@@ -515,7 +709,7 @@ document.addEventListener('click', (e) => {
     if (emojiPopover.style.display !== 'none' && !emojiPopover.contains(e.target) && e.target.id !== 'eb-emoji-btn' && !e.target.closest('.eb-emoji-embed-btn')) {
         closeEmojiPopover();
     }
-});
+}, { signal: __ebLifecycleController.signal });
 
 function resetEmojiHoverBar() {
     emojiHoverBar.innerHTML = `<span class="eb-emoji-hover-empty">Pick an emoji…</span>`;
@@ -978,9 +1172,20 @@ async function loadMentionLookups() {
         const roles = (await rolesRes.json()).results || [];
         const channels = (await channelsRes.json()).results || [];
         roleMap = {};
-        roles.forEach(r => { roleMap[r.id] = { name: r.text, color: r.color }; });
+        roles.forEach(r => { roleMap[r.id] = { id: r.id, name: r.text, color: r.color, position: r.position }; });
         channelMap = {};
         channels.forEach(c => { channelMap[c.id] = { name: c.text }; });
+
+        const btnRoleSelect = document.getElementById('eb-btn-role');
+        const reqRoleSelect = document.getElementById('eb-btn-required');
+        if (btnRoleSelect) {
+            btnRoleSelect.innerHTML = '<option value="">Select target role…</option>' +
+                roles.map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.text)}</option>`).join('');
+        }
+        if (reqRoleSelect) {
+            reqRoleSelect.innerHTML = '<option value="">None (open to all)</option>' +
+                roles.map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.text)}</option>`).join('');
+        }
     } catch (e) { /* preview falls back to raw IDs */ }
 }
 
@@ -997,11 +1202,465 @@ function resolveUserAsync(id) {
         .catch(() => userResolving.delete(id));
 }
 
+// ═══════════════════════════════════════════════════════════════
+// BUTTON ROLES & SELECT MENUS (ACTION ROWS)
+// ═══════════════════════════════════════════════════════════════
+const COLOR_TO_STYLE = {
+    blurple: 1, primary: 1,
+    gray: 2, grey: 2, secondary: 2,
+    green: 3, success: 3,
+    red: 4, danger: 4
+};
+const STYLE_TO_CLASS = {
+    1: 'blurple',
+    2: 'gray',
+    3: 'green',
+    4: 'red'
+};
+
+function buildComponentRows(btnList, selList) {
+    btnList = btnList || [];
+    selList = selList || [];
+    const rows = [];
+    for (let i = 0; i < btnList.length; i += 5) {
+        const row = btnList.slice(i, i + 5).map(b => ({
+            label: b.label || 'Role Button',
+            style: COLOR_TO_STYLE[b.color] || 1,
+            emoji: b.emoji || undefined,
+            disabled: false
+        }));
+        rows.push(row);
+    }
+    for (const sm of selList) {
+        rows.push({
+            type: 3,
+            placeholder: sm.placeholder || 'Select a role...',
+            options: sm.options || []
+        });
+    }
+    return rows;
+}
+
+function renderButtonsList() {
+    const listEl = document.getElementById('eb-buttons-list');
+    const counterEl = document.getElementById('eb-btn-counter');
+    const compCounterEl = document.getElementById('eb-comp-counter');
+    const rowsStatusEl = document.getElementById('eb-action-rows-status');
+    const badgeEl = document.getElementById('eb-mobile-preview-badge');
+    if (!listEl) return;
+
+    const btnRows = Math.ceil(buttons.length / 5);
+    const selRows = selectMenus.length;
+    const totalRows = btnRows + selRows;
+
+    if (counterEl) counterEl.textContent = `${buttons.length} / 25`;
+    if (compCounterEl) compCounterEl.textContent = `${totalRows} / 5 Rows (${buttons.length} btn, ${selectMenus.length} sel)`;
+    if (rowsStatusEl) rowsStatusEl.textContent = `${totalRows} / 5 Action Rows used`;
+    if (badgeEl) {
+        if (buttons.length + selectMenus.length > 0) {
+            badgeEl.textContent = `${buttons.length}b / ${selectMenus.length}s`;
+            badgeEl.style.display = 'inline-flex';
+        } else {
+            badgeEl.style.display = 'none';
+        }
+    }
+
+    if (!buttons.length) {
+        listEl.innerHTML = '<span class="text-muted text-sm">No role buttons attached yet.</span>';
+        return;
+    }
+
+    const roleOptionsHtml = Object.values(roleMap).map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.name)}</option>`).join('');
+
+    listEl.innerHTML = buttons.map((b, idx) => {
+        const isConfigured = Boolean(b.role_id && String(b.role_id).trim() !== '');
+        const roleInfo = (isConfigured && roleMap[b.role_id]) ? roleMap[b.role_id] : (isConfigured ? { name: `Role ${b.role_id}` } : null);
+        const badgeCls = STYLE_TO_CLASS[COLOR_TO_STYLE[b.color] || 1] || 'blurple';
+        const emojiHtml = b.emoji ? `<span style="margin-right:4px;">${_ebEsc(b.emoji)}</span>` : '';
+        const tags = [];
+        if (b.booster_only) tags.push('<span class="eb-btn-item-tag">Boosters</span>');
+        if (b.expiry_days > 0) tags.push(`<span class="eb-btn-item-tag">${b.expiry_days}d expiry</span>`);
+        if (b.required_role_id && roleMap[b.required_role_id]) {
+            tags.push(`<span class="eb-btn-item-tag">Req: ${roleMap[b.required_role_id].name}</span>`);
+        }
+
+        const roleTextHtml = isConfigured
+            ? `<span class="eb-btn-item-role">→ @${_ebEsc(roleInfo ? roleInfo.name : b.role_id)}</span>`
+            : `<span class="eb-btn-item-role text-warning" style="color:#eab308;font-weight:600;">⚠️ Unconfigured (Assign Role)</span>`;
+
+        return `
+            <div class="eb-btn-item" data-btn-idx="${idx}" style="flex-wrap:wrap;gap:8px;">
+                <div class="eb-btn-item-info" style="flex:1;min-width:200px;">
+                    <span class="eb-btn-item-badge ${badgeCls}">${emojiHtml}${_ebEsc(b.label || 'Role')}</span>
+                    ${roleTextHtml}
+                    ${tags.join(' ')}
+                </div>
+                <div class="eb-btn-item-actions" style="display:flex;align-items:center;gap:6px;">
+                    <select class="form-input eb-btn-role-quick-select" data-btn-idx="${idx}" style="padding:2px 8px;font-size:12px;height:28px;width:140px;">
+                        <option value="">${isConfigured ? 'Change role…' : 'Assign role…'}</option>
+                        ${roleOptionsHtml}
+                    </select>
+                    <button type="button" class="btn btn-sm btn-danger eb-btn-del" data-del-idx="${idx}" title="Remove button" aria-label="Remove button">✕</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    listEl.querySelectorAll('.eb-btn-role-quick-select').forEach(sel => {
+        sel.addEventListener('change', (e) => {
+            const idx = parseInt(e.target.dataset.btnIdx, 10);
+            if (buttons[idx] && e.target.value) {
+                buttons[idx].role_id = e.target.value;
+                renderAll();
+                saveDraft();
+                pushHistory();
+            }
+        });
+    });
+
+    listEl.querySelectorAll('.eb-btn-del').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const idx = parseInt(btn.dataset.delIdx, 10);
+            buttons.splice(idx, 1);
+            renderAll();
+            saveDraft();
+            pushHistory();
+        });
+    });
+}
+
+function renderSelectsList() {
+    const listEl = document.getElementById('eb-selects-list');
+    const compCounterEl = document.getElementById('eb-comp-counter');
+    const rowsStatusEl = document.getElementById('eb-action-rows-status');
+    if (!listEl) return;
+
+    const btnRows = Math.ceil(buttons.length / 5);
+    const selRows = selectMenus.length;
+    const totalRows = btnRows + selRows;
+    if (compCounterEl) compCounterEl.textContent = `${totalRows} / 5 Rows (${buttons.length} btn, ${selectMenus.length} sel)`;
+    if (rowsStatusEl) rowsStatusEl.textContent = `${totalRows} / 5 Action Rows used`;
+
+    if (!selectMenus.length) {
+        listEl.innerHTML = '';
+        return;
+    }
+
+    listEl.innerHTML = selectMenus.map((sm, sIdx) => {
+        const optionsHtml = (sm.options || []).map((opt, oIdx) => {
+            const isConfigured = Boolean(opt.role_id && String(opt.role_id).trim() !== '');
+            const roleInfo = (isConfigured && roleMap[opt.role_id]) ? roleMap[opt.role_id] : (isConfigured ? { name: `Role ${opt.role_id}` } : null);
+            const emojiHtml = opt.emoji ? `<span style="margin-right:4px;">${_ebEsc(opt.emoji)}</span>` : '';
+            const tags = [];
+            if (opt.booster_only) tags.push('<span class="eb-btn-item-tag">Boosters</span>');
+            if (opt.expiry_days > 0) tags.push(`<span class="eb-btn-item-tag">${opt.expiry_days}d</span>`);
+            if (opt.required_role_id && roleMap[opt.required_role_id]) {
+                tags.push(`<span class="eb-btn-item-tag">Req: ${roleMap[opt.required_role_id].name}</span>`);
+            }
+            const roleTextHtml = isConfigured
+                ? `<span class="eb-select-opt-role">→ @${_ebEsc(roleInfo ? roleInfo.name : opt.role_id)}</span>`
+                : `<span class="eb-select-opt-role text-warning" style="color:#eab308;font-weight:600;">⚠️ Unconfigured</span>`;
+
+            return `
+                <div class="eb-select-opt-item" style="flex-wrap:wrap;gap:8px;">
+                    <div class="eb-select-opt-info" style="flex:1;min-width:180px;">
+                        <span class="eb-select-opt-label">${emojiHtml}${_ebEsc(opt.label || 'Option')}</span>
+                        ${roleTextHtml}
+                        ${opt.description ? `<span class="eb-select-opt-desc">· ${_ebEsc(opt.description)}</span>` : ''}
+                        ${tags.join(' ')}
+                    </div>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                        <select class="form-input eb-opt-role-quick-select" data-sel-idx="${sIdx}" data-opt-idx="${oIdx}" style="padding:2px 8px;font-size:12px;height:26px;width:120px;">
+                            <option value="">${isConfigured ? 'Change…' : 'Assign…'}</option>
+                            ${roleOptionsHtml}
+                        </select>
+                        <button type="button" class="btn btn-sm btn-danger eb-opt-del" data-sel-idx="${sIdx}" data-opt-idx="${oIdx}" title="Remove option" aria-label="Remove option">✕</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        const roleOptionsHtml = Object.values(roleMap).map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.name)}</option>`).join('');
+
+        return `
+            <div class="eb-select-card" data-sel-idx="${sIdx}">
+                <div class="eb-select-card-header">
+                    <div class="eb-select-card-title">
+                        <svg viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-list"></use></svg>
+                        String Select Menu #${sIdx + 1} (${sm.options ? sm.options.length : 0}/25 options)
+                    </div>
+                    <button type="button" class="btn btn-sm btn-danger eb-sel-del" data-sel-idx="${sIdx}" title="Delete select menu" aria-label="Delete select menu">Delete Menu</button>
+                </div>
+
+                <div class="form-group" style="margin-bottom:10px;">
+                    <label class="form-label">Placeholder Text</label>
+                    <input class="form-input eb-sel-placeholder" data-sel-idx="${sIdx}" value="${_ebAttr(sm.placeholder || '')}" placeholder="e.g. Choose a role...">
+                </div>
+
+                <!-- Add Option Form -->
+                <div style="background:rgba(0,0,0,0.15);padding:10px;border-radius:6px;margin-bottom:10px;">
+                    <div style="font-weight:600;font-size:12px;margin-bottom:6px;color:var(--text-muted);">+ Add Role Option</div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px;">
+                        <div>
+                            <label class="form-label" style="font-size:11px;">Option Label</label>
+                            <input class="form-input eb-opt-label-input" id="eb-opt-label-${sIdx}" placeholder="e.g. Red, Europe, Updates...">
+                        </div>
+                        <div>
+                            <label class="form-label" style="font-size:11px;">Target Role</label>
+                            <select class="form-input eb-opt-role-input" id="eb-opt-role-${sIdx}">
+                                <option value="">Select a role…</option>
+                                ${roleOptionsHtml}
+                            </select>
+                        </div>
+                    </div>
+                    <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-bottom:6px;">
+                        <div>
+                            <label class="form-label" style="font-size:11px;">Description (optional)</label>
+                            <input class="form-input eb-opt-desc-input" id="eb-opt-desc-${sIdx}" placeholder="Short explanation...">
+                        </div>
+                        <div>
+                            <label class="form-label" style="font-size:11px;">Emoji (optional)</label>
+                            <input class="form-input eb-opt-emoji-input" id="eb-opt-emoji-${sIdx}" placeholder="e.g. 🔴 or <:name:id>">
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-secondary eb-opt-add-btn" data-sel-idx="${sIdx}">+ Add Option to Menu</button>
+                </div>
+
+                <!-- Configured Options -->
+                <div class="eb-select-opts-list">
+                    ${optionsHtml || '<span class="text-muted text-sm">No options added yet (minimum 1 required).</span>'}
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    // Wire listeners
+    listEl.querySelectorAll('.eb-opt-role-quick-select').forEach(sel => {
+        sel.addEventListener('change', (e) => {
+            const sIdx = parseInt(e.target.dataset.selIdx, 10);
+            const oIdx = parseInt(e.target.dataset.optIdx, 10);
+            if (selectMenus[sIdx] && selectMenus[sIdx].options && selectMenus[sIdx].options[oIdx] && e.target.value) {
+                selectMenus[sIdx].options[oIdx].role_id = e.target.value;
+                renderAll();
+                saveDraft();
+                pushHistory();
+            }
+        });
+    });
+
+    listEl.querySelectorAll('.eb-sel-placeholder').forEach(input => {
+        input.addEventListener('input', (e) => {
+            const sIdx = parseInt(e.target.dataset.selIdx, 10);
+            if (selectMenus[sIdx]) {
+                selectMenus[sIdx].placeholder = e.target.value;
+                renderPreview();
+                saveDraft();
+                pushHistory();
+            }
+        });
+    });
+
+    listEl.querySelectorAll('.eb-sel-del').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const sIdx = parseInt(btn.dataset.selIdx, 10);
+            selectMenus.splice(sIdx, 1);
+            renderAll();
+            saveDraft();
+            pushHistory();
+            showToast('Select menu removed');
+        });
+    });
+
+    listEl.querySelectorAll('.eb-opt-add-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const sIdx = parseInt(btn.dataset.selIdx, 10);
+            const sm = selectMenus[sIdx];
+            if (!sm) return;
+            if (sm.options && sm.options.length >= 25) {
+                showToast('Maximum 25 options allowed per select menu', 'warning');
+                return;
+            }
+            const labelInput = document.getElementById(`eb-opt-label-${sIdx}`);
+            const roleInput = document.getElementById(`eb-opt-role-${sIdx}`);
+            const descInput = document.getElementById(`eb-opt-desc-${sIdx}`);
+            const emojiInput = document.getElementById(`eb-opt-emoji-${sIdx}`);
+
+            const label = (labelInput.value || '').trim();
+            const roleId = roleInput.value;
+            if (!label) {
+                showToast('Option label required', 'warning');
+                labelInput.focus();
+                return;
+            }
+            if (!roleId) {
+                showToast('Please select a target role', 'warning');
+                roleInput.focus();
+                return;
+            }
+
+            sm.options = sm.options || [];
+            sm.options.push({
+                id: 'opt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+                label: label,
+                role_id: roleId,
+                description: (descInput.value || '').trim(),
+                emoji: (emojiInput.value || '').trim() || null,
+                booster_only: false,
+                required_role_id: null,
+                expiry_days: 0
+            });
+
+            labelInput.value = '';
+            descInput.value = '';
+            emojiInput.value = '';
+
+            renderSelectsList();
+            renderPreview();
+            saveDraft();
+            pushHistory();
+            showToast('Role option added to select menu!');
+        });
+    });
+
+    listEl.querySelectorAll('.eb-opt-del').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const sIdx = parseInt(btn.dataset.selIdx, 10);
+            const oIdx = parseInt(btn.dataset.optIdx, 10);
+            if (selectMenus[sIdx] && selectMenus[sIdx].options) {
+                selectMenus[sIdx].options.splice(oIdx, 1);
+                renderSelectsList();
+                renderPreview();
+                saveDraft();
+                pushHistory();
+            }
+        });
+    });
+}
+
+document.getElementById('eb-add-select-btn').addEventListener('click', () => {
+    const btnRows = Math.ceil(buttons.length / 5);
+    const selRows = selectMenus.length;
+    if (btnRows + selRows >= 5) {
+        showToast('Maximum 5 Action Rows per message (buttons and select menus combined)', 'warning');
+        return;
+    }
+    if (selectMenus.length >= 5) {
+        showToast('Maximum 5 select menus per message', 'warning');
+        return;
+    }
+
+    selectMenus.push({
+        id: 'sel_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        placeholder: 'Select a role...',
+        min_values: 1,
+        max_values: 1,
+        options: []
+    });
+
+    renderAll();
+    saveDraft();
+    pushHistory();
+    showToast('Select menu added to message! Add options below.');
+});
+
+document.getElementById('eb-add-btn').addEventListener('click', () => {
+    if (buttons.length >= MAX_BUTTONS) {
+        showToast(`Max ${MAX_BUTTONS} buttons per message`, 'warning');
+        return;
+    }
+    const btnRows = Math.ceil((buttons.length + 1) / 5);
+    const selRows = selectMenus.length;
+    if (btnRows + selRows > 5) {
+        showToast('Adding another button would exceed Discord\'s 5 Action Row limit', 'warning');
+        return;
+    }
+    const labelInput = document.getElementById('eb-btn-label');
+    const roleSelect = document.getElementById('eb-btn-role');
+    const colorSelect = document.getElementById('eb-btn-color');
+    const emojiInput = document.getElementById('eb-btn-emoji');
+    const boosterCheck = document.getElementById('eb-btn-booster');
+    const reqRoleSelect = document.getElementById('eb-btn-required');
+    const expiryInput = document.getElementById('eb-btn-expiry');
+
+    const label = (labelInput.value || '').trim();
+    const roleId = roleSelect.value;
+    if (!label) {
+        showToast('Button label is required', 'warning');
+        labelInput.focus();
+        return;
+    }
+    if (!roleId) {
+        showToast('Please select a target role', 'warning');
+        roleSelect.focus();
+        return;
+    }
+
+    const btnObj = {
+        id: 'btn_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        label: label,
+        role_id: roleId,
+        color: colorSelect.value || 'blurple',
+        emoji: (emojiInput.value || '').trim() || null,
+        booster_only: boosterCheck.checked,
+        required_role_id: reqRoleSelect.value || null,
+        expiry_days: parseInt(expiryInput.value, 10) || 0,
+    };
+
+    buttons.push(btnObj);
+    labelInput.value = '';
+    emojiInput.value = '';
+    boosterCheck.checked = false;
+    expiryInput.value = '0';
+
+    renderAll();
+    saveDraft();
+    pushHistory();
+    showToast('Role button added to message!');
+});
+
+document.getElementById('eb-panel-exclusive').addEventListener('change', (e) => {
+    panelConfig.exclusive = parseInt(e.target.value, 10) || 0;
+    saveDraft();
+    pushHistory();
+});
+document.getElementById('eb-panel-max').addEventListener('input', (e) => {
+    panelConfig.max_roles = parseInt(e.target.value, 10) || 0;
+    saveDraft();
+    pushHistory();
+});
+document.getElementById('eb-panel-confirm').addEventListener('change', (e) => {
+    panelConfig.require_confirmation = !!e.target.checked;
+    saveDraft();
+    pushHistory();
+});
+
+function wireMobileTabs() {
+    const tabs = document.querySelectorAll('.eb-mobile-tab');
+    const editorCol = document.getElementById('eb-col-editor');
+    const previewCol = document.getElementById('eb-col-preview');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            tabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            const target = tab.dataset.tab;
+            if (target === 'editor') {
+                if (editorCol) editorCol.classList.remove('mobile-hidden');
+                if (previewCol) previewCol.classList.add('mobile-hidden');
+            } else {
+                if (previewCol) previewCol.classList.remove('mobile-hidden');
+                if (editorCol) editorCol.classList.add('mobile-hidden');
+            }
+        });
+    });
+}
+wireMobileTabs();
+
 function renderPreview() {
     EC.renderPreview(previewBox, {
         content: state.content,
         embeds: state.embeds,
         attachments: attachments,
+        components: buildComponentRows(buttons, selectMenus),
         botIdentity: botIdentity,
         // The composer must NOT mint its own blob: URLs — this page owns
         // the attachment lifecycle (one cached URL per attachment, revoked
@@ -1040,8 +1699,8 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
     if (!channelId) { showToast('Pick a channel to send to', 'warning'); return; }
 
     const embeds = cleanEmbedsForPayload();
-    if (!state.content && !embeds.length && !attachments.length) {
-        showToast('Nothing to send — add content, an embed, or an attachment', 'warning');
+    if (!state.content && !embeds.length && !attachments.length && !buttons.length) {
+        showToast('Nothing to send — add content, an embed, or buttons', 'warning');
         return;
     }
 
@@ -1051,7 +1710,15 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
         try {
             const fd = new FormData();
             fd.append('channel_id', channelId);
-            fd.append('payload_json', JSON.stringify({ content: state.content || undefined, embeds }));
+            const opNonce = 'n' + Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
+            const payloadObj = {
+                content: state.content || undefined,
+                embeds,
+                buttons: buttons.length ? buttons : undefined,
+                panel_config: buttons.length ? panelConfig : undefined,
+                nonce: opNonce
+            };
+            fd.append('payload_json', JSON.stringify(payloadObj));
             // Only local (not-yet-uploaded) attachments get sent as real
             // multipart files here — 'remote' is reserved for the future
             // Edit flow (an existing Discord attachment kept as-is), which
@@ -1066,7 +1733,7 @@ document.getElementById('eb-send-btn').addEventListener('click', async () => {
             const data = await res.json();
             if (data.success) {
                 setStatus('Sent!', true);
-                showToast('Message sent!');
+                showToast('Message sent to Discord!');
                 // Attachments are one-shot — the Files just got uploaded and
                 // consumed. Clearing them (and revoking their cached preview
                 // URLs) here is what keeps the in-memory state, the visible
@@ -1094,18 +1761,260 @@ document.getElementById('eb-save-template-btn').addEventListener('click', async 
     if (!name) { showToast('Enter a template name', 'warning'); return; }
     const res = await fetch('/api/embedbuilder/template/save', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, content: state.content, embeds: cleanEmbedsForPayload() }),
+        body: JSON.stringify({
+            name,
+            content: state.content,
+            embeds: cleanEmbedsForPayload(),
+            buttons: buttons.length ? buttons : [],
+            panel_config: panelConfig
+        }),
     });
     const data = await res.json();
-    if (data.success) { showToast('Template saved!'); loadTemplateOptions(); }
+    if (data.success) { showToast('Template saved with role buttons!'); loadTemplateOptions(); }
     else showToast(data.error || 'Error saving template', 'error');
 });
 
 document.getElementById('eb-copy-json-btn').addEventListener('click', () => {
-    const payload = { content: state.content, embeds: cleanEmbedsForPayload() };
-    navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
-    showToast('JSON copied!');
+    openJsonBridge('export-studio');
 });
+
+document.getElementById('eb-json-bridge-btn').addEventListener('click', () => {
+    openJsonBridge('import');
+});
+
+// ═══════════════════════════════════════════════════════════════
+// JSON BRIDGE CONTROLLER
+// ═══════════════════════════════════════════════════════════════
+let currentJsonMode = 'import';
+
+function updateJsonReport(res) {
+    const statusBadge = document.getElementById('eb-json-status-badge');
+    const formatBadge = document.getElementById('eb-json-format-badge');
+    const summaryText = document.getElementById('eb-json-summary-text');
+    const errorBox = document.getElementById('eb-json-error-box');
+    const warningBox = document.getElementById('eb-json-warning-box');
+    const warningList = document.getElementById('eb-json-warning-list');
+    const applyBtn = document.getElementById('eb-json-apply-btn');
+
+    if (!res || !res.valid) {
+        if (statusBadge) {
+            statusBadge.className = 'eb-json-badge error';
+            statusBadge.textContent = 'Invalid JSON';
+        }
+        if (formatBadge) {
+            formatBadge.className = 'eb-json-badge';
+            formatBadge.textContent = res ? res.sourceFormat : 'Unknown';
+        }
+        if (summaryText) summaryText.textContent = '';
+        if (errorBox) {
+            errorBox.style.display = 'block';
+            errorBox.textContent = res ? res.error : 'Invalid syntax';
+        }
+        if (warningBox) warningBox.style.display = 'none';
+        if (applyBtn && currentJsonMode === 'import') applyBtn.disabled = true;
+        return;
+    }
+
+    if (errorBox) errorBox.style.display = 'none';
+    if (applyBtn) applyBtn.disabled = false;
+
+    if (res.warnings && res.warnings.length > 0) {
+        if (statusBadge) {
+            statusBadge.className = 'eb-json-badge warning';
+            statusBadge.textContent = `${res.warnings.length} Compatibility Notice${res.warnings.length > 1 ? 's' : ''}`;
+        }
+        if (warningBox) {
+            warningBox.style.display = 'block';
+            if (warningList) {
+                warningList.innerHTML = res.warnings.map(w =>
+                    `<li><strong>${_ebEsc(w.path || 'Notice')}:</strong> ${_ebEsc(w.message)}</li>`
+                ).join('');
+            }
+        }
+    } else {
+        if (statusBadge) {
+            statusBadge.className = 'eb-json-badge success';
+            statusBadge.textContent = 'Valid Payload';
+        }
+        if (warningBox) warningBox.style.display = 'none';
+    }
+
+    if (formatBadge) {
+        formatBadge.className = 'eb-json-badge info';
+        formatBadge.textContent = res.sourceFormat;
+    }
+
+    if (summaryText && res.summary) {
+        summaryText.textContent = `Embeds: ${res.summary.embedCount} · Fields: ${res.summary.fieldCount} · Buttons: ${res.summary.buttonCount} · Total: ${res.summary.totalCharacters} chars`;
+    }
+}
+
+function runJsonValidation() {
+    const inputEl = document.getElementById('eb-json-input');
+    if (!inputEl) return;
+    const text = inputEl.value;
+    if (!text.trim()) {
+        const statusBadge = document.getElementById('eb-json-status-badge');
+        const formatBadge = document.getElementById('eb-json-format-badge');
+        const summaryText = document.getElementById('eb-json-summary-text');
+        const errorBox = document.getElementById('eb-json-error-box');
+        const warningBox = document.getElementById('eb-json-warning-box');
+        if (statusBadge) { statusBadge.className = 'eb-json-badge'; statusBadge.textContent = 'Empty'; }
+        if (formatBadge) { formatBadge.className = 'eb-json-badge'; formatBadge.textContent = '—'; }
+        if (summaryText) summaryText.textContent = '';
+        if (errorBox) errorBox.style.display = 'none';
+        if (warningBox) warningBox.style.display = 'none';
+        return;
+    }
+    const res = EC.parseMessageJson(text);
+    updateJsonReport(res);
+}
+
+function openJsonBridge(mode) {
+    currentJsonMode = mode || 'import';
+    const modal = document.getElementById('eb-json-modal');
+    const inputEl = document.getElementById('eb-json-input');
+    const descEl = document.getElementById('eb-json-mode-desc');
+    const applyBtn = document.getElementById('eb-json-apply-btn');
+
+    document.querySelectorAll('.eb-json-tab').forEach(t => {
+        t.classList.toggle('active', t.getAttribute('data-mode') === currentJsonMode);
+    });
+
+    if (currentJsonMode === 'import') {
+        if (descEl) descEl.textContent = 'Paste raw JSON from Discord, Discohook, or Embed Generator to import into Nero Studio.';
+        if (applyBtn) {
+            applyBtn.style.display = 'inline-flex';
+            applyBtn.textContent = 'Apply to Studio Editor';
+        }
+        if (inputEl && !inputEl.value.trim()) {
+            // If empty, offer a sample or leave empty
+        }
+    } else if (currentJsonMode === 'export-studio') {
+        if (descEl) descEl.textContent = 'Nero Studio JSON carries full state including Discord embeds, button roles, conditional permissions, and expiry.';
+        if (applyBtn) applyBtn.style.display = 'none';
+        const exported = EC.exportStudioJson(state, buttons, selectMenus, panelConfig);
+        if (inputEl) inputEl.value = JSON.stringify(exported, null, 2);
+    } else if (currentJsonMode === 'export-discord') {
+        if (descEl) descEl.textContent = 'Discord / Discohook payload format ready for bot API dispatch or webhook posting.';
+        if (applyBtn) applyBtn.style.display = 'none';
+        const exported = EC.exportDiscordJson(state, buttons, selectMenus, panelConfig);
+        if (inputEl) inputEl.value = JSON.stringify(exported, null, 2);
+    }
+
+    if (modal) modal.style.display = 'flex';
+    runJsonValidation();
+}
+
+function closeJsonBridge() {
+    const modal = document.getElementById('eb-json-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+document.querySelectorAll('.eb-json-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const mode = btn.getAttribute('data-mode');
+        openJsonBridge(mode);
+    });
+});
+
+document.getElementById('eb-json-input').addEventListener('input', runJsonValidation);
+
+document.getElementById('eb-json-format-btn').addEventListener('click', () => {
+    const inputEl = document.getElementById('eb-json-input');
+    if (!inputEl || !inputEl.value.trim()) return;
+    try {
+        const parsed = JSON.parse(inputEl.value);
+        inputEl.value = JSON.stringify(parsed, null, 2);
+        runJsonValidation();
+        showToast('JSON formatted');
+    } catch (e) {
+        showToast('Cannot format: JSON has syntax errors', 'error');
+    }
+});
+
+document.getElementById('eb-json-copy-clipboard-btn').addEventListener('click', () => {
+    const inputEl = document.getElementById('eb-json-input');
+    if (!inputEl || !inputEl.value.trim()) {
+        showToast('Nothing to copy', 'warning');
+        return;
+    }
+    navigator.clipboard.writeText(inputEl.value);
+    showToast('JSON copied to clipboard!');
+});
+
+document.getElementById('eb-json-download-btn').addEventListener('click', () => {
+    const inputEl = document.getElementById('eb-json-input');
+    const content = (inputEl && inputEl.value) || '';
+    if (!content.trim()) {
+        showToast('Nothing to download', 'warning');
+        return;
+    }
+    const blob = new Blob([content], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nero-embed-${currentJsonMode}-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Download started');
+});
+
+document.getElementById('eb-json-apply-btn').addEventListener('click', () => {
+    const inputEl = document.getElementById('eb-json-input');
+    if (!inputEl || !inputEl.value.trim()) {
+        showToast('Paste JSON first', 'warning');
+        return;
+    }
+    const res = EC.parseMessageJson(inputEl.value);
+    if (!res.valid) {
+        showToast('Cannot apply: JSON contains syntax errors', 'error');
+        return;
+    }
+
+    const hasExistingContent = (state.content && state.content.trim()) ||
+        (state.embeds && state.embeds.some(e => EC.embedHasContent(e))) ||
+        (buttons && buttons.length > 0) ||
+        (selectMenus && selectMenus.length > 0);
+
+    const applyParsedState = () => {
+        state.content = res.state.content || '';
+        state.embeds = res.state.embeds && res.state.embeds.length ? res.state.embeds : [blankEmbed()];
+        buttons = Array.isArray(res.state.buttons) ? res.state.buttons : [];
+        selectMenus = Array.isArray(res.state.select_menus) ? res.state.select_menus : (Array.isArray(res.state.selectMenus) ? res.state.selectMenus : []);
+        panelConfig = res.state.panelConfig || { exclusive: 0, max_roles: 0, require_confirmation: false };
+        activeEmbed = 0;
+        renderAll();
+        saveDraft();
+        pushHistory();
+        closeJsonBridge();
+        showToast(`Imported ${res.sourceFormat} successfully!`);
+    };
+
+    if (hasExistingContent) {
+        showConfirm('Replace current studio message and interactive component configuration with this imported JSON?', () => {
+            applyParsedState();
+        });
+    } else {
+        applyParsedState();
+    }
+});
+
+document.getElementById('eb-json-modal-close').addEventListener('click', closeJsonBridge);
+document.getElementById('eb-json-cancel-btn').addEventListener('click', closeJsonBridge);
+
+document.getElementById('eb-json-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'eb-json-modal') closeJsonBridge();
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const modal = document.getElementById('eb-json-modal');
+        if (modal && modal.style.display !== 'none') closeJsonBridge();
+    }
+}, { signal: __ebLifecycleController.signal });
 
 async function loadTemplateOptions() {
     const res = await fetch('/api/embedbuilder/templates');
@@ -1124,6 +2033,9 @@ document.getElementById('eb-load-template-btn').addEventListener('click', async 
     if (!data.template) { showToast('Template not found', 'error'); return; }
     state.content = data.template.content || '';
     state.embeds = EC.embedsFromApi(data.template.embeds);
+    buttons = Array.isArray(data.template.buttons) ? data.template.buttons : [];
+    selectMenus = Array.isArray(data.template.select_menus) ? data.template.select_menus : [];
+    panelConfig = data.template.panel_config || { exclusive: 0, max_roles: 0, require_confirmation: false };
     activeEmbed = 0;
     renderAll();
     saveDraft();
@@ -1143,9 +2055,12 @@ document.getElementById('eb-delete-template-btn').addEventListener('click', () =
 });
 
 document.getElementById('eb-clear-btn').addEventListener('click', () => {
-    showConfirm('Clear the entire composer — content, all embeds, and attachments? This cannot be undone.', async () => {
+    showConfirm('Clear the entire studio — content, all embeds, buttons, select menus, and attachments? This cannot be undone.', async () => {
         revokeAllAttachmentPreviews();
         state = { content: '', embeds: [blankEmbed()] };
+        buttons = [];
+        selectMenus = [];
+        panelConfig = { exclusive: 0, max_roles: 0, require_confirmation: false };
         attachments = [];
         activeEmbed = 0;
         history = [];
@@ -1153,7 +2068,7 @@ document.getElementById('eb-clear-btn').addEventListener('click', () => {
         renderAll();
         await idbClear();
         pushHistory();
-        showToast('Composer cleared', 'info');
+        showToast('Studio cleared', 'info');
     });
 });
 
@@ -1162,7 +2077,19 @@ document.getElementById('eb-redo-btn').addEventListener('click', redo);
 document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
     if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
-});
+}, { signal: __ebLifecycleController.signal });
+
+const toggleBtnEl = document.getElementById('eb-toggle-btn-form');
+if (toggleBtnEl) {
+    toggleBtnEl.addEventListener('click', () => {
+        const wrap = document.getElementById('eb-btn-form-wrap');
+        if (wrap) {
+            wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            const labelInput = document.getElementById('eb-btn-label');
+            if (labelInput) labelInput.focus();
+        }
+    });
+}
 
 // ═══════════════════════════════════════════════════════════════
 // RENDER ALL / INIT
@@ -1172,6 +2099,14 @@ function renderAll() {
     updateContentCounter();
     editor.render();
     renderAttachments();
+    renderButtonsList();
+    renderSelectsList();
+    const exclEl = document.getElementById('eb-panel-exclusive');
+    const maxEl = document.getElementById('eb-panel-max');
+    const confEl = document.getElementById('eb-panel-confirm');
+    if (exclEl) exclEl.value = panelConfig.exclusive ? '1' : '0';
+    if (maxEl) maxEl.value = panelConfig.max_roles || 0;
+    if (confEl) confEl.checked = !!panelConfig.require_confirmation;
     renderPreview();
 }
 

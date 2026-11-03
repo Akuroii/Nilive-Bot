@@ -175,7 +175,21 @@ async def main():
         ("/api/leveling/currency-reward",
          {"level": 5, "currency": "balance", "amount": 7, "audience": "boosters"}),
     ]
-    results = [post(client, csrf, path, body) for path, body in defs]
+    mock_roles = [
+        {"id": str(GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False, "permissions": "0"},
+        {"id": "600", "name": "Level Role 600", "position": 1, "color": 0x10b981, "managed": False, "permissions": "0"},
+        {"id": "601", "name": "Level Role 601", "position": 2, "color": 0x3b82f6, "managed": False, "permissions": "0"},
+        {"id": "700", "name": "Level Role 700", "position": 3, "color": 0xec4899, "managed": False, "permissions": "0"},
+        {"id": "999999999999999999", "name": "Nero", "position": 10, "color": 0x8b5cf6, "managed": True, "permissions": str(0x10000000)},
+    ]
+    mock_bot_member = {
+        "user": {"id": "888888888888888888"},
+        "roles": ["999999999999999999"],
+        "permissions": str(0x10000000),
+    }
+    with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member",
+               return_value=(mock_roles, mock_bot_member, None)):
+        results = [post(client, csrf, path, body) for path, body in defs]
     check("API accepts normal and Boosters-only definitions in all three tracks",
           all(r.status_code == 200 and r.get_json().get("success") for r in results),
           str([r.get_json() for r in results]))

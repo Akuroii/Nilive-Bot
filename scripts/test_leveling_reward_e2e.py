@@ -121,20 +121,36 @@ async def main():
     """, (GUILD, "E2E Cache"))
 
     # Create every supported Leveling reward track through the production API.
-    api_results = [
-        post(client, csrf, "/api/leveling/reward",
-             {"level": 1, "role_id": role_ids[0]}),
-        post(client, csrf, "/api/leveling/reward",
-             {"level": 1, "role_id": role_ids[1]}),
-        post(client, csrf, "/api/leveling/currency-reward",
-             {"level": 1, "currency": "balance", "amount": 250}),
-        post(client, csrf, "/api/leveling/currency-reward",
-             {"level": 1, "currency": "diamonds", "amount": 25}),
-        post(client, csrf, "/api/leveling/shop-reward",
-             {"level": 1, "item_id": product_id, "quantity": 2}),
-        post(client, csrf, "/api/leveling/boost-reward",
-             {"level": 1, "multiplier": 1.5, "duration_hours": 2}),
+    mock_roles = [
+        {"id": str(GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False, "permissions": "0"},
+        {"id": "505", "name": "Level Role 505", "position": 1, "color": 0x10b981, "managed": False, "permissions": "0"},
+        {"id": "506", "name": "Level Role 506", "position": 2, "color": 0x3b82f6, "managed": False, "permissions": "0"},
+        {"id": "510", "name": "Level Role 510", "position": 3, "color": 0x8b5cf6, "managed": False, "permissions": "0"},
+        {"id": "511", "name": "Level Role 511", "position": 4, "color": 0xec4899, "managed": False, "permissions": "0"},
+        {"id": "515", "name": "Level Role 515", "position": 5, "color": 0xf59e0b, "managed": False, "permissions": "0"},
+        {"id": "999999999999999999", "name": "Nero", "position": 100, "color": 0x8b5cf6, "managed": True, "permissions": str(0x10000000)},
     ]
+    mock_bot_member = {
+        "user": {"id": "888888888888888888"},
+        "roles": ["999999999999999999"],
+        "permissions": str(0x10000000),
+    }
+    with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member",
+               return_value=(mock_roles, mock_bot_member, None)):
+        api_results = [
+            post(client, csrf, "/api/leveling/reward",
+                 {"level": 1, "role_id": role_ids[0]}),
+            post(client, csrf, "/api/leveling/reward",
+                 {"level": 1, "role_id": role_ids[1]}),
+            post(client, csrf, "/api/leveling/currency-reward",
+                 {"level": 1, "currency": "balance", "amount": 250}),
+            post(client, csrf, "/api/leveling/currency-reward",
+                 {"level": 1, "currency": "diamonds", "amount": 25}),
+            post(client, csrf, "/api/leveling/shop-reward",
+                 {"level": 1, "item_id": product_id, "quantity": 2}),
+            post(client, csrf, "/api/leveling/boost-reward",
+                 {"level": 1, "multiplier": 1.5, "duration_hours": 2}),
+        ]
     check("Dashboard API accepts role, currency, product, and XP-boost definitions",
           all(response.status_code == 200 and response.get_json().get("success")
               for response in api_results),
@@ -187,20 +203,22 @@ async def main():
     shop_row_id = next(r["id"] for r in shop_list["rewards"]
                        if r["level"] == 1 and r["item_id"] == product_id)
     boost_row_id = boost_list[0]["id"]
-    update_results = [
-        delete(client, csrf, f"/api/leveling/reward/{role_row_id}"),
-        post(client, csrf, "/api/leveling/reward",
-             {"level": 1, "role_id": 515}),
-        delete(client, csrf, f"/api/leveling/currency-reward/{balance_row_id}"),
-        post(client, csrf, "/api/leveling/currency-reward",
-             {"level": 1, "currency": "balance", "amount": 300}),
-        delete(client, csrf, f"/api/leveling/shop-reward/{shop_row_id}"),
-        post(client, csrf, "/api/leveling/shop-reward",
-             {"level": 1, "item_id": product_id, "quantity": 3}),
-        delete(client, csrf, f"/api/leveling/boost-reward/{boost_row_id}"),
-        post(client, csrf, "/api/leveling/boost-reward",
-             {"level": 1, "multiplier": 1.75, "duration_hours": 2}),
-    ]
+    with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member",
+               return_value=(mock_roles, mock_bot_member, None)):
+        update_results = [
+            delete(client, csrf, f"/api/leveling/reward/{role_row_id}"),
+            post(client, csrf, "/api/leveling/reward",
+                 {"level": 1, "role_id": 515}),
+            delete(client, csrf, f"/api/leveling/currency-reward/{balance_row_id}"),
+            post(client, csrf, "/api/leveling/currency-reward",
+                 {"level": 1, "currency": "balance", "amount": 300}),
+            delete(client, csrf, f"/api/leveling/shop-reward/{shop_row_id}"),
+            post(client, csrf, "/api/leveling/shop-reward",
+                 {"level": 1, "item_id": product_id, "quantity": 3}),
+            delete(client, csrf, f"/api/leveling/boost-reward/{boost_row_id}"),
+            post(client, csrf, "/api/leveling/boost-reward",
+                 {"level": 1, "multiplier": 1.75, "duration_hours": 2}),
+        ]
     role_defs = rows(
         "SELECT level,role_id FROM leveling_rewards WHERE guild_id=? ORDER BY role_id",
         (GUILD,))
@@ -301,12 +319,14 @@ async def main():
     # replacement setting without coupling those role claims to other tracks.
     config_saved = post(client, csrf, "/api/leveling/config",
                         {"remove_old_reward_role": 1})
-    higher_defs = [
-        post(client, csrf, "/api/leveling/reward",
-             {"level": 2, "role_id": role_ids[2]}),
-        post(client, csrf, "/api/leveling/reward",
-             {"level": 2, "role_id": role_ids[3]}),
-    ]
+    with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member",
+               return_value=(mock_roles, mock_bot_member, None)):
+        higher_defs = [
+            post(client, csrf, "/api/leveling/reward",
+                 {"level": 2, "role_id": role_ids[2]}),
+            post(client, csrf, "/api/leveling/reward",
+                 {"level": 2, "role_id": role_ids[3]}),
+        ]
     check("Dashboard config and same-Level higher role definitions are saved",
           config_saved.get_json().get("success") is True
           and all(response.get_json().get("success") for response in higher_defs)

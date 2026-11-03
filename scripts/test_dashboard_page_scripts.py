@@ -140,9 +140,20 @@ def analyse_script(script: str):
     if not node:
         return None
     acorn = next((candidate for candidate in (
-        Path("/tmp/neuro/node_modules/acorn"),
         ROOT / "node_modules" / "acorn",
+        Path.cwd() / "node_modules" / "acorn",
+        Path(__file__).resolve().parent.parent / "node_modules" / "acorn",
+        Path("/tmp/node_modules/acorn"),
+        Path("/tmp/neuro/node_modules/acorn"),
     ) if candidate.exists()), None)
+    if acorn is None:
+        try:
+            res = subprocess.run([node, "-e", "console.log(require.resolve('acorn'))"],
+                                 capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                acorn = Path(res.stdout.strip())
+        except Exception:
+            pass
     if acorn is None:
         return None
     probe = """

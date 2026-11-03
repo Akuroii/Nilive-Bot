@@ -347,8 +347,8 @@ window.EmbedComposer = (function () {
                 <span class="eb-embed-title-preview">Embed ${i + 1}${e.title ? ' — ' + esc(e.title) : ''}</span>
                 ${opts.hideActions ? '' : `
                 <div class="eb-embed-actions">
-                    <button type="button" class="btn btn-sm btn-secondary" data-dup="${i}" title="Duplicate">⧉</button>
-                    <button type="button" class="btn btn-sm btn-danger" data-del="${i}" title="Delete">🗑️</button>
+                    <button type="button" class="btn btn-sm btn-secondary" data-dup="${i}" title="Duplicate" aria-label="Duplicate embed"><svg style="width:12px;height:12px;vertical-align:-1px;fill:none;stroke:currentColor;stroke-width:2;" aria-hidden="true"><use href="#nero-i-folder"></use></svg></button>
+                    <button type="button" class="btn btn-sm btn-danger" data-del="${i}" title="Delete" aria-label="Delete embed"><svg style="width:12px;height:12px;vertical-align:-1px;fill:none;stroke:currentColor;stroke-width:2;" aria-hidden="true"><use href="#nero-i-trash"></use></svg></button>
                 </div>`}
             </div>
             <div class="eb-embed-body">
@@ -363,6 +363,14 @@ window.EmbedComposer = (function () {
                             <input type="color" data-field="color" data-idx="${i}" value="${attr(e.color || '#7c5cbf')}"
                                 style="width:42px;height:36px;border-radius:8px;border:1px solid var(--border);background:transparent;cursor:pointer;padding:2px;">
                             <input class="form-input" data-field="color-hex" data-idx="${i}" value="${attr(e.color || '#7c5cbf')}" style="flex:1;">
+                        </div>
+                        <div class="eb-color-swatches" aria-label="Preset color swatches">
+                            <button type="button" class="eb-color-swatch" data-swatch="#5865F2" data-idx="${i}" style="background:#5865F2;" title="Blurple"></button>
+                            <button type="button" class="eb-color-swatch" data-swatch="#57F287" data-idx="${i}" style="background:#57F287;" title="Green"></button>
+                            <button type="button" class="eb-color-swatch" data-swatch="#FEE75C" data-idx="${i}" style="background:#FEE75C;" title="Yellow"></button>
+                            <button type="button" class="eb-color-swatch" data-swatch="#EB459E" data-idx="${i}" style="background:#EB459E;" title="Fuchsia"></button>
+                            <button type="button" class="eb-color-swatch" data-swatch="#ED4245" data-idx="${i}" style="background:#ED4245;" title="Red"></button>
+                            <button type="button" class="eb-color-swatch" data-swatch="#7C5CBF" data-idx="${i}" style="background:#7C5CBF;" title="Purple"></button>
                         </div>
                     </div>
                     <div class="form-group">
@@ -422,6 +430,22 @@ window.EmbedComposer = (function () {
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     opts.onDelete && opts.onDelete(parseInt(btn.dataset.del));
+                }));
+
+            listEl.querySelectorAll('[data-swatch]').forEach(btn =>
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const i = parseInt(btn.dataset.idx, 10);
+                    const color = btn.dataset.swatch;
+                    const embeds = opts.getEmbeds();
+                    if (embeds[i]) {
+                        embeds[i].color = color;
+                        const picker = listEl.querySelector(`[data-field="color"][data-idx="${i}"]`);
+                        const hex = listEl.querySelector(`[data-field="color-hex"][data-idx="${i}"]`);
+                        if (picker) picker.value = color;
+                        if (hex) hex.value = color;
+                        opts.onChange && opts.onChange();
+                    }
                 }));
 
             listEl.querySelectorAll('[data-field]').forEach(el => {
@@ -594,6 +618,10 @@ window.EmbedComposer = (function () {
         escaped = escaped.replace(/\*([\s\S]+?)\*/g, '<em>$1</em>');
         escaped = escaped.replace(/~~([\s\S]+?)~~/g, '<s>$1</s>');
 
+        // Markdown links: [label](https://...) and <https://...>
+        escaped = escaped.replace(/\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="eb-link">$1</a>');
+        escaped = escaped.replace(/&lt;(https?:\/\/[^\s&]+)&gt;/g, '<a href="$1" target="_blank" rel="noopener noreferrer" class="eb-link">$1</a>');
+
         // Standalone unicode emoji get the large-size treatment too.
         if (isEmojiOnly) {
             escaped = escaped.replace(EMOJI_UNICODE_RE, (m) => `<span>${m}</span>`);
@@ -619,7 +647,7 @@ window.EmbedComposer = (function () {
     // 2 secondary, 3 success, 4 danger). Emojis may be unicode,
     // <:name:id> tokens, or url-only strings.
     const COMP_STYLE_CLASS = { 1: 'eb-cbtn-primary', 2: 'eb-cbtn-secondary',
-                               3: 'eb-cbtn-success', 4: 'eb-cbtn-danger' };
+                               3: 'eb-cbtn-success', 4: 'eb-cbtn-danger', 5: 'eb-cbtn-link' };
 
     function emojiDisplay(emoji) {
         if (!emoji) return '';
@@ -635,15 +663,41 @@ window.EmbedComposer = (function () {
 
     function componentRowsHtml(rows) {
         if (!rows || !rows.length) return '';
-        return rows.map(row => `
-            <div class="eb-comp-row">
-                ${(row || []).map(b => {
-                    const cls = COMP_STYLE_CLASS[b.style] || 'eb-cbtn-secondary';
-                    const dis = b.disabled ? ' disabled' : '';
-                    const em = b.emoji ? ` <span class="eb-cbtn-emoji">${emojiDisplay(b.emoji)}</span>` : '';
-                    return `<button type="button" class="eb-comp-btn ${cls}${dis}" tabindex="-1">${esc(b.label)}${em}</button>`;
-                }).join('')}
-            </div>`).join('');
+        return rows.map(row => {
+            if (row && !Array.isArray(row) && (row.type === 3 || row.options)) {
+                return `
+                    <div class="eb-comp-row">
+                        <div class="eb-comp-select">
+                            <div class="eb-comp-select-placeholder">
+                                <span>${esc(row.placeholder || 'Select a role...')}</span>
+                                <svg class="eb-comp-select-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </div>
+                        </div>
+                    </div>`;
+            }
+            if (Array.isArray(row) && row.length === 1 && (row[0].type === 3 || row[0].options)) {
+                const s = row[0];
+                return `
+                    <div class="eb-comp-row">
+                        <div class="eb-comp-select">
+                            <div class="eb-comp-select-placeholder">
+                                <span>${esc(s.placeholder || 'Select a role...')}</span>
+                                <svg class="eb-comp-select-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            </div>
+                        </div>
+                    </div>`;
+            }
+            const btnItems = Array.isArray(row) ? row : [];
+            return `
+                <div class="eb-comp-row">
+                    ${btnItems.map(b => {
+                        const cls = COMP_STYLE_CLASS[b.style] || 'eb-cbtn-secondary';
+                        const dis = b.disabled ? ' disabled' : '';
+                        const em = b.emoji ? ` <span class="eb-cbtn-emoji">${emojiDisplay(b.emoji)}</span>` : '';
+                        return `<button type="button" class="eb-comp-btn ${cls}${dis}" tabindex="-1">${esc(b.label || 'Button')}${em}</button>`;
+                    }).join('')}
+                </div>`;
+        }).join('');
     }
 
     function renderPreview(box, data) {
@@ -695,12 +749,12 @@ window.EmbedComposer = (function () {
                     // slot visible as a pending badge instead of dropping it,
                     // and we surface the real reason once it is known.
                     if (a._previewPending) {
-                        return `<span class="badge eb-pe-pending" data-preview-state="pending">⏳ ${esc(a.name)}</span>`;
+                        return `<span class="badge eb-pe-pending" data-preview-state="pending"><svg style="width:11px;height:11px;vertical-align:-1px;fill:none;stroke:currentColor;stroke-width:2;" aria-hidden="true"><use href="#nero-i-clock"></use></svg> ${esc(a.name)}</span>`;
                     }
                     if (a._previewError) {
-                        return `<span class="badge eb-pe-pending" data-preview-state="${attr(a._previewError)}" title="${attr(NO_PREVIEW_HINT[a._previewError] || '')}">🚫 ${esc(a.name)}</span>`;
+                        return `<span class="badge eb-pe-pending" data-preview-state="${attr(a._previewError)}" title="${attr(NO_PREVIEW_HINT[a._previewError] || '')}"><svg style="width:11px;height:11px;vertical-align:-1px;fill:none;stroke:currentColor;stroke-width:2;" aria-hidden="true"><use href="#nero-i-slash"></use></svg> ${esc(a.name)}</span>`;
                     }
-                    return `<span class="badge">📄 ${esc(a.name)}</span>`;
+                    return `<span class="badge"><svg style="width:11px;height:11px;vertical-align:-1px;fill:none;stroke:currentColor;stroke-width:2;" aria-hidden="true"><use href="#nero-i-file"></use></svg> ${esc(a.name)}</span>`;
                 } catch (e) {
                     // Never let one bad attachment abort the whole preview.
                     console.error('[embed-composer] preview failed for attachment', a && a.name, e);
@@ -709,7 +763,7 @@ window.EmbedComposer = (function () {
             }).join('');
             html += imgHtml;
             const nonImg = attachments.filter(a => !a.type || !a.type.startsWith('image/'));
-            if (nonImg.length) html += nonImg.map(a => `<span class="badge">📄 ${esc(a.name)}</span>`).join('');
+            if (nonImg.length) html += nonImg.map(a => `<span class="badge"><svg style="width:11px;height:11px;vertical-align:-1px;fill:none;stroke:currentColor;stroke-width:2;" aria-hidden="true"><use href="#nero-i-file"></use></svg> ${esc(a.name)}</span>`).join('');
             html += `</div>`;
         }
 
@@ -717,7 +771,12 @@ window.EmbedComposer = (function () {
         for (const e of nonEmpty) {
             html += `<div class="eb-preview-embed" style="border-left-color:${attr(e.color || '#7c5cbf')};">`;
             if (e.author) html += `<div class="eb-pe-author">${esc(e.author)}</div>`;
-            if (e.title) html += `<div class="eb-pe-title">${esc(e.title)}</div>`;
+            if (e.title) {
+                const titleHtml = e.url
+                    ? `<a href="${attr(e.url)}" target="_blank" rel="noopener noreferrer" class="eb-pe-title-link">${esc(e.title)}</a>`
+                    : esc(e.title);
+                html += `<div class="eb-pe-title">${titleHtml}</div>`;
+            }
             if (e.description) html += `<div class="eb-pe-desc">${renderDiscordMarkup(e.description, { lookups }).html}</div>`;
             if (e.fields && e.fields.length) {
                 html += `<div class="eb-pe-fields">`;
@@ -728,8 +787,8 @@ window.EmbedComposer = (function () {
                 </div>`).join('');
                 html += `</div>`;
             }
-            if (e.image) html += `<img class="eb-pe-image" src="${attr(e.image)}" alt="">`;
-            if (e.thumbnail) html += `<img class="eb-pe-thumb" src="${attr(e.thumbnail)}" alt="">`;
+            if (e.image) html += `<img class="eb-pe-image" src="${attr(e.image)}" alt="" onerror="this.style.display='none'">`;
+            if (e.thumbnail) html += `<img class="eb-pe-thumb" src="${attr(e.thumbnail)}" alt="" onerror="this.style.display='none'">`;
             if (e.footer) html += `<div class="eb-pe-footer">${esc(e.footer)}</div>`;
             html += `</div>`;
         }
@@ -796,6 +855,541 @@ window.EmbedComposer = (function () {
         return out.length ? out : [blankEmbed()];
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // JSON BRIDGE — IMPORT / VALIDATE / EXPORT
+    // ═══════════════════════════════════════════════════════════════
+
+    function parseJsonWithLocation(str) {
+        try {
+            const data = JSON.parse(str);
+            return { ok: true, data: data };
+        } catch (err) {
+            let line = 1, col = 1;
+            const posMatch = /position\s+(\d+)/i.exec(err.message);
+            const lineColMatch = /line\s+(\d+)\s+column\s+(\d+)/i.exec(err.message);
+            if (lineColMatch) {
+                line = parseInt(lineColMatch[1], 10);
+                col = parseInt(lineColMatch[2], 10);
+            } else if (posMatch) {
+                const pos = parseInt(posMatch[1], 10);
+                const lines = str.slice(0, pos).split('\n');
+                line = lines.length;
+                col = lines[lines.length - 1].length + 1;
+            } else {
+                // Try to find the error position by iterative character parsing
+                for (let i = 1; i <= str.length; i++) {
+                    try {
+                        JSON.parse(str.slice(0, i));
+                    } catch (subErr) {
+                        // Keep going until the first fatal parse difference
+                    }
+                }
+            }
+            return { ok: false, error: err.message, line: line, col: col };
+        }
+    }
+
+    function parseMessageJson(rawText, options) {
+        options = options || {};
+
+        if (!rawText || !rawText.trim()) {
+            return {
+                valid: false,
+                error: "JSON input is empty. Paste a message or embed JSON object.",
+                line: null, col: null,
+                sourceFormat: "Unknown",
+                summary: { contentLength: 0, embedCount: 0, fieldCount: 0, buttonCount: 0, totalCharacters: 0 },
+                warnings: [],
+                state: null
+            };
+        }
+
+        const parsedResult = parseJsonWithLocation(rawText.trim());
+        if (!parsedResult.ok) {
+            return {
+                valid: false,
+                error: `Invalid JSON syntax: ${parsedResult.error} (Line ${parsedResult.line}, Col ${parsedResult.col})`,
+                line: parsedResult.line,
+                col: parsedResult.col,
+                sourceFormat: "Invalid",
+                summary: { contentLength: 0, embedCount: 0, fieldCount: 0, buttonCount: 0, totalCharacters: 0 },
+                warnings: [],
+                state: null
+            };
+        }
+
+        let raw = parsedResult.data;
+        let sourceFormat = "Discord / Embed Generator Message";
+        const warnings = [];
+
+        // 1. Root structure normalization
+        if (Array.isArray(raw)) {
+            // Top-level array of embeds
+            raw = { embeds: raw };
+            sourceFormat = "Array of Embeds";
+        } else if (raw && typeof raw === 'object') {
+            // Discohook multi-message format
+            if (Array.isArray(raw.messages) && raw.messages.length > 0) {
+                sourceFormat = "Discohook Multi-Message Export";
+                const firstMsg = raw.messages[0];
+                const msgCount = raw.messages.length;
+                raw = firstMsg.data || firstMsg;
+                if (msgCount > 1) {
+                    warnings.push({
+                        code: "MULTI_MESSAGE_TRUNCATED",
+                        path: "messages",
+                        message: `Imported first message of ${msgCount} from Discohook backup. Multi-message series is not supported.`
+                    });
+                }
+            } else if (raw.data && typeof raw.data === 'object') {
+                // Discohook single message wrapped in data
+                sourceFormat = "Discohook Message";
+                raw = raw.data;
+            } else if (raw.schema_version === "nero-studio-v1") {
+                sourceFormat = "Nero Studio JSON (Full Fidelity)";
+            } else if (raw.title || (raw.fields && !raw.embeds)) {
+                // Raw single embed object
+                sourceFormat = "Single Embed Object";
+                raw = { embeds: [raw] };
+            }
+        } else {
+            return {
+                valid: false,
+                error: "Root JSON must be an object representing a Discord message or embed.",
+                line: 1, col: 1,
+                sourceFormat: "Unknown",
+                summary: { contentLength: 0, embedCount: 0, fieldCount: 0, buttonCount: 0, totalCharacters: 0 },
+                warnings: [],
+                state: null
+            };
+        }
+
+        // 2. Check unsupported top-level fields
+        const unsupportedTopLevel = [
+            'username', 'avatar_url', 'tts', 'allowed_mentions', 'flags', 'thread_name',
+            'applied_tags', 'poll', 'components_v2'
+        ];
+        unsupportedTopLevel.forEach(function (f) {
+            if (raw[f] !== undefined && raw[f] !== null) {
+                warnings.push({
+                    code: "UNSUPPORTED_TOP_FIELD",
+                    path: f,
+                    message: `Field '${f}' is a webhook/client override and cannot be applied to bot messages.`
+                });
+            }
+        });
+
+        // 3. Content normalization
+        let content = typeof raw.content === 'string' ? raw.content : '';
+        if (content.length > 2000) {
+            content = content.slice(0, 2000);
+            warnings.push({
+                code: "CONTENT_TRUNCATED",
+                path: "content",
+                message: "Message content exceeded Discord limit of 2,000 characters and was truncated."
+            });
+        }
+
+        // 4. Embeds normalization
+        let rawEmbeds = Array.isArray(raw.embeds) ? raw.embeds : [];
+        if (rawEmbeds.length > 10) {
+            warnings.push({
+                code: "EMBEDS_TRUNCATED",
+                path: "embeds",
+                message: `Discord allows at most 10 embeds per message. Extra ${rawEmbeds.length - 10} embeds were omitted.`
+            });
+            rawEmbeds = rawEmbeds.slice(0, 10);
+        }
+
+        let totalChars = content.length;
+        let totalFieldCount = 0;
+
+        const normalizedEmbeds = rawEmbeds.map(function (e, eIdx) {
+            if (!e || typeof e !== 'object') return blankEmbed();
+            const norm = embedFromApi(e);
+
+            const titleLen = norm.title ? norm.title.length : 0;
+            const descLen = norm.description ? norm.description.length : 0;
+            const authLen = norm.author ? norm.author.length : 0;
+            const footLen = norm.footer ? norm.footer.length : 0;
+
+            if (titleLen > 256) {
+                norm.title = norm.title.slice(0, 256);
+                warnings.push({ code: "TITLE_TRUNCATED", path: `embeds[${eIdx}].title`, message: "Embed title truncated to 256 characters." });
+            }
+            if (descLen > 4096) {
+                norm.description = norm.description.slice(0, 4096);
+                warnings.push({ code: "DESC_TRUNCATED", path: `embeds[${eIdx}].description`, message: "Embed description truncated to 4,096 characters." });
+            }
+            if (authLen > 256) {
+                norm.author = norm.author.slice(0, 256);
+                warnings.push({ code: "AUTHOR_TRUNCATED", path: `embeds[${eIdx}].author`, message: "Embed author name truncated to 256 characters." });
+            }
+            if (footLen > 2048) {
+                norm.footer = norm.footer.slice(0, 2048);
+                warnings.push({ code: "FOOTER_TRUNCATED", path: `embeds[${eIdx}].footer`, message: "Embed footer text truncated to 2,048 characters." });
+            }
+
+            let fields = Array.isArray(norm.fields) ? norm.fields : [];
+            if (fields.length > 25) {
+                warnings.push({ code: "FIELDS_TRUNCATED", path: `embeds[${eIdx}].fields`, message: `Embed has ${fields.length} fields; truncated to Discord maximum of 25.` });
+                fields = fields.slice(0, 25);
+            }
+            norm.fields = fields.map(function (f, fIdx) {
+                let name = String(f.name || '').slice(0, 256);
+                let value = String(f.value || '').slice(0, 1024);
+                if (f.name && f.name.length > 256) warnings.push({ code: "FIELD_NAME_TRUNCATED", path: `embeds[${eIdx}].fields[${fIdx}].name`, message: "Field name truncated to 256 chars." });
+                if (f.value && f.value.length > 1024) warnings.push({ code: "FIELD_VALUE_TRUNCATED", path: `embeds[${eIdx}].fields[${fIdx}].value`, message: "Field value truncated to 1,024 chars." });
+                return { name: name, value: value, inline: !!f.inline };
+            });
+
+            totalFieldCount += norm.fields.length;
+            totalChars += titleLen + descLen + authLen + footLen + norm.fields.reduce(function (acc, f) { return acc + f.name.length + f.value.length; }, 0);
+            return norm;
+        });
+
+        if (totalChars > 6000) {
+            warnings.push({
+                code: "TOTAL_CHARS_EXCEEDED",
+                path: "embeds",
+                message: `Total characters across all embeds is ${totalChars}, which exceeds Discord's 6,000 character limit.`
+            });
+        }
+
+        // 5. Buttons, Select Menus and Action Rows normalization
+        let importedButtons = [];
+        let importedSelects = [];
+        let panelConfig = { exclusive: 0, max_roles: 0, require_confirmation: false };
+
+        if (Array.isArray(raw.buttons)) {
+            // Native Nero Studio buttons
+            importedButtons = raw.buttons.slice(0, 25).map(function (b, idx) {
+                return {
+                    id: b.id || ('btn_' + (idx + 1)),
+                    label: String(b.label || 'Role').slice(0, 80),
+                    role_id: String(b.role_id || b.role || '').trim(),
+                    color: (b.color || b.style || 'blurple').toLowerCase(),
+                    emoji: b.emoji || '',
+                    booster_only: !!b.booster_only,
+                    required_role_id: b.required_role_id ? String(b.required_role_id).trim() : null,
+                    expiry_days: parseInt(b.expiry_days, 10) || 0
+                };
+            });
+        }
+
+        if (Array.isArray(raw.select_menus)) {
+            // Native Nero Studio select menus
+            importedSelects = raw.select_menus.slice(0, 5).map(function (sm, sIdx) {
+                return {
+                    id: sm.id || ('sel_' + (sIdx + 1)),
+                    placeholder: String(sm.placeholder || 'Select a role...').slice(0, 150),
+                    min_values: 1,
+                    max_values: 1,
+                    options: (sm.options || []).slice(0, 25).map(function (opt, oIdx) {
+                        return {
+                            id: opt.id || ('opt_' + (oIdx + 1)),
+                            label: String(opt.label || 'Role Option').slice(0, 100),
+                            role_id: String(opt.role_id || opt.value || '').trim(),
+                            description: String(opt.description || '').slice(0, 100),
+                            emoji: opt.emoji || '',
+                            booster_only: !!opt.booster_only,
+                            required_role_id: opt.required_role_id ? String(opt.required_role_id).trim() : null,
+                            expiry_days: parseInt(opt.expiry_days, 10) || 0
+                        };
+                    })
+                };
+            });
+        }
+
+        if (raw.panel_config && typeof raw.panel_config === 'object') {
+            panelConfig = {
+                exclusive: raw.panel_config.exclusive ? 1 : 0,
+                max_roles: parseInt(raw.panel_config.max_roles, 10) || 0,
+                require_confirmation: !!raw.panel_config.require_confirmation
+            };
+        }
+
+        if (Array.isArray(raw.components)) {
+            // Standard Discord action rows
+            let btnIndex = importedButtons.length;
+            let selIndex = importedSelects.length;
+            raw.components.forEach(function (row, rIdx) {
+                if (!row || typeof row !== 'object') return;
+                if (row.type !== 1 && row.type !== undefined) {
+                    warnings.push({
+                        code: "UNSUPPORTED_COMPONENT_TYPE",
+                        path: `components[${rIdx}]`,
+                        message: `Top-level component type ${row.type} is not an Action Row (type 1) and was skipped.`
+                    });
+                    return;
+                }
+                const comps = Array.isArray(row.components) ? row.components : [];
+                comps.forEach(function (c, cIdx) {
+                    if (c.type === 5 || c.type === 6 || c.type === 7 || c.type === 8) {
+                        warnings.push({
+                            code: "SELECT_TYPE_UNSUPPORTED",
+                            path: `components[${rIdx}].components[${cIdx}]`,
+                            message: `Auto-populated select menus (type ${c.type}) are not supported in role assignments and were skipped.`
+                        });
+                        return;
+                    }
+                    if (c.type === 3) {
+                        // String Select Menu
+                        selIndex++;
+                        if (selIndex > 5) {
+                            warnings.push({
+                                code: "SELECT_LIMIT_EXCEEDED",
+                                path: `components[${rIdx}].components[${cIdx}]`,
+                                message: "Maximum 5 select menus allowed per message. Extra menus omitted."
+                            });
+                            return;
+                        }
+
+                        const options = (c.options || []).slice(0, 25).map(function (opt, oIdx) {
+                            let roleId = '';
+                            let emojiStr = '';
+                            if (opt.emoji) {
+                                if (typeof opt.emoji === 'string') emojiStr = opt.emoji;
+                                else if (opt.emoji.name) emojiStr = opt.emoji.id ? `<${opt.emoji.animated ? 'a' : ''}:${opt.emoji.name}:${opt.emoji.id}>` : opt.emoji.name;
+                            }
+                            if (opt.value && /^\d+$/.test(String(opt.value))) {
+                                roleId = String(opt.value);
+                            }
+                            if (!roleId && opt.value) {
+                                warnings.push({
+                                    code: "UNMAPPED_OPTION_ROLE",
+                                    path: `components[${rIdx}].components[${cIdx}].options[${oIdx}]`,
+                                    message: `Option '${opt.label || 'Option'}' has value '${opt.value}' which does not map to a recognized Discord role ID. Please assign a role.`
+                                });
+                            }
+                            return {
+                                id: 'opt_' + (oIdx + 1),
+                                label: String(opt.label || 'Role Option').slice(0, 100),
+                                role_id: roleId,
+                                description: String(opt.description || '').slice(0, 100),
+                                emoji: emojiStr,
+                                booster_only: false,
+                                required_role_id: null,
+                                expiry_days: 0
+                            };
+                        });
+
+                        importedSelects.push({
+                            id: 'sel_' + selIndex,
+                            placeholder: String(c.placeholder || 'Select a role...').slice(0, 150),
+                            min_values: 1,
+                            max_values: 1,
+                            options: options
+                        });
+                        return;
+                    }
+
+                    if (c.type === 2 || c.type === undefined) {
+                        btnIndex++;
+                        if (btnIndex > 25) {
+                            warnings.push({
+                                code: "BUTTON_LIMIT_EXCEEDED",
+                                path: `components[${rIdx}].components[${cIdx}]`,
+                                message: "Maximum 25 buttons allowed. Extra buttons omitted."
+                            });
+                            return;
+                        }
+                        const styleMap = { 1: 'blurple', 2: 'gray', 3: 'green', 4: 'red', 5: 'link' };
+                        const styleName = styleMap[c.style] || (typeof c.style === 'string' ? c.style.toLowerCase() : 'blurple');
+                        const isLink = (c.style === 5 || styleName === 'link' || Boolean(c.url));
+                        const btnUrl = isLink ? (c.url || '') : '';
+
+                        let roleId = '';
+                        let emojiStr = '';
+                        if (c.emoji) {
+                            if (typeof c.emoji === 'string') emojiStr = c.emoji;
+                            else if (c.emoji.name) emojiStr = c.emoji.id ? `<${c.emoji.animated ? 'a' : ''}:${c.emoji.name}:${c.emoji.id}>` : c.emoji.name;
+                        }
+
+                        // Try to extract role_id from custom_id (e.g. rr_123456789_0 or rr_123456789_draft_0_0)
+                        if (c.custom_id && String(c.custom_id).startsWith('rr_')) {
+                            const parts = String(c.custom_id).split('_');
+                            if (parts.length >= 2 && /^\d+$/.test(parts[1])) {
+                                roleId = parts[1];
+                            }
+                        }
+
+                        if (!roleId && !isLink && c.custom_id) {
+                            warnings.push({
+                                code: "UNMAPPED_CUSTOM_ID",
+                                path: `components[${rIdx}].components[${cIdx}]`,
+                                message: `Button '${c.label || 'Button'}' has custom_id '${c.custom_id}' which does not map to a recognized Nero role. Please assign a role.`
+                            });
+                        }
+
+                        const importedBtn = {
+                            id: 'btn_' + btnIndex,
+                            label: String(c.label || (isLink ? 'Link' : 'Role')).slice(0, 80),
+                            role_id: roleId,
+                            color: isLink ? 'link' : styleName,
+                            emoji: emojiStr,
+                            booster_only: false,
+                            required_role_id: null,
+                            expiry_days: 0
+                        };
+                        if (isLink && btnUrl) {
+                            importedBtn.url = btnUrl;
+                        }
+                        importedButtons.push(importedBtn);
+                    }
+                });
+            });
+        }
+
+        return {
+            valid: true,
+            error: null,
+            line: null, col: null,
+            sourceFormat: sourceFormat,
+            summary: {
+                contentLength: content.length,
+                embedCount: normalizedEmbeds.length,
+                fieldCount: totalFieldCount,
+                buttonCount: importedButtons.length,
+                selectCount: importedSelects.length,
+                totalCharacters: totalChars
+            },
+            warnings: warnings,
+            state: {
+                content: content,
+                embeds: normalizedEmbeds.length ? normalizedEmbeds : [blankEmbed()],
+                buttons: importedButtons,
+                select_menus: importedSelects,
+                panelConfig: panelConfig
+            }
+        };
+    }
+
+    function exportStudioJson(state, buttons, selectMenus, panelConfig) {
+        if (!panelConfig && typeof selectMenus === 'object' && !Array.isArray(selectMenus)) {
+            panelConfig = selectMenus;
+            selectMenus = (state && state.select_menus) || [];
+        }
+        return {
+            schema_version: "nero-studio-v1",
+            exported_at: new Date().toISOString(),
+            content: (state && state.content) || "",
+            embeds: cleanEmbedsForPayload((state && state.embeds) || []),
+            buttons: (buttons || []).map(function (b) {
+                const btnObj = {
+                    id: b.id,
+                    label: b.label || "Role",
+                    role_id: b.role_id || b.role || "",
+                    color: b.color || "blurple",
+                    emoji: b.emoji || "",
+                    booster_only: !!b.booster_only,
+                    required_role_id: b.required_role_id || null,
+                    expiry_days: parseInt(b.expiry_days, 10) || 0
+                };
+                if (b.color === 'link' || b.url) {
+                    btnObj.url = b.url || "";
+                }
+                return btnObj;
+            }),
+            select_menus: (selectMenus || []).map(function (sm) {
+                return {
+                    id: sm.id,
+                    placeholder: sm.placeholder || "Select a role...",
+                    min_values: 1,
+                    max_values: 1,
+                    options: (sm.options || []).map(function (opt) {
+                        return {
+                            id: opt.id,
+                            label: opt.label || "Role Option",
+                            role_id: opt.role_id || opt.value || "",
+                            description: opt.description || "",
+                            emoji: opt.emoji || "",
+                            booster_only: !!opt.booster_only,
+                            required_role_id: opt.required_role_id || null,
+                            expiry_days: parseInt(opt.expiry_days, 10) || 0
+                        };
+                    })
+                };
+            }),
+            panel_config: {
+                exclusive: panelConfig && panelConfig.exclusive ? 1 : 0,
+                max_roles: panelConfig ? (parseInt(panelConfig.max_roles, 10) || 0) : 0,
+                require_confirmation: !!(panelConfig && panelConfig.require_confirmation)
+            }
+        };
+    }
+
+    function exportDiscordJson(state, buttons, selectMenus, panelConfig) {
+        if (!panelConfig && typeof selectMenus === 'object' && !Array.isArray(selectMenus)) {
+            panelConfig = selectMenus;
+            selectMenus = (state && state.select_menus) || [];
+        }
+        const payload = {
+            content: (state && state.content) || undefined,
+            embeds: cleanEmbedsForPayload((state && state.embeds) || [])
+        };
+        if (!payload.embeds || !payload.embeds.length) delete payload.embeds;
+
+        const actionRows = [];
+        if (buttons && buttons.length) {
+            const styleMap = { blurple: 1, gray: 2, green: 3, red: 4, link: 5 };
+            for (let i = 0; i < Math.min(buttons.length, 25); i += 5) {
+                const chunk = buttons.slice(i, i + 5);
+                const rowIdx = actionRows.length;
+                const rowComps = chunk.map(function (btn, bIdx) {
+                    const bStyle = styleMap[btn.color] || (btn.url ? 5 : 1);
+                    const comp = {
+                        type: 2,
+                        style: bStyle,
+                        label: btn.label || (bStyle === 5 ? "Link" : "Role")
+                    };
+                    if (bStyle === 5) {
+                        comp.url = btn.url || "https://discord.com";
+                    } else {
+                        comp.custom_id = `rr_${btn.role_id || btn.role || '0'}_draft_${rowIdx}_${bIdx}`;
+                    }
+                    if (btn.emoji) {
+                        comp.emoji = { name: btn.emoji };
+                    }
+                    return comp;
+                });
+                actionRows.push({ type: 1, components: rowComps });
+            }
+        }
+
+        if (selectMenus && selectMenus.length) {
+            for (let sIdx = 0; sIdx < Math.min(selectMenus.length, 5); sIdx++) {
+                const sm = selectMenus[sIdx];
+                const rowIdx = actionRows.length;
+                const selComp = {
+                    type: 3,
+                    custom_id: `rr_sel_draft_${rowIdx}`,
+                    placeholder: sm.placeholder || "Select a role...",
+                    min_values: 1,
+                    max_values: 1,
+                    options: (sm.options || []).slice(0, 25).map(function (opt) {
+                        const optObj = {
+                            label: opt.label || "Role Option",
+                            value: String(opt.role_id || opt.value || "0")
+                        };
+                        if (opt.description) optObj.description = opt.description;
+                        if (opt.emoji) {
+                            optObj.emoji = { name: opt.emoji };
+                        }
+                        return optObj;
+                    })
+                };
+                actionRows.push({ type: 1, components: [selComp] });
+            }
+        }
+
+        if (actionRows.length) {
+            payload.components = actionRows;
+        }
+
+        return payload;
+    }
+
     return {
         esc, attr,
         blankEmbed, embedHasContent,
@@ -807,5 +1401,6 @@ window.EmbedComposer = (function () {
         cleanEmbedForPayload, cleanEmbedsForPayload,
         embedFromApi, embedsFromApi,
         fmtPreviewTime,
+        parseMessageJson, exportStudioJson, exportDiscordJson,
     };
 })();

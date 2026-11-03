@@ -84,6 +84,8 @@
     .sd-workbench { grid-template-columns: 1fr; }
     .sd-context, .sd-inspector-panel { position: static; max-height: none; overflow: visible; grid-column: auto; }
     .sd-grid { grid-template-columns: 1fr; }
+    .sd-grid > .card { min-width: 0; }
+    .sd-product-actions, .sd-roster-actions { flex-wrap: wrap; max-width: 100%; }
     .sd-action-entry { grid-template-columns: 1fr 1fr; }
     .sd-action-entry-heading, .sd-action-controls { grid-column: 1 / -1; }
     .sd-preview-details { grid-template-columns: 1fr; }

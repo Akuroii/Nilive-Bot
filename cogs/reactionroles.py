@@ -3,8 +3,129 @@ from discord.ext import commands
 from discord import app_commands
 import aiosqlite
 from database import DB_PATH
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
+import re
 from discord.ext import tasks
+from utils.permissions import check_bot_role_position
+
+
+async def handle_role_toggle(
+    interaction: discord.Interaction,
+    message_id: int,
+    role_id: int,
+    booster_only: bool = False,
+    required_role_id: int | None = None,
+    exclusive: bool = False,
+    max_roles: int = 0,
+    require_confirmation: bool = False
+):
+    member = interaction.user
+    guild = interaction.guild
+    role = guild.get_role(role_id) if guild else None
+
+    if not role:
+        await interaction.response.send_message("Role not found.", ephemeral=True)
+        return
+
+    if booster_only and not getattr(member, "premium_since", None):
+        await interaction.response.send_message(
+            "This role is for boosters only! Boost the server to unlock it.",
+            ephemeral=True)
+        return
+
+    if required_role_id:
+        required = guild.get_role(required_role_id)
+        if required and required not in member.roles:
+            await interaction.response.send_message(
+                f"You need the **{required.name}** role to get this.",
+                ephemeral=True)
+            return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor_btn = await db.execute("""
+            SELECT role_id FROM reaction_roles WHERE message_id=?
+        """, (message_id,))
+        panel_roles = [row[0] for row in await cursor_btn.fetchall()]
+        cursor_sel = await db.execute("""
+            SELECT role_id FROM reaction_role_select_options WHERE message_id=?
+        """, (message_id,))
+        panel_roles.extend([row[0] for row in await cursor_sel.fetchall()])
+
+    current_panel_roles = [
+        guild.get_role(rid) for rid in set(panel_roles)
+        if guild.get_role(rid) and guild.get_role(rid) in member.roles
+    ]
+
+    if role in member.roles:
+        if require_confirmation:
+            view = ConfirmView(role, action="remove")
+            await interaction.response.send_message(
+                f"Remove **{role.name}**?", view=view, ephemeral=True)
+            return
+        await member.remove_roles(role)
+        await interaction.response.send_message(
+            f"Removed **{role.name}**.", ephemeral=True)
+        return
+
+    if max_roles > 0 and len(current_panel_roles) >= max_roles:
+        await interaction.response.send_message(
+            f"You can only have **{max_roles}** role(s) from this panel.",
+            ephemeral=True)
+        return
+
+    if require_confirmation:
+        view = ConfirmView(
+            role, action="add",
+            exclusive=exclusive,
+            current_roles=current_panel_roles if exclusive else [])
+        await interaction.response.send_message(
+            f"Get **{role.name}**?", view=view, ephemeral=True)
+        return
+
+    if exclusive:
+        for r in current_panel_roles:
+            try:
+                await member.remove_roles(r)
+            except Exception:
+                pass
+
+    can, warn = check_bot_role_position(guild, role)
+    if not can:
+        await interaction.response.send_message(warn, ephemeral=True)
+        return
+
+    try:
+        await member.add_roles(role)
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "⚠️ Nero lacks permission to assign this role. Please notify an administrator.",
+            ephemeral=True)
+        return
+    except Exception as e:
+        await interaction.response.send_message(
+            "⚠️ An error occurred while assigning the role.", ephemeral=True)
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT expires_at FROM reaction_role_expiry
+            WHERE guild_id=? AND user_id=0 AND role_id=? AND message_id=?
+        """, (guild.id, role_id, message_id))
+        expiry = await cursor.fetchone()
+        if expiry:
+            await db.execute("""
+                INSERT OR REPLACE INTO reaction_role_expiry
+                (guild_id, user_id, role_id, message_id, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (guild.id, member.id, role_id, message_id, expiry[0]))
+            await db.commit()
+
+    msg = f"Gave you **{role.name}**."
+    if exclusive and current_panel_roles:
+        removed = ", ".join(r.name for r in current_panel_roles)
+        msg += f"\nRemoved: {removed}"
+    await interaction.response.send_message(msg, ephemeral=True)
+
 
 class ReactionRoles(commands.Cog):
     def __init__(self, bot):
@@ -18,18 +139,32 @@ class ReactionRoles(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS reaction_roles (
-                    guild_id INTEGER,
-                    channel_id INTEGER,
-                    message_id INTEGER,
-                    button_label TEXT,
-                    button_emoji TEXT,
-                    button_color TEXT DEFAULT 'blurple',
-                    role_id INTEGER,
-                    booster_only INTEGER DEFAULT 0,
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id         INTEGER,
+                    channel_id       INTEGER,
+                    message_id       INTEGER,
+                    button_label     TEXT,
+                    button_emoji     TEXT,
+                    button_color     TEXT DEFAULT 'blurple',
+                    role_id          INTEGER,
+                    booster_only     INTEGER DEFAULT 0,
                     required_role_id INTEGER DEFAULT NULL,
-                    PRIMARY KEY (message_id, role_id)
+                    row_index        INTEGER DEFAULT 0,
+                    button_index     INTEGER DEFAULT 0,
+                    custom_id        TEXT DEFAULT NULL
                 )
             """)
+            try:
+                cursor = await db.execute("PRAGMA table_info(reaction_roles)")
+                rr_cols = [c[1] for c in await cursor.fetchall()]
+                if "row_index" not in rr_cols:
+                    await db.execute("ALTER TABLE reaction_roles ADD COLUMN row_index INTEGER DEFAULT 0")
+                if "button_index" not in rr_cols:
+                    await db.execute("ALTER TABLE reaction_roles ADD COLUMN button_index INTEGER DEFAULT 0")
+                if "custom_id" not in rr_cols:
+                    await db.execute("ALTER TABLE reaction_roles ADD COLUMN custom_id TEXT DEFAULT NULL")
+            except Exception:
+                pass
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS reaction_role_panels (
                     message_id INTEGER PRIMARY KEY,
@@ -39,14 +174,6 @@ class ReactionRoles(commands.Cog):
                     require_confirmation INTEGER DEFAULT 0
                 )
             """)
-            # PHASE 5 TAIL FIX: message_id added to the key here too,
-            # matching database.py's central schema/migration — see
-            # that file for the full explanation. This CREATE is a
-            # no-op in practice (database.py's init_db() already runs
-            # and migrates the table before any cog's on_ready fires),
-            # kept only so this cog's own schema doesn't drift from
-            # the canonical one if ensure_table() is ever called from
-            # a context where init_db() hasn't run yet.
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS reaction_role_expiry (
                     guild_id INTEGER,
@@ -57,12 +184,203 @@ class ReactionRoles(commands.Cog):
                     PRIMARY KEY (guild_id, user_id, role_id, message_id)
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS reaction_role_selects (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id             INTEGER NOT NULL,
+                    channel_id           INTEGER NOT NULL,
+                    message_id           INTEGER NOT NULL,
+                    row_index            INTEGER NOT NULL DEFAULT 0,
+                    custom_id            TEXT NOT NULL,
+                    placeholder          TEXT,
+                    min_values           INTEGER NOT NULL DEFAULT 1,
+                    max_values           INTEGER NOT NULL DEFAULT 1,
+                    disabled             INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS reaction_role_select_options (
+                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                    select_id            INTEGER NOT NULL,
+                    message_id           INTEGER NOT NULL,
+                    role_id              INTEGER NOT NULL,
+                    label                TEXT NOT NULL,
+                    description          TEXT,
+                    emoji                TEXT,
+                    booster_only         INTEGER NOT NULL DEFAULT 0,
+                    required_role_id     INTEGER DEFAULT NULL,
+                    expiry_days          INTEGER NOT NULL DEFAULT 0,
+                    position             INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (select_id) REFERENCES reaction_role_selects(id) ON DELETE CASCADE
+                )
+            """)
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_selects_msg ON reaction_role_selects(message_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_selects_guild ON reaction_role_selects(guild_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_select_opts_sel ON reaction_role_select_options(select_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_select_opts_msg ON reaction_role_select_options(message_id, role_id)")
+            await db.execute("""
+                CREATE TRIGGER IF NOT EXISTS trg_delete_reaction_role_select_options
+                AFTER DELETE ON reaction_role_selects
+                BEGIN
+                    DELETE FROM reaction_role_select_options WHERE select_id = OLD.id;
+                END;
+            """)
             await db.commit()
 
     @commands.Cog.listener()
     async def on_ready(self):
         await self.ensure_table()
         await self.restore_views()
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        """Fallback dynamic dispatcher for reaction role interactions created from web or before view restoration."""
+        if interaction.type != discord.InteractionType.component:
+            return
+        if interaction.response.is_done():
+            return
+        custom_id = interaction.data.get("custom_id", "")
+        if not custom_id.startswith("rr_"):
+            return
+
+        # Handle Select Menu dynamic fallback
+        if custom_id.startswith("rr_sel_") or custom_id.startswith("rr_select_") or interaction.data.get("component_type") == 3:
+            values = interaction.data.get("values", [])
+            if not values:
+                return
+            try:
+                role_id = int(values[0])
+            except (ValueError, TypeError):
+                return
+
+            message_id = interaction.message.id if interaction.message else None
+            if not message_id:
+                parts = custom_id.split("_")
+                if len(parts) >= 3 and parts[2].isdigit():
+                    message_id = int(parts[2])
+
+            if not message_id:
+                return
+
+            if "_draft_" not in custom_id:
+                view_store = getattr(getattr(self.bot, "_connection", None), "_view_store", None)
+                if view_store and hasattr(view_store, "is_message_tracked") and callable(view_store.is_message_tracked):
+                    if view_store.is_message_tracked(message_id) is True:
+                        return
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                opt_cursor = await db.execute("""
+                    SELECT booster_only, required_role_id, expiry_days
+                    FROM reaction_role_select_options WHERE message_id=? AND role_id=?
+                """, (message_id, role_id))
+                opt_row = await opt_cursor.fetchone()
+                if not opt_row:
+                    try:
+                        await interaction.response.send_message(
+                            "⚠️ This option is unconfigured or no longer active.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+
+                panel_cursor = await db.execute("""
+                    SELECT exclusive, max_roles, require_confirmation
+                    FROM reaction_role_panels WHERE message_id=?
+                """, (message_id,))
+                panel_row = await panel_cursor.fetchone()
+
+            exclusive = panel_row[0] if panel_row else 0
+            max_roles = panel_row[1] if panel_row else 0
+            require_confirmation = panel_row[2] if panel_row else 0
+            booster_only = opt_row[0]
+            required_role_id = opt_row[1]
+
+            await handle_role_toggle(
+                interaction=interaction,
+                message_id=message_id,
+                role_id=role_id,
+                booster_only=bool(booster_only),
+                required_role_id=required_role_id,
+                exclusive=bool(exclusive),
+                max_roles=max_roles,
+                require_confirmation=bool(require_confirmation)
+            )
+            return
+
+        # Handle Button dynamic fallback
+        parts = custom_id.split("_")
+        if len(parts) < 2:
+            return
+        try:
+            role_id = int(parts[1])
+        except (ValueError, TypeError):
+            return
+
+        message_id = interaction.message.id if interaction.message else None
+        if not message_id and len(parts) >= 3 and parts[2].isdigit():
+            message_id = int(parts[2])
+
+        if not message_id:
+            return
+
+        if "_draft_" not in custom_id:
+            view_store = getattr(getattr(self.bot, "_connection", None), "_view_store", None)
+            if view_store and hasattr(view_store, "is_message_tracked") and callable(view_store.is_message_tracked):
+                if view_store.is_message_tracked(message_id) is True:
+                    return
+
+        # Query exact component by row/button index if present in custom_id
+        row_idx = None
+        btn_idx = None
+        if len(parts) >= 5 and parts[3].isdigit() and parts[4].isdigit():
+            row_idx = int(parts[3])
+            btn_idx = int(parts[4])
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            role_row = None
+            if row_idx is not None and btn_idx is not None:
+                cursor = await db.execute("""
+                    SELECT button_label, button_emoji, button_color, booster_only, required_role_id
+                    FROM reaction_roles WHERE message_id=? AND row_index=? AND button_index=?
+                """, (message_id, row_idx, btn_idx))
+                role_row = await cursor.fetchone()
+
+            if not role_row:
+                cursor = await db.execute("""
+                    SELECT button_label, button_emoji, button_color, booster_only, required_role_id
+                    FROM reaction_roles WHERE message_id=? AND role_id=?
+                """, (message_id, role_id))
+                role_row = await cursor.fetchone()
+
+            if not role_row:
+                try:
+                    await interaction.response.send_message(
+                        "⚠️ This button is unconfigured or no longer active.", ephemeral=True)
+                except Exception:
+                    pass
+                return
+
+            panel_cursor = await db.execute("""
+                SELECT exclusive, max_roles, require_confirmation
+                FROM reaction_role_panels WHERE message_id=?
+            """, (message_id,))
+            panel_row = await panel_cursor.fetchone()
+
+        exclusive = panel_row[0] if panel_row else 0
+        max_roles = panel_row[1] if panel_row else 0
+        require_confirmation = panel_row[2] if panel_row else 0
+        booster_only = role_row[3]
+        required_role_id = role_row[4]
+
+        await handle_role_toggle(
+            interaction=interaction,
+            message_id=message_id,
+            role_id=role_id,
+            booster_only=bool(booster_only),
+            required_role_id=required_role_id,
+            exclusive=bool(exclusive),
+            max_roles=max_roles,
+            require_confirmation=bool(require_confirmation)
+        )
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
@@ -111,6 +429,8 @@ class ReactionRoles(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT DISTINCT guild_id, channel_id, message_id FROM reaction_roles
+                UNION
+                SELECT DISTINCT guild_id, channel_id, message_id FROM reaction_role_selects
             """)
             messages = await cursor.fetchall()
         for guild_id, channel_id, message_id in messages:
@@ -121,20 +441,30 @@ class ReactionRoles(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT role_id, button_label, button_emoji, button_color,
-                       booster_only, required_role_id
+                       booster_only, required_role_id, row_index, button_index, custom_id
                 FROM reaction_roles WHERE message_id=?
+                ORDER BY row_index ASC, button_index ASC, id ASC
             """, (message_id,))
-            rows = await cursor.fetchall()
+            button_rows = await cursor.fetchall()
+
+            select_cursor = await db.execute("""
+                SELECT id, row_index, custom_id, placeholder, min_values, max_values
+                FROM reaction_role_selects WHERE message_id=? ORDER BY row_index ASC, id ASC
+            """, (message_id,))
+            select_rows = await select_cursor.fetchall()
+
             panel_cursor = await db.execute("""
                 SELECT exclusive, max_roles, require_confirmation
                 FROM reaction_role_panels WHERE message_id=?
             """, (message_id,))
             panel = await panel_cursor.fetchone()
+
         exclusive = panel[0] if panel else 0
         max_roles = panel[1] if panel else 0
         require_confirmation = panel[2] if panel else 0
         view = discord.ui.View(timeout=None)
-        for role_id, label, emoji, color, booster_only, required_role_id in rows:
+
+        for role_id, label, emoji, color, booster_only, required_role_id, r_idx, btn_idx, b_custom_id in button_rows:
             color_map = {
                 "blurple": discord.ButtonStyle.primary,
                 "gray": discord.ButtonStyle.secondary,
@@ -142,6 +472,7 @@ class ReactionRoles(commands.Cog):
                 "red": discord.ButtonStyle.danger,
             }
             style = color_map.get(color, discord.ButtonStyle.primary)
+            cid = b_custom_id or f"rr_{role_id}_{message_id}_{r_idx or 0}_{btn_idx or 0}"
             button = RoleButton(
                 role_id=role_id,
                 label=label,
@@ -152,9 +483,60 @@ class ReactionRoles(commands.Cog):
                 exclusive=bool(exclusive),
                 max_roles=max_roles,
                 require_confirmation=bool(require_confirmation),
-                message_id=message_id
+                message_id=message_id,
+                custom_id=cid
             )
             view.add_item(button)
+
+        if select_rows:
+            async with aiosqlite.connect(DB_PATH) as db:
+                for s_id, s_row_idx, s_custom_id, s_placeholder, s_min, s_max in select_rows:
+                    opt_cursor = await db.execute("""
+                        SELECT role_id, label, description, emoji, booster_only, required_role_id, expiry_days
+                        FROM reaction_role_select_options WHERE select_id=? ORDER BY position ASC, id ASC
+                    """, (s_id,))
+                    opt_rows = await opt_cursor.fetchall()
+                    if not opt_rows:
+                        continue
+
+                    discord_options = []
+                    options_meta = {}
+                    for r_id, o_label, o_desc, o_emoji, o_booster, o_req, o_exp in opt_rows:
+                        em_obj = None
+                        if o_emoji:
+                            m = re.match(r"^<(a?):(\w+):(\d+)>$", str(o_emoji).strip())
+                            if m:
+                                em_obj = discord.PartialEmoji(name=m.group(2), id=int(m.group(3)), animated=bool(m.group(1)))
+                            else:
+                                em_obj = discord.PartialEmoji.from_str(str(o_emoji).strip())
+
+                        discord_options.append(discord.SelectOption(
+                            label=str(o_label)[:100],
+                            value=str(r_id),
+                            description=str(o_desc)[:100] if o_desc else None,
+                            emoji=em_obj
+                        ))
+                        options_meta[r_id] = {
+                            "booster_only": bool(o_booster),
+                            "required_role_id": o_req,
+                            "expiry_days": o_exp
+                        }
+
+                    select_comp = RoleSelect(
+                        message_id=message_id,
+                        row_index=min(max(s_row_idx, 0), 4),
+                        custom_id=s_custom_id or f"rr_sel_{message_id}_{s_row_idx}",
+                        placeholder=s_placeholder or "Select a role...",
+                        min_values=s_min,
+                        max_values=s_max,
+                        options=discord_options[:25],
+                        options_metadata=options_meta,
+                        exclusive=bool(exclusive),
+                        max_roles=max_roles,
+                        require_confirmation=bool(require_confirmation)
+                    )
+                    view.add_item(select_comp)
+
         return view
 
     @tasks.loop(minutes=30)
@@ -198,7 +580,7 @@ class ReactionRoles(commands.Cog):
            metadata for a button click to read, not an obligation for
            this loop to clean up.
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""
                 SELECT guild_id, user_id, role_id, message_id
@@ -411,9 +793,10 @@ class ReactionRoles(commands.Cog):
 class RoleButton(discord.ui.Button):
     def __init__(self, role_id, label, emoji, style, booster_only,
                  required_role_id, exclusive, max_roles,
-                 require_confirmation, message_id):
+                 require_confirmation, message_id, custom_id=None):
+        btn_custom_id = custom_id or f"rr_{role_id}_{message_id}"
         super().__init__(label=label, emoji=emoji, style=style,
-                        custom_id=f"rr_{role_id}_{message_id}")
+                        custom_id=btn_custom_id)
         self.role_id = role_id
         self.booster_only = booster_only
         self.required_role_id = required_role_id
@@ -423,97 +806,56 @@ class RoleButton(discord.ui.Button):
         self.message_id = message_id
 
     async def callback(self, interaction: discord.Interaction):
-        member = interaction.user
-        guild = interaction.guild
-        role = guild.get_role(self.role_id)
+        await handle_role_toggle(
+            interaction=interaction,
+            message_id=self.message_id,
+            role_id=self.role_id,
+            booster_only=self.booster_only,
+            required_role_id=self.required_role_id,
+            exclusive=self.exclusive,
+            max_roles=self.max_roles,
+            require_confirmation=self.require_confirmation
+        )
 
-        if not role:
-            await interaction.response.send_message(
-                "Role not found.", ephemeral=True)
+
+class RoleSelect(discord.ui.Select):
+    def __init__(self, message_id, row_index, custom_id, placeholder,
+                 min_values, max_values, options, options_metadata,
+                 exclusive, max_roles, require_confirmation):
+        super().__init__(
+            custom_id=custom_id,
+            placeholder=placeholder or "Select a role...",
+            min_values=min_values,
+            max_values=max_values,
+            options=options,
+            row=row_index
+        )
+        self.message_id = message_id
+        self.options_metadata = options_metadata
+        self.exclusive = exclusive
+        self.max_roles = max_roles
+        self.require_confirmation = require_confirmation
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.values:
+            return
+        try:
+            role_id = int(self.values[0])
+        except (ValueError, TypeError):
+            await interaction.response.send_message("Invalid role option selected.", ephemeral=True)
             return
 
-        if self.booster_only and not member.premium_since:
-            await interaction.response.send_message(
-                "This role is for boosters only! Boost the server to unlock it.",
-                ephemeral=True)
-            return
-
-        if self.required_role_id:
-            required = guild.get_role(self.required_role_id)
-            if required and required not in member.roles:
-                await interaction.response.send_message(
-                    f"You need the **{required.name}** role to get this.",
-                    ephemeral=True)
-                return
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT role_id FROM reaction_roles WHERE message_id=?
-            """, (self.message_id,))
-            panel_roles = [row[0] for row in await cursor.fetchall()]
-
-        current_panel_roles = [
-            guild.get_role(rid) for rid in panel_roles
-            if guild.get_role(rid) and guild.get_role(rid) in member.roles
-        ]
-
-        if role in member.roles:
-            if self.require_confirmation:
-                view = ConfirmView(role, action="remove")
-                await interaction.response.send_message(
-                    f"Remove **{role.name}**?", view=view, ephemeral=True)
-                return
-            await member.remove_roles(role)
-            await interaction.response.send_message(
-                f"Removed **{role.name}**.", ephemeral=True)
-            return
-
-        if self.max_roles > 0 and len(current_panel_roles) >= self.max_roles:
-            await interaction.response.send_message(
-                f"You can only have **{self.max_roles}** role(s) from this panel.",
-                ephemeral=True)
-            return
-
-        if self.require_confirmation:
-            view = ConfirmView(
-                role, action="add",
-                exclusive=self.exclusive,
-                current_roles=current_panel_roles if self.exclusive else [])
-            await interaction.response.send_message(
-                f"Get **{role.name}**?", view=view, ephemeral=True)
-            return
-
-        if self.exclusive:
-            for r in current_panel_roles:
-                await member.remove_roles(r)
-
-        await member.add_roles(role)
-
-        # PHASE 5 TAIL FIX: both the sentinel lookup and the per-member
-        # expiry row this writes now include message_id — previously
-        # this read whichever panel's sentinel happened to have been
-        # written LAST for this role_id (guild-wide), regardless of
-        # which panel's button was actually clicked. Now it reads only
-        # THIS panel's (self.message_id) configured expiry.
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT expires_at FROM reaction_role_expiry
-                WHERE guild_id=? AND user_id=0 AND role_id=? AND message_id=?
-            """, (guild.id, self.role_id, self.message_id))
-            expiry = await cursor.fetchone()
-            if expiry:
-                await db.execute("""
-                    INSERT OR REPLACE INTO reaction_role_expiry
-                    (guild_id, user_id, role_id, message_id, expires_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (guild.id, member.id, self.role_id, self.message_id, expiry[0]))
-                await db.commit()
-
-        msg = f"Gave you **{role.name}**."
-        if self.exclusive and current_panel_roles:
-            removed = ", ".join(r.name for r in current_panel_roles)
-            msg += f"\nRemoved: {removed}"
-        await interaction.response.send_message(msg, ephemeral=True)
+        meta = self.options_metadata.get(role_id, {})
+        await handle_role_toggle(
+            interaction=interaction,
+            message_id=self.message_id,
+            role_id=role_id,
+            booster_only=meta.get("booster_only", False),
+            required_role_id=meta.get("required_role_id"),
+            exclusive=self.exclusive,
+            max_roles=self.max_roles,
+            require_confirmation=self.require_confirmation
+        )
 
 
 class ConfirmView(discord.ui.View):
@@ -533,12 +875,26 @@ class ConfirmView(discord.ui.View):
             await interaction.response.edit_message(
                 content=f"Removed **{self.role.name}**.", view=None)
         else:
+            can, warn = check_bot_role_position(interaction.guild, self.role)
+            if not can:
+                await interaction.response.edit_message(content=warn, view=None)
+                return
             if self.exclusive:
                 for r in self.current_roles:
-                    await member.remove_roles(r)
-            await member.add_roles(self.role)
-            await interaction.response.edit_message(
-                content=f"Gave you **{self.role.name}**.", view=None)
+                    try:
+                        await member.remove_roles(r)
+                    except Exception:
+                        pass
+            try:
+                await member.add_roles(self.role)
+                await interaction.response.edit_message(
+                    content=f"Gave you **{self.role.name}**.", view=None)
+            except discord.Forbidden:
+                await interaction.response.edit_message(
+                    content="⚠️ Nero lacks permission to assign this role. Please notify an administrator.", view=None)
+            except Exception:
+                await interaction.response.edit_message(
+                    content="⚠️ An error occurred while assigning the role.", view=None)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction,

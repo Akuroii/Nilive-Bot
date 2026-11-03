@@ -5,9 +5,10 @@
 
 <div class="card">
     <div class="card-header">
-        <div class="card-title" style="margin:0">👥 Member Manager</div>
-        <input class="form-input" id="search-input"
-               placeholder="Search by User ID..."
+        <div class="card-title" style="margin:0"><svg class="card-title-icon" aria-hidden="true"><use href="#nero-i-users"></use></svg> Member Manager</div>
+        <label class="sr-only" for="search-input">Search members by name, username, or user ID</label>
+        <input class="form-input" id="search-input" type="search"
+               placeholder="Search name, username, or ID…"
                oninput="filterMembers()"
                style="max-width:260px;">
     </div>
@@ -26,7 +27,8 @@
             <tbody id="members-tbody">
                 {% for m in members %}
                 {% set u = user_map.get(m.user_id, {}) %}
-                <tr class="member-row" data-id="{{ m.user_id }}">
+                <tr class="member-row" data-id="{{ m.user_id }}"
+                    data-search="{{ (u.get('display_name') or '') ~ ' ' ~ (u.get('username') or '') ~ ' ' ~ m.user_id }}">
                     <td>{{ user_identity(m.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
                     <td><span class="badge badge-accent">Level {{ m.level }}</span></td>
                     <td>{{ "{:,}".format(m.xp) }} XP</td>
@@ -42,11 +44,17 @@
                     {% endif %}
                 </tr>
                 {% else %}
-                <tr><td colspan="6" class="empty">No members found</td></tr>
+                <tr><td colspan="{{ 6 if is_admin else 5 }}" class="empty">No members found</td></tr>
                 {% endfor %}
+                {% if members %}
+                <tr id="members-filter-empty" hidden aria-hidden="true">
+                    <td colspan="{{ 6 if is_admin else 5 }}" class="empty">No members match your search.</td>
+                </tr>
+                {% endif %}
             </tbody>
         </table>
     </div>
+    <div id="members-search-status" class="sr-only" role="status" aria-live="polite"></div>
 </div>
 
 <script>
@@ -61,10 +69,32 @@ var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
 __neroGlobal.filterMembers = filterMembers;
 
 function filterMembers() {
-    const q = document.getElementById('search-input').value.toLowerCase();
-    document.querySelectorAll('.member-row').forEach(row => {
-        row.style.display = row.dataset.id.includes(q) ? '' : 'none';
+    const input = document.getElementById('search-input');
+    const query = (input ? input.value : '').trim().toLocaleLowerCase();
+    const rows = Array.from(document.querySelectorAll('#members-tbody .member-row'));
+    let visible = 0;
+
+    rows.forEach(row => {
+        const haystack = (row.dataset.search || row.dataset.id || row.textContent).toLocaleLowerCase();
+        const matches = !query || haystack.includes(query);
+        row.style.display = matches ? '' : 'none';
+        if (matches) visible++;
     });
+
+    const emptyState = document.getElementById('members-filter-empty');
+    if (emptyState) {
+        const showEmpty = !!query && visible === 0;
+        emptyState.hidden = !showEmpty;
+        emptyState.setAttribute('aria-hidden', String(!showEmpty));
+    }
+    const status = document.getElementById('members-search-status');
+    if (status && query) {
+        status.textContent = visible === 0
+            ? 'No members match your search.'
+            : `${visible} ${visible === 1 ? 'member' : 'members'} shown.`;
+    } else if (status) {
+        status.textContent = '';
+    }
 }
 
 })();

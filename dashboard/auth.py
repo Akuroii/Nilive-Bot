@@ -17,8 +17,13 @@ SESSION_DURATION_REMEMBER = 60 * 60 * 24 * 7
 
 # Phase 0 Extension — Server Permission Gating (Sapphire-style)
 DISCORD_PERMISSION_ADMINISTRATOR = 0x8
-DISCORD_PERMISSION_MANAGE_GUILD = 0x20
+DISCORD_PERMISSION_MANAGE_GUILD  = 0x20
 
+
+class BotMembershipStatus:
+    INSTALLED           = "INSTALLED"            # HTTP 200: Confirmed member
+    CONFIRMED_NO_ACCESS = "CONFIRMED_NO_ACCESS"  # Explicit Discord 10004 or 50001
+    INDETERMINATE       = "INDETERMINATE"        # Rate limits, timeouts, 401, 5xx, or network drops
 # SECURITY HARDENING: default narrowed from Administrator (8) to the
 # specific permissions the bot actually uses (manage roles/channels,
 # kick/ban/timeout, manage nicknames, manage messages, send/embed/
@@ -118,21 +123,22 @@ def fetch_discord_guilds(access_token: str) -> list:
 
 
 def guild_permissions_can_manage_server(permissions) -> bool:
-    """Discovery/invitation eligibility, not dashboard access authorization."""
+    """
+    Checks if Discord permissions include ADMINISTRATOR (0x8) or
+    MANAGE_GUILD (0x20). Used exclusively for server discovery and
+    bot invitation eligibility in the server picker.
+    """
     try:
-        value = int(permissions)
-        return value >= 0 and bool(value & (DISCORD_PERMISSION_ADMINISTRATOR |
-                                           DISCORD_PERMISSION_MANAGE_GUILD))
+        perm_int = int(permissions)
     except (TypeError, ValueError):
         return False
+    return bool(perm_int & (DISCORD_PERMISSION_ADMINISTRATOR | DISCORD_PERMISSION_MANAGE_GUILD))
 
 
 def guild_permissions_include_admin(permissions) -> bool:
     """
-    Phase 0 Extension. `permissions` is the decimal-string bitfield
-    Discord returns per-guild in /users/@me/guilds. Guild owners
-    already have this bit set by Discord itself, so no separate
-    owner check is needed.
+    Legacy helper maintained for backward compatibility. Checks only
+    ADMINISTRATOR (0x8).
     """
     try:
         perm_int = int(permissions)
@@ -220,33 +226,51 @@ def fetch_bot_guilds_full() -> list[dict]:
     return guilds
 
 
-def bot_is_in_guild(guild_id: int) -> bool:
+def check_bot_guild_membership(guild_id: int) -> str:
     """
-    Phase 0 — Server Select fix. Single-guild membership check via the
-    BOT token (GET /guilds/{id} — 200 if the bot is a member, 403/404
-    otherwise). Used by /select-guild to verify the bot is actually
-    installed before auto-granting OWNER_DISCORD_ID dashboard access,
-    without paying for a full fetch_discord_bot_guilds() page-through
-    just to check one guild.
-
-    Returns False (never raises) on any failure or missing token — the
-    safe default is "assume not a member", which just means the
-    auto-grant path is skipped and the normal dashboard_users check
-    (403 if no row) applies as before.
+    Conservative tri-state membership check via the BOT token.
+    Distinguishes confirmed installation (200), confirmed non-access
+    (explicit Discord error codes 10004 Unknown Guild or 50001 Missing Access),
+    and indeterminate states (timeouts, rate limits 429, auth errors 401,
+    Discord server errors 5xx).
     """
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
-        return False
+        return BotMembershipStatus.INDETERMINATE
     try:
         r = requests.get(
             f"{DISCORD_API}/guilds/{guild_id}",
             headers={"Authorization": f"Bot {bot_token}"},
-            timeout=8,
+            timeout=5,
         )
-        return r.status_code == 200
+        if r.status_code == 200:
+            return BotMembershipStatus.INSTALLED
+
+        try:
+            data = r.json()
+            code = data.get("code")
+        except Exception:
+            code = None
+
+        if r.status_code == 404 and code == 10004:
+            return BotMembershipStatus.CONFIRMED_NO_ACCESS
+        if r.status_code == 403 and code == 50001:
+            return BotMembershipStatus.CONFIRMED_NO_ACCESS
+
+        return BotMembershipStatus.INDETERMINATE
+    except (requests.Timeout, requests.ConnectionError):
+        return BotMembershipStatus.INDETERMINATE
     except Exception as e:
-        print(f"[AUTH] bot_is_in_guild error: {e}")
-        return False
+        print(f"[AUTH] check_bot_guild_membership error: {e}")
+        return BotMembershipStatus.INDETERMINATE
+
+
+def bot_is_in_guild(guild_id: int) -> bool:
+    """
+    Single-guild membership check via BOT token. Returns True only when
+    confirmed installed (HTTP 200).
+    """
+    return check_bot_guild_membership(guild_id) == BotMembershipStatus.INSTALLED
 
 
 def get_bot_invite_url(guild_id: int) -> str:

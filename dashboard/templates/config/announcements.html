@@ -3,7 +3,7 @@
 {% block content %}
 
 <div class="card">
-    <div class="card-title">📺 YouTube Notifications</div>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-video"></use></svg> YouTube Notifications</div>
     {% if youtube %}
     <div class="table-wrap">
         <table class="table">
@@ -26,14 +26,14 @@
     </div>
     {% else %}
     <div class="empty-state">
-        <div class="empty-icon">📺</div>
+        <div class="empty-icon"><svg class="card-title-icon" viewBox="0 0 24 24" style="width:40px;height:40px;color:var(--text3);display:inline-block;" aria-hidden="true"><use href="#nero-i-video"></use></svg></div>
         <div class="empty-text">No YouTube notifications configured.<br>Use <code>/youtube_setup</code> in Discord.</div>
     </div>
     {% endif %}
 </div>
 
 <div class="card">
-    <div class="card-title">🟣 Twitch Alerts</div>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-bell"></use></svg> Twitch Alerts</div>
     {% if twitch %}
     <div class="table-wrap">
         <table class="table">
@@ -56,7 +56,7 @@
     </div>
     {% else %}
     <div class="empty-state">
-        <div class="empty-icon">🟣</div>
+        <div class="empty-icon"><svg class="card-title-icon" viewBox="0 0 24 24" style="width:40px;height:40px;color:var(--text3);display:inline-block;" aria-hidden="true"><use href="#nero-i-bell"></use></svg></div>
         <div class="empty-text">No Twitch alerts configured.<br>Coming in Phase 5.</div>
     </div>
     {% endif %}

@@ -870,6 +870,11 @@ async def drain_xp_grants(guild_id: int, user_id: int, *,
             async with aiosqlite.connect(DB_PATH, timeout=10) as db:
                 await db.execute("BEGIN IMMEDIATE")
                 try:
+                    from utils.xp_calculator import is_member_blacklisted
+                    if int(amount) > 0 and await is_member_blacklisted(guild_id, user_id, db=db):
+                        await db.execute("ROLLBACK")
+                        deferred.append({"idem_key": key, "reason": "Member is blacklisted from earning XP"})
+                        continue
                     blocked = await xp_write_barrier(guild_id, user_id, db)
                     if blocked is not None:
                         # Not now. The row stays pending and is retried - this

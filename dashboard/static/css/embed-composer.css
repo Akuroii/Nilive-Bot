@@ -184,6 +184,11 @@
 }
 .eb-mention:hover { background:rgba(88,101,242,.5); text-decoration:underline; }
 
+.eb-link { color:#00a8fc; text-decoration:none; }
+.eb-link:hover { text-decoration:underline; }
+.eb-pe-title-link { color:#00a8fc; text-decoration:none; }
+.eb-pe-title-link:hover { text-decoration:underline; }
+
 .eb-preview-attachments { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
 .eb-preview-attachments img { max-width:200px; max-height:200px; border-radius:6px; object-fit:cover; }
 .eb-preview-embed {
@@ -192,12 +197,12 @@
 }
 .eb-pe-author { font-size:14px; font-weight:600; color:#f2f3f5; margin:8px 0 8px; display:flex; align-items:center; gap:6px; }
 .eb-pe-title { font-weight:700; color:#fff; font-size:16px; margin-bottom:8px; line-height:1.3; }
-.eb-pe-desc { color:#dbdee1; font-size:14px; line-height:1.375; white-space:pre-wrap; }
+.eb-pe-desc { color:#dbdee1; font-size:14px; line-height:1.375; white-space:pre-wrap; word-break:break-word; }
 .eb-pe-fields { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
 .eb-pe-field { min-width:0; }
 .eb-pe-field-name { font-weight:600; color:#f2f3f5; font-size:14px; margin-bottom:2px; }
-.eb-pe-field-value { color:#dbdee1; font-size:14px; line-height:1.375; }
-.eb-pe-image { max-width:100%; border-radius:4px; margin-top:16px; display:block; }
+.eb-pe-field-value { color:#dbdee1; font-size:14px; line-height:1.375; word-break:break-word; }
+.eb-pe-image { max-width:100%; max-height:300px; object-fit:contain; border-radius:4px; margin-top:12px; display:block; }
 .eb-pe-thumb { position:absolute; top:16px; right:16px; width:80px; height:80px; border-radius:4px; object-fit:cover; }
 .eb-pe-footer { font-size:12px; color:#b5bac1; margin-top:8px; display:flex; align-items:center; gap:6px; }
 
@@ -224,10 +229,107 @@
 .eb-cbtn-secondary  { background:#4e5058; }
 .eb-cbtn-success    { background:#248046; }
 .eb-cbtn-danger     { background:#da373c; }
+.eb-cbtn-link       { background:#4e5058; }
 .eb-comp-btn.disabled {
     opacity:.6; filter:saturate(.4);
 }
 .eb-comp-btn:disabled { cursor:not-allowed; }
+
+.eb-comp-select {
+    width: 100%;
+    background: #1e1f22;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    padding: 8px 12px;
+    cursor: default;
+    user-select: none;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+}
+.eb-comp-select-placeholder {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    color: #949ba4;
+    font-size: 13px;
+    font-weight: 500;
+}
+.eb-comp-select-chevron {
+    width: 16px;
+    height: 16px;
+    color: #949ba4;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+}
+
+.eb-select-card {
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 12px;
+}
+.eb-select-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+.eb-select-card-title {
+    font-weight: 600;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.eb-select-opts-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+.eb-select-opt-item {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+}
+.eb-select-opt-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+}
+.eb-select-opt-label {
+    font-weight: 500;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.eb-select-opt-role {
+    font-size: 12px;
+    color: var(--primary);
+    background: rgba(124, 92, 191, 0.15);
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.eb-select-opt-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
 
 /* ═══════════════════════════════════════════════════════════════
    NEW-4PHASE — Minigames v2 builder page layout
@@ -378,3 +480,347 @@
 .mg-hist-sub { cursor:pointer; }
 .mg-hist-detail { background:var(--bg2); }
 .mg-hist-detail td { font-size:12px; color:var(--text2); }
+
+/* ═══════════════════════════════════════════════════════════════
+   MESSAGE & ROLE STUDIO — Unified 2-Column Responsive Layout & Controls
+   ═══════════════════════════════════════════════════════════════ */
+.eb-studio-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.95fr);
+    gap: 24px;
+    align-items: start;
+}
+.eb-mobile-tabs {
+    display: none;
+    margin-bottom: 16px;
+    background: var(--bg2);
+    border-radius: 8px;
+    padding: 4px;
+    border: 1px solid var(--border);
+    position: sticky;
+    top: 70px;
+    z-index: 10;
+}
+.eb-mobile-tab {
+    flex: 1;
+    padding: 8px 16px;
+    background: transparent;
+    border: none;
+    color: var(--text2);
+    font-weight: 600;
+    font-size: 13px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all .15s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+.eb-mobile-tab.active {
+    background: var(--primary);
+    color: #fff;
+}
+.eb-mobile-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255,255,255,0.2);
+    color: #fff;
+    border-radius: 999px;
+    padding: 1px 6px;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+/* Asagi-inspired Color Swatches */
+.eb-color-swatches {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+}
+.eb-color-swatch {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.15);
+    cursor: pointer;
+    transition: transform .12s, box-shadow .12s;
+}
+.eb-color-swatch:hover {
+    transform: scale(1.15);
+    box-shadow: 0 0 6px rgba(0,0,0,0.4);
+}
+.eb-color-swatch:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 1px;
+}
+
+/* Interactive Role Buttons List */
+.eb-btn-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.eb-btn-item-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+}
+.eb-btn-item-badge {
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #fff;
+    white-space: nowrap;
+}
+.eb-btn-item-badge.blurple { background: #5865f2; }
+.eb-btn-item-badge.gray    { background: #4e5058; }
+.eb-btn-item-badge.green   { background: #248046; }
+.eb-btn-item-badge.red     { background: #da373c; }
+.eb-btn-item-role {
+    font-size: 12px;
+    color: var(--text2);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.eb-btn-item-tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--bg4);
+    color: var(--text3);
+    white-space: nowrap;
+}
+.eb-btn-item-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Accessible focus styling */
+.form-input:focus {
+    border-color: var(--primary) !important;
+    box-shadow: 0 0 0 3px rgba(124, 92, 191, 0.25) !important;
+    outline: none !important;
+}
+
+/* ── JSON Bridge Modal & Controls ────────────────────────────────── */
+.eb-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 16px;
+    backdrop-filter: blur(4px);
+}
+.eb-modal-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 740px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 48px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+.eb-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+}
+.eb-modal-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.eb-modal-close {
+    background: transparent;
+    border: none;
+    color: var(--text3);
+    font-size: 20px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 4px;
+    border-radius: 4px;
+}
+.eb-modal-close:hover {
+    color: var(--text);
+    background: var(--bg3);
+}
+.eb-modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+}
+.eb-modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--bg3);
+}
+.eb-json-tabs {
+    display: flex;
+    gap: 6px;
+    background: var(--bg3);
+    border-radius: 8px;
+    padding: 4px;
+    margin-bottom: 16px;
+}
+.eb-json-tab-btn {
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
+    background: transparent;
+    color: var(--text2);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+.eb-json-tab-btn:hover {
+    color: var(--text);
+}
+.eb-json-tab-btn.active {
+    background: var(--bg2);
+    color: var(--text);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+.eb-json-code-area {
+    width: 100%;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    background: #0e1015;
+    color: #e1e4ea;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    resize: vertical;
+    min-height: 220px;
+    box-sizing: border-box;
+}
+.eb-json-code-area:focus {
+    border-color: var(--primary) !important;
+    outline: none !important;
+}
+.eb-json-report {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    margin-top: 14px;
+}
+.eb-json-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.eb-json-badge--success {
+    background: rgba(87, 242, 135, 0.15);
+    color: #57f287;
+    border: 1px solid rgba(87, 242, 135, 0.3);
+}
+.eb-json-badge--warn {
+    background: rgba(254, 231, 92, 0.15);
+    color: #fee75c;
+    border: 1px solid rgba(254, 231, 92, 0.3);
+}
+.eb-json-badge--error {
+    background: rgba(237, 66, 69, 0.15);
+    color: #ed4245;
+    border: 1px solid rgba(237, 66, 69, 0.3);
+}
+.eb-json-warning-list {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text2);
+}
+.eb-json-warning-item {
+    display: flex;
+    gap: 8px;
+    padding: 6px 0;
+    border-top: 1px solid var(--border);
+}
+.eb-json-warning-path {
+    font-family: monospace;
+    color: var(--warning);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* Responsive collapse */
+.select2, .select2-container {
+    max-width: 100% !important;
+}
+@media (max-width: 900px) {
+    .eb-studio-grid {
+        grid-template-columns: 100%;
+        min-width: 0;
+    }
+    .eb-col-editor, .eb-col-preview {
+        min-width: 0;
+        max-width: 100%;
+    }
+    .eb-mobile-tabs {
+        display: flex;
+    }
+    .eb-col-editor.mobile-hidden {
+        display: none !important;
+    }
+    .eb-col-preview.mobile-hidden {
+        display: none !important;
+    }
+    .eb-col-preview {
+        position: static !important;
+    }
+}
+@media (max-width: 600px) {
+    .eb-modal-card {
+        max-height: 95vh;
+    }
+    .eb-json-tabs {
+        flex-direction: column;
+    }
+    .eb-json-code-area {
+        min-height: 180px;
+    }
+}

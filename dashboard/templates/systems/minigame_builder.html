@@ -8,8 +8,8 @@
     <div style="flex:1;"></div>
     <span class="mb-dirty-pill" id="mb-dirty-pill">● Unsaved changes</span>
     <button class="btn btn-secondary" id="mb-test-btn" disabled onclick="testSpawnFromBuilder(this)"
-        title="Queue a test spawn in the game's target channel">🧪 Test Spawn</button>
-    <button class="btn btn-primary" id="mb-save-btn" onclick="saveTemplate(this)">💾 Save</button>
+        title="Queue a test spawn in the game's target channel"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-terminal"></use></svg> Test Spawn</button>
+    <button class="btn btn-primary" id="mb-save-btn" onclick="saveTemplate(this)"><svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:4px;" aria-hidden="true"><use href="#nero-i-save"></use></svg> Save</button>
 </div>
 
 <div class="mb-grid">
@@ -126,7 +126,7 @@
     <!-- ═══ RIGHT: live preview (sticky) ═════════════════════════ -->
     <div class="mb-preview-col" style="position:sticky;top:80px;">
         <div class="card">
-            <div class="card-title">👁️ Live Preview</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-eye"></use></svg> Live Preview</div>
             <p class="text-muted text-sm" style="margin-bottom:10px;">
                 The exact Discord message the game will post — embed plus the
                 buttons the engine generates. The correct answer is never shown here.
@@ -136,7 +136,6 @@
     </div>
 </div>
 
-<script src="{{ url_for('static', filename='js/embed-composer.js') }}"></script>
 <script>
 (function () {
 // Re-published for the markup's inline handlers (onclick/onchange) and for
@@ -181,6 +180,9 @@ __neroGlobal.loadConfigAndTree = loadConfigAndTree;
 __neroGlobal.loadBotIdentity = loadBotIdentity;
 
 'use strict';
+if (window.__NERO_MINIGAME_BUILDER_CLEANUP__) window.__NERO_MINIGAME_BUILDER_CLEANUP__();
+const __mbLifecycleController = new AbortController();
+let __mbPageActive = true;
 const EC = window.EmbedComposer;
 const TEMPLATE_ID = {{ template_id | default(none) | tojson }};
 const PRESET_CATEGORY = {{ category_id | default(none) | tojson }};
@@ -259,13 +261,42 @@ function clearDirty() {
     mbState.dirty = false;
     document.getElementById('mb-dirty-pill').classList.remove('mb-dirty-on');
 }
-window.addEventListener('beforeunload', (e) => {
-    if (mbState.dirty) { e.preventDefault(); e.returnValue = ''; }
-});
-
 // ── live preview (debounced ~200ms, plan §12) ──────────────────────
 const previewBox = document.getElementById('mb-preview');
 let previewTimer = null, previewGen = 0;
+const activePollTimers = new Set();
+
+function __mbBeforeUnload(event) {
+    if (mbState.dirty) { event.preventDefault(); event.returnValue = ''; }
+}
+function __mbCleanup() {
+    __mbPageActive = false;
+    window.removeEventListener('beforeunload', __mbBeforeUnload);
+    if (previewTimer) clearTimeout(previewTimer);
+    activePollTimers.forEach(function (timer) { clearInterval(timer); });
+    activePollTimers.clear();
+    __mbLifecycleController.abort();
+    if (window.__NERO_MINIGAME_BUILDER_CLEANUP__ === __mbCleanup) {
+        delete window.__NERO_MINIGAME_BUILDER_CLEANUP__;
+    }
+}
+window.__NERO_MINIGAME_BUILDER_CLEANUP__ = __mbCleanup;
+window.addEventListener('beforeunload', __mbBeforeUnload, { signal: __mbLifecycleController.signal });
+window.addEventListener('pagehide', __mbCleanup, { once: true, signal: __mbLifecycleController.signal });
+document.body.addEventListener('htmx:beforeSwap', function (event) {
+    if (event.detail && event.detail.shouldSwap === false) return;
+    if (event.detail && event.detail.target && event.detail.target.id !== 'content-area') return;
+    __mbCleanup();
+}, { signal: __mbLifecycleController.signal });
+document.body.addEventListener('htmx:beforeRequest', function (event) {
+    const detail = event.detail || {};
+    const trigger = detail.elt;
+    if (!__mbPageActive || !mbState.dirty || !trigger || !trigger.closest('.nav-link')) return;
+    if (detail.target && detail.target.id !== 'content-area') return;
+    if (!window.confirm('You have unsaved changes in the Minigame Builder. Leave this page without saving?')) {
+        event.preventDefault();
+    }
+}, { signal: __mbLifecycleController.signal });
 
 function schedulePreview(configChanged) {
     clearTimeout(previewTimer);
@@ -771,11 +802,16 @@ function pollTestDone() {
             const data = await res.json();
             if ((data.requests || []).length === 0) {
                 clearInterval(timer);
+                activePollTimers.delete(timer);
                 showToast('Test spawn finished — open History to see the result', 'info');
             }
         } catch (e) { /* keep polling */ }
-        if (tries > 60) clearInterval(timer);
+        if (tries > 60) {
+            clearInterval(timer);
+            activePollTimers.delete(timer);
+        }
     }, 2000);
+    activePollTimers.add(timer);
 }
 
 // ── init ───────────────────────────────────────────────────────────
@@ -803,8 +839,10 @@ async function loadBotIdentity() {
 
 (async function init() {
     await Promise.all([loadConfigAndTree(), loadBotIdentity()]);
+    if (!__mbPageActive) return;
     // channel default: the guild spawn channel (per-template override allowed)
     setTimeout(() => {
+        if (!__mbPageActive) return;
         const cp = document.getElementById('mb-channel');
         if (cp && !TEMPLATE_ID && mbState.configRoot && mbState.configRoot.channel_id) {
             $(cp).val(String(mbState.configRoot.channel_id)).trigger('change.select2');
@@ -813,6 +851,7 @@ async function loadBotIdentity() {
     }, 800);
     if (TEMPLATE_ID) {
         await loadTemplate(TEMPLATE_ID, false);
+        if (!__mbPageActive) return;
     }
     renderTypeCards();
     renderGameSettings();

@@ -1,0 +1,128 @@
+{
+  "content": "```ansi\n\u001b[1;35mWelcome to the Nero Color & Notification Center\u001b[0m\n```\nSelect your custom role color from the dropdown below or manage your roles using the buttons.",
+  "username": "Nero Role Studio",
+  "avatar_url": "https://cdn.discordapp.com/embed/avatars/0.png",
+  "tts": false,
+  "flags": 0,
+  "embeds": [
+    {
+      "title": "🎨 Color Roles Selection Hub",
+      "description": "Choose a color from the 20 available server palettes. Roles are applied immediately.",
+      "color": 13751792,
+      "image": {
+        "url": "https://cdn.discordapp.com/attachments/1088248319982006320/color_palette.jpg"
+      },
+      "fields": [
+        {
+          "name": "",
+          "value": "",
+          "inline": false
+        }
+      ],
+      "footer": {
+        "text": "Nero Role Studio • message.style compatible"
+      }
+    },
+    {
+      "title": "ℹ️ Guidelines & Perks",
+      "description": "```ansi\n\u001b[1;36mRole Selection Rules:\u001b[0m\n```\n• <@&970000000000000001> members receive priority colors.\n• Use <:nero_star:1088248319982006322> for custom badges.",
+      "color": 13751792,
+      "image": {
+        "url": "https://cdn.discordapp.com/attachments/1088248319982006320/palette_animation.gif"
+      },
+      "fields": [
+        {
+          "name": "First",
+          "value": "• One active color role per member\n• Instant update upon selection",
+          "inline": true
+        },
+        {
+          "name": "Second",
+          "value": "• Booster exclusive colors expire in 30 days\n• Contact staff for custom hexes",
+          "inline": true
+        }
+      ]
+    }
+  ],
+  "components": [
+    {
+      "type": 1,
+      "components": [
+        {
+          "type": 3,
+          "custom_id": "select_color_roles_v1",
+          "placeholder": "Choose your role color...",
+          "min_values": 1,
+          "max_values": 1,
+          "options": [
+            { "label": "Lavender", "value": "900000000000000101", "description": "Soft floral lavender tint", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_01" },
+            { "label": "Light Violet:", "value": "900000000000000102", "description": "Luminous violet shade", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_02" },
+            { "label": "Pastel Pinka", "value": "900000000000000103", "description": "Delicate pastel pink tone", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_03" },
+            { "label": "Raspberry", "value": "900000000000000104", "description": "Vibrant berry crimson", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_04" },
+            { "label": "Hot Pink", "value": "900000000000000105", "description": "Electric vibrant neon pink", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_05" },
+            { "label": "Dark Pink", "value": "900000000000000106", "description": "Deep muted magenta pink", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_06" },
+            { "label": "Bisque", "value": "900000000000000107", "description": "Warm creamy peach bisque", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_07" },
+            { "label": "Robin Blue", "value": "900000000000000108", "description": "Gentle egg blue tone", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_08" },
+            { "label": "Teal", "value": "900000000000000109", "description": "Crisp ocean turquoise teal", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_09" },
+            { "label": "Gray", "value": "900000000000000110", "description": "Neutral slate metallic gray", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_10" },
+            { "label": "Amber", "value": "900000000000000111", "description": "Rich golden sunset amber", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_11" },
+            { "label": "Wine", "value": "900000000000000112", "description": "Deep burgundy velvet wine", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_12" },
+            { "label": "Coffee", "value": "900000000000000113", "description": "Dark roasted espresso earth", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_13" },
+            { "label": "Dark Red", "value": "900000000000000114", "description": "Intense deep crimson ruby", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_14" },
+            { "label": "Black", "value": "900000000000000115", "description": "Midnight obsidian shadow", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_15" },
+            { "label": "Royal Blue", "value": "900000000000000116", "description": "Bold royal sapphire blue", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_16" },
+            { "label": "Baby Blue", "value": "900000000000000117", "description": "Soft pastel morning sky", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_17" },
+            { "label": "Emerald Green", "value": "900000000000000118", "description": "Lush vibrant emerald foliage", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_18" },
+            { "label": "Pumpkin", "value": "900000000000000119", "description": "Warm autumn harvest orange", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_19" },
+            { "label": "Iris", "value": "900000000000000120", "description": "Royal blooming iris violet", "emoji": { "name": "🖌️" }, "action_set_id": "act_color_20" }
+          ]
+        }
+      ]
+    },
+    {
+      "type": 1,
+      "components": [
+        {
+          "type": 2,
+          "style": 4,
+          "label": "Remove Color",
+          "custom_id": "btn_remove_color",
+          "emoji": { "name": "🗑️" },
+          "action_set_id": "act_btn_remove"
+        },
+        {
+          "type": 2,
+          "style": 4,
+          "label": "Clear Preferences",
+          "custom_id": "btn_clear_pref",
+          "emoji": { "name": "⚠️" },
+          "action_set_id": "act_btn_clear"
+        }
+      ]
+    }
+  ],
+  "actions": {
+    "act_color_01": { "actions": [] },
+    "act_color_02": { "actions": [] },
+    "act_color_03": { "actions": [] },
+    "act_color_04": { "actions": [] },
+    "act_color_05": { "actions": [] },
+    "act_color_06": { "actions": [] },
+    "act_color_07": { "actions": [] },
+    "act_color_08": { "actions": [] },
+    "act_color_09": { "actions": [] },
+    "act_color_10": { "actions": [] },
+    "act_color_11": { "actions": [] },
+    "act_color_12": { "actions": [] },
+    "act_color_13": { "actions": [] },
+    "act_color_14": { "actions": [] },
+    "act_color_15": { "actions": [] },
+    "act_color_16": { "actions": [] },
+    "act_color_17": { "actions": [] },
+    "act_color_18": { "actions": [] },
+    "act_color_19": { "actions": [] },
+    "act_color_20": { "actions": [] },
+    "act_btn_remove": { "actions": [] },
+    "act_btn_clear": { "actions": [] }
+  }
+}

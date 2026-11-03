@@ -254,6 +254,79 @@ async def add_column_if_missing(db, table, column, ddl):
         return False
 
 
+# reaction_roles used to be keyed by PRIMARY KEY (message_id, role_id), which made it
+# impossible to put the same role on two Studio buttons. SQLite cannot drop a primary
+# key, so databases created before this change are rebuilt once by
+# migrate_reaction_roles(). Fresh databases get this shape directly.
+REACTION_ROLES_CREATE_SQL = """
+    CREATE TABLE {name} (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id         INTEGER,
+        channel_id       INTEGER,
+        message_id       INTEGER,
+        button_label     TEXT,
+        button_emoji     TEXT,
+        button_color     TEXT DEFAULT 'blurple',
+        role_id          INTEGER,
+        booster_only     INTEGER DEFAULT 0,
+        required_role_id INTEGER DEFAULT NULL,
+        row_index        INTEGER DEFAULT 0,
+        button_index     INTEGER DEFAULT 0,
+        custom_id        TEXT DEFAULT NULL
+    )
+"""
+# The /rr command inserts rows with no custom_id and relies on INSERT OR REPLACE to
+# replace a repeated role. This partial index keeps that behaviour for those rows
+# while Studio rows (always given a custom_id) may repeat a role.
+REACTION_ROLES_LEGACY_UNIQUE_SQL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_reaction_roles_legacy_unique "
+    "ON reaction_roles(message_id, role_id) WHERE custom_id IS NULL")
+
+
+async def migrate_reaction_roles(db_path=None) -> bool:
+    """Rebuild a legacy reaction_roles table once; True if a rebuild happened.
+
+    The rebuild runs in a single BEGIN IMMEDIATE transaction: it either completes
+    with every row copied (row counts are compared before the old table is
+    dropped) or rolls back, leaving the original table untouched. The shape is
+    re-checked after the write lock is held, so the bot and the dashboard
+    starting together migrate exactly once. Never deletes or edits row data.
+    """
+    async def columns(db, table):
+        cursor = await db.execute(f'PRAGMA table_info("{table}")')
+        return [row[1] for row in await cursor.fetchall()]
+
+    async with aiosqlite.connect(db_path or DB_PATH, timeout=30, isolation_level=None) as db:
+        if not await columns(db, "reaction_roles"):
+            return False
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            old_columns = await columns(db, "reaction_roles")
+            rebuilt = "id" not in old_columns
+            if rebuilt:
+                await db.execute("DROP TABLE IF EXISTS reaction_roles_rebuild")
+                await db.execute(REACTION_ROLES_CREATE_SQL.format(name="reaction_roles_rebuild"))
+                shared = [c for c in await columns(db, "reaction_roles_rebuild") if c in old_columns]
+                names = ", ".join(f'"{c}"' for c in shared)
+                await db.execute(
+                    f"INSERT INTO reaction_roles_rebuild ({names}) "
+                    f"SELECT {names} FROM reaction_roles ORDER BY rowid")
+                counts = []
+                for table in ("reaction_roles", "reaction_roles_rebuild"):
+                    cursor = await db.execute(f"SELECT COUNT(*) FROM {table}")
+                    counts.append((await cursor.fetchone())[0])
+                if counts[0] != counts[1]:
+                    raise RuntimeError(f"reaction_roles rebuild copied {counts[1]} of {counts[0]} rows")
+                await db.execute("DROP TABLE reaction_roles")
+                await db.execute("ALTER TABLE reaction_roles_rebuild RENAME TO reaction_roles")
+            await db.execute(REACTION_ROLES_LEGACY_UNIQUE_SQL)
+            await db.execute("COMMIT")
+        except BaseException:
+            await db.execute("ROLLBACK")
+            raise
+    return rebuilt
+
+
 async def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -431,20 +504,7 @@ async def init_db():
             )
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS reaction_roles (
-                guild_id         INTEGER,
-                channel_id       INTEGER,
-                message_id       INTEGER,
-                button_label     TEXT,
-                button_emoji     TEXT,
-                button_color     TEXT DEFAULT 'blurple',
-                role_id          INTEGER,
-                booster_only     INTEGER DEFAULT 0,
-                required_role_id INTEGER DEFAULT NULL,
-                PRIMARY KEY (message_id, role_id)
-            )
-        """)
+        await db.execute(REACTION_ROLES_CREATE_SQL.format(name="IF NOT EXISTS reaction_roles"))
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS reaction_role_panels (
@@ -455,6 +515,61 @@ async def init_db():
                 require_confirmation INTEGER DEFAULT 0
             )
         """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reaction_role_selects (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id             INTEGER NOT NULL,
+                channel_id           INTEGER NOT NULL,
+                message_id           INTEGER NOT NULL,
+                row_index            INTEGER NOT NULL DEFAULT 0,
+                custom_id            TEXT NOT NULL,
+                placeholder          TEXT,
+                min_values           INTEGER NOT NULL DEFAULT 1,
+                max_values           INTEGER NOT NULL DEFAULT 1,
+                disabled             INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reaction_role_select_options (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                select_id            INTEGER NOT NULL,
+                message_id           INTEGER NOT NULL,
+                role_id              INTEGER NOT NULL,
+                label                TEXT NOT NULL,
+                description          TEXT,
+                emoji                TEXT,
+                booster_only         INTEGER NOT NULL DEFAULT 0,
+                required_role_id     INTEGER DEFAULT NULL,
+                expiry_days          INTEGER NOT NULL DEFAULT 0,
+                position             INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (select_id) REFERENCES reaction_role_selects(id) ON DELETE CASCADE
+            )
+        """)
+
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_selects_msg ON reaction_role_selects(message_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_selects_guild ON reaction_role_selects(guild_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_select_opts_sel ON reaction_role_select_options(select_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_rr_select_opts_msg ON reaction_role_select_options(message_id, role_id)")
+        await db.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_delete_reaction_role_select_options
+            AFTER DELETE ON reaction_role_selects
+            BEGIN
+                DELETE FROM reaction_role_select_options WHERE select_id = OLD.id;
+            END;
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS embed_send_nonces (
+                nonce TEXT PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_embed_send_nonces_msg ON embed_send_nonces(message_id)")
 
         # PHASE 5 TAIL FIX: message_id added to the key here too,
         # matching database.py's central schema/migration — see
@@ -1149,6 +1264,35 @@ async def init_db():
                 guild_id   INTEGER NOT NULL,
                 role_id    INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Phase D3 / Member Blacklist system.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_member_blacklist (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id   INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                reason     TEXT DEFAULT '',
+                created_by INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, user_id)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_lmb_guild_user
+            ON leveling_member_blacklist(guild_id, user_id)
+        """)
+
+        # The dashboard process has no Discord cache, so it cannot give roles back
+        # after an unblacklist. It queues the member here and the bot's sweep
+        # (utils.level_claims.process_blacklist_roles) restores them.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS leveling_blacklist_restores (
+                guild_id  INTEGER NOT NULL,
+                user_id   INTEGER NOT NULL,
+                queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id)
             )
         """)
 
@@ -2360,6 +2504,7 @@ async def init_db():
             print(f"[MIGRATION] developer legacy row cleanup: {e}")
 
     from utils.level_claims import backfill_legacy_claims, ensure_tables
+    await migrate_reaction_roles()
     await ensure_tables()
     await backfill_legacy_claims()
 

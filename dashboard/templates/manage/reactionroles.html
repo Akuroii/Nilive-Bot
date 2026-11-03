@@ -2,8 +2,25 @@
 {% block title %}Reaction Roles{% endblock %}
 {% block content %}
 
+<div class="card" style="background:linear-gradient(135deg, rgba(88,101,242,0.12) 0%, rgba(124,92,191,0.15) 100%);border:1px solid var(--primary);margin-bottom:20px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+        <div>
+            <div style="font-weight:700;font-size:15px;color:var(--text);display:flex;align-items:center;gap:6px;">
+                <svg class="icon-inline" viewBox="0 0 24 24" style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;" aria-hidden="true"><use href="#nero-i-zap"></use></svg>
+                Unified Message & Role Studio Available
+            </div>
+            <div class="text-muted text-sm" style="margin-top:4px;">
+                Author rich multi-embeds, markdown text, attachments, and interactive role buttons in a single cohesive workspace with live preview and direct Discord sending.
+            </div>
+        </div>
+        <a href="/embed-builder" hx-get="/embed-builder" hx-target="#content-area" hx-select="#content-area" hx-swap="outerHTML" hx-push-url="true" class="btn btn-primary" style="white-space:nowrap;">
+            Open Message & Role Studio →
+        </a>
+    </div>
+</div>
+
 <div class="card">
-    <div class="card-title">🎭 Create Reaction Role Panel</div>
+    <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-roles"></use></svg> Create Reaction Role Panel</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
         <div class="form-group">
             <label class="form-label">Panel title</label>
@@ -53,7 +70,7 @@
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start;">
     <div>
         <div class="card">
-            <div class="card-title">➕ Add Button</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Button</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
                 <div class="form-group">
                     <label class="form-label">Label</label>
@@ -92,12 +109,12 @@
         </div>
 
         <div class="card">
-            <div class="card-title">🔘 Buttons</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-sliders"></use></svg> Buttons</div>
             <div id="buttons-list"><p class="text-muted text-sm">No buttons added yet.</p></div>
         </div>
 
         <div class="card">
-            <div class="card-title">📤 Discord Commands</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-terminal"></use></svg> Discord Commands</div>
             <p class="text-muted text-sm" style="margin-bottom:12px;">
                 Copy and use these commands in Discord:
             </p>
@@ -117,7 +134,7 @@
 
     <div style="position:sticky;top:80px;">
         <div class="card">
-            <div class="card-title">👁️ Preview</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-eye"></use></svg> Preview</div>
             <div style="background:#313338;border-radius:8px;padding:16px;">
                 <div id="preview-embed"
                      style="border-left:4px solid #7c5cbf;background:#2b2d31;
@@ -132,7 +149,7 @@
             </div>
         </div>
         <div class="card">
-            <div class="card-title">📋 Saved Panels</div>
+            <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-file"></use></svg> Saved Panels</div>
             <div id="panels-list"><span class="text-muted text-sm">Loading...</span></div>
         </div>
     </div>

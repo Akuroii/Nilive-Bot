@@ -106,6 +106,23 @@ async def give_reward(bot: discord.Client,
         # XP sources are independent. Message XP and Voice XP each apply their
         # own switches in their runtime listeners; shared rewards (missions,
         # events, minigames, tags, claims) are never suppressed by Message XP.
+        # Member Blacklist (D3): all positive XP grants are blocked when blacklisted.
+        from utils.xp_calculator import is_member_blacklisted
+        if amount > 0 and await is_member_blacklisted(guild_id, user_id):
+            return {
+                "success": False,
+                "reward_type": "xp",
+                "amount": 0,
+                "blacklisted": True,
+                "error": "Member is blacklisted from earning XP",
+                "old_level": None,
+                "new_level": None,
+                "leveled_up": False,
+                "queued": False,
+                "duplicate": False,
+                "deferred": False,
+            }
+
         from utils.level_claims import (
             member_is_booster, record_crossing, snapshot_multipliers,
         )
@@ -260,6 +277,21 @@ async def give_reward(bot: discord.Client,
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("BEGIN IMMEDIATE")
                 try:
+                    if amount > 0 and await is_member_blacklisted(guild_id, user_id, db=db):
+                        await db.execute("ROLLBACK")
+                        return {
+                            "success": False,
+                            "reward_type": "xp",
+                            "amount": 0,
+                            "blacklisted": True,
+                            "error": "Member is blacklisted from earning XP",
+                            "old_level": None,
+                            "new_level": None,
+                            "leveled_up": False,
+                            "queued": False,
+                            "duplicate": False,
+                            "deferred": False,
+                        }
                     deferred_reason = await ops.xp_write_barrier(
                         guild_id, user_id, db)
                     if deferred_reason is None:
