@@ -667,8 +667,38 @@ def update_shop_item(item_id: int):
     # permanent clear, and POST creation validation is unaffected. The clause
     # cannot apply to any other type and never fires for rows without a
     # stored positive duration.
+    def _tier_of(value):
+        """Normalize a stored/submitted Prestige tier for COMPARISON only.
+
+        The Edit form sends the <select>'s string value, so `5` and `"5"` are
+        the same tier and must not read as a change. Blank/missing/null is
+        None. The persisted value still comes from the validator below.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return None
+
     legacy_duration_keep = None
     if existing["type"] in ("title", "prestige") and existing["duration_hours"]:
+        # TIER GUARD (Prestige only). The grandfather clause exists to keep an
+        # OLD duration editable on the row that already stored it; it must NOT
+        # carry that duration across a TIER CHANGE. Without this guard a legacy
+        # VI(48) edited into a V became a timed Prestige V, and a legacy V(24)
+        # edited into a VI became a timed product that claims to be permanent
+        # and unmetered. When the tier actually changes the clause steps aside,
+        # so the merged duration goes through the normal permanence rule: an
+        # omitted or resubmitted positive value is REJECTED (nothing written),
+        # while an explicit clear still passes and stores NULL.
+        # Title is deliberately tier-blind: a Title carries no tier, and its
+        # safe-field edits must keep behaving exactly as before.
+        tier_unchanged = (
+            existing["type"] != "prestige"
+            or _tier_of(merged.get("prestige_tier"))
+            == _tier_of(existing["prestige_tier"]))
         if "duration_hours" not in raw:
             unchanged = True
         else:
@@ -677,7 +707,7 @@ def update_shop_item(item_id: int):
                 submitted == existing["duration_hours"]
                 or (isinstance(submitted, str) and submitted.strip().isdigit()
                     and int(submitted.strip()) == existing["duration_hours"]))
-        if unchanged:
+        if unchanged and tier_unchanged:
             legacy_duration_keep = existing["duration_hours"]
             merged["duration_hours"] = 0   # validation representation only
 

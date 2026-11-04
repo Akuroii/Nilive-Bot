@@ -328,6 +328,86 @@ class ProductManagementTests(unittest.TestCase):
         r = self.put(p, dict(duration_hours=12))
         self.assertEqual(r.status_code, 400, r.get_json())
         self.assertEqual(self.field(p, "duration_hours"), 24)
+        # the SAME tier resubmitted as a number or a form-string is not a tier
+        # change, so the grandfathered value is still preserved
+        for same_tier in (2, "2"):
+            r = self.put(p, dict(prestige_tier=same_tier, price=650))
+            self.assertEqual(r.status_code, 200, r.get_json())
+            self.assertEqual(
+                self.one("SELECT duration_hours,prestige_tier FROM shop_items "
+                         "WHERE id=?", (p,)), (24, 2))
+
+    def test_legacy_prestige_tier_change_cannot_carry_the_old_duration(self):
+        # THE TIER-CHANGE HOLE: the grandfather clause keys off a stored
+        # positive duration, but it must NOT carry that duration across a
+        # CHANGE OF TIER. A legacy VI(48) turned into a V used to become a
+        # timed Prestige V; a legacy V(24) turned into a VI became a product
+        # claiming to be permanent and unmetered while holding a duration.
+        v = seed_item(kind="prestige", name="Old VI", price=0,
+                      prestige_tier=6, duration=48)
+        before = mutation_snapshot()
+        # 1. the old duration is still present -> REJECTED, nothing written
+        r = self.put(v, dict(prestige_tier=5, price=500, duration_hours=48))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(mutation_snapshot(), before)
+        self.assertEqual(
+            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
+                     "WHERE id=?", (v,)), (48, 0, 6))
+        # 1b. omitted duration is not an escape hatch either: the clause steps
+        #     aside entirely, so the still-stored positive value fails the
+        #     permanence rule
+        r = self.put(v, dict(prestige_tier=5, price=500))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(self.field(v, "prestige_tier"), 6)
+        # 2. an EXPLICIT clear first, then the tier change, is allowed and
+        #    stores NULL — never the old 48
+        r = self.put(v, dict(duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIsNone(self.field(v, "duration_hours"))
+        r = self.put(v, dict(prestige_tier=5, price=500))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
+                     "WHERE id=?", (v,)), (None, 500, 5))
+        # 3. V(24) -> VI must end up genuinely free, unmetered and permanent
+        p = seed_item(kind="prestige", name="Old V", price=500,
+                      prestige_tier=5, duration=24)
+        r = self.put(p, dict(prestige_tier=6, price=0, duration_hours=24))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(
+            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
+                     "WHERE id=?", (p,)), (24, 500, 5))
+        r = self.put(p, dict(prestige_tier=6, price=0))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        # ... and only an explicit clear lets the VI through, with VI terms
+        r = self.put(p, dict(prestige_tier=6, price=0, duration_hours=0))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT duration_hours,price,prestige_tier,max_stock,"
+                     "required_level,role_id FROM shop_items WHERE id=?", (p,)),
+            (None, 0, 6, None, 0, None))
+
+    def test_legacy_title_edit_is_tier_blind(self):
+        # The tier guard is Prestige-only. A Title carries no tier, so its
+        # safe-field edits and its grandfathered duration must behave exactly
+        # as before — the new comparison must not accidentally fire on Title's
+        # NULL tier (None == None must stay true).
+        t = seed_item(kind="title", name="Old Title", price=100, duration=48)
+        for payload in (dict(price=110), dict(price=120, duration_hours=48),
+                        dict(price=130, duration_hours="48"),
+                        dict(price=140, prestige_tier=None),
+                        dict(price=150, prestige_tier="")):
+            r = self.put(t, payload)
+            self.assertEqual(r.status_code, 200, (payload, r.get_json()))
+            self.assertEqual(self.field(t, "duration_hours"), 48, payload)
+        self.assertEqual(self.field(t, "price"), 150)
+        # a Title still cannot gain a DIFFERENT positive duration
+        r = self.put(t, dict(duration_hours=72))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        # and an explicit clear still works
+        r = self.put(t, dict(duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIsNone(self.field(t, "duration_hours"))
 
     def test_ui_duration_clear_payload_null_clears_legacy_duration(self):
         # THE EXACT UI CLEAR PAYLOAD: the edit form computes

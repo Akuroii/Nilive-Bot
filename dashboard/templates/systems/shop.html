@@ -89,13 +89,28 @@
                        type="number" min="1.1" step="0.1" placeholder="e.g. 2">
                 <div class="form-hint">e.g. 2 = double XP while active</div>
             </div>
-            <div class="form-group">
+            <div class="form-group" id="item-duration-field">
                 <label class="form-label" id="item-duration-label">
                     Duration hours (0 = permanent)
                 </label>
                 <input class="form-input" id="item-duration"
                        type="number" min="0" value="0">
                 <div class="form-hint" id="item-duration-hint"></div>
+                <!-- Edit-only escape hatch for a row created BEFORE the
+                     Title/Prestige permanence rule, which can legally hold a
+                     positive duration. VI disables the duration input, so
+                     without an explicit action an administrator could never
+                     clear that stored value while keeping the product at VI.
+                     Shown only for an existing Prestige VI whose STORED
+                     duration is positive; see refreshLegacyViDurationControls(). -->
+                <div class="form-hint" id="item-legacy-duration-note"
+                     style="display:none;margin-top:6px;"></div>
+                <button type="button" class="btn btn-sm btn-secondary"
+                        id="item-clear-legacy-duration"
+                        onclick="clearLegacyViDuration()"
+                        style="display:none;margin-top:6px;">
+                    Clear legacy duration
+                </button>
             </div>
             <div class="form-group">
                 <label class="form-label">
@@ -313,6 +328,7 @@ __neroGlobal.toggleItemTypeFields = toggleItemTypeFields;
 __neroGlobal.addItem = addItem;
 __neroGlobal.editItem = editItem;
 __neroGlobal.cancelShopEdit = cancelShopEdit;
+__neroGlobal.clearLegacyViDuration = clearLegacyViDuration;
 
 // Non-null while the Add form is repurposed as an Edit form. addItem() reads
 // it to choose POST (create) vs PUT (update); editItem()/cancelShopEdit() set
@@ -343,17 +359,103 @@ function isFreeVI() {
     return document.getElementById('item-type').value === 'prestige' &&
            document.getElementById('item-prestige-tier').value === '6';
 }
+
+// Non-null ONLY while the form is editing an EXISTING Prestige VI row that was
+// stored with a positive (legacy) duration — i.e. a row that predates the
+// permanence rule. It carries that stored value so the prefill can survive the
+// VI field lock and so an unrelated save can send it back unchanged instead of
+// silently clearing it. Cleared by editItem(), cancelShopEdit() and
+// clearLegacyViDuration(); never set for a NEW VI.
+var editingLegacyViDuration = null;
+
+// Every control the VI lock owns. applyFreeVIFields() caches a `paidValue` on
+// these while VI is active; clearViFieldCache() is the ONLY place that cache is
+// dropped, so no value can outlive the VI row it belonged to.
+var VI_LOCKED_FIELDS = ['item-price', 'item-price-diamonds', 'item-stock',
+                        'item-level', 'item-duration'];
+
+// Drop the cached paid values AND the VI lock in one place. Called whenever the
+// form leaves a VI context (loading another product, Cancel). Without this the
+// cache leaked: editing a legacy VI and then a paid product restored VI's "0"
+// over the paid price, dropped its stock limit and zeroed its level gate.
+function clearViFieldCache() {
+    for (const id of VI_LOCKED_FIELDS) {
+        const input = document.getElementById(id);
+        if (!input) continue;
+        delete input.dataset.paidValue;
+        input.disabled = false;
+    }
+    const label = document.getElementById('item-duration-label');
+    if (label) label.textContent = 'Duration hours (0 = permanent)';
+}
+
+// Show the legacy-duration note/action ONLY for an existing VI row whose stored
+// duration is still positive. `stored` is that value (or null).
+function refreshLegacyViDurationControls(stored) {
+    const note = document.getElementById('item-legacy-duration-note');
+    const btn = document.getElementById('item-clear-legacy-duration');
+    const show = typeof stored === 'number' && stored > 0;
+    if (note) {
+        note.textContent = show
+            ? 'This Prestige VI was created before the permanence rule and '
+              + 'still stores a ' + stored + '-hour duration. Saving keeps it; '
+              + 'Prestige VI products are permanent and unmetered.'
+            : '';
+        note.style.display = show ? 'block' : 'none';
+    }
+    if (btn) btn.style.display = show ? 'inline-block' : 'none';
+}
+
+// Explicit, deliberate clear of a grandfathered VI duration. Everything else
+// stays in VI mode: free, unmetered, duration-disabled. The next PUT sends
+// duration_hours: null and the API stores NULL while keeping tier VI.
+function clearLegacyViDuration() {
+    editingLegacyViDuration = null;
+    const dur = document.getElementById('item-duration');
+    delete dur.dataset.paidValue;   // no stale cached "48" to restore
+    dur.value = '0';
+    refreshLegacyViDurationControls(null);
+    applyFreeVIFields();            // keep VI free/unmetered/disabled
+}
+
 function applyFreeVIFields() {
     const free = isFreeVI();
-    for (const id of ['item-price', 'item-price-diamonds', 'item-stock', 'item-level', 'item-duration']) {
+    for (const id of VI_LOCKED_FIELDS) {
         const input = document.getElementById(id);
-        if (free && !input.disabled) {
-            input.dataset.paidValue = input.value;
-            input.value = '0';
-        } else if (!free && input.disabled) {
-            input.value = input.dataset.paidValue || '';
+        if (free) {
+            if (!input.disabled) {
+                // Cache the paid value only on the transition INTO the lock, and
+                // never cache the grandfathered legacy duration: it is carried
+                // by editingLegacyViDuration, and caching it here is what let a
+                // tier change launder 48 hours onto a different product.
+                if (id === 'item-duration') {
+                    if (editingLegacyViDuration === null) {
+                        input.dataset.paidValue = input.value;
+                    }
+                } else {
+                    input.dataset.paidValue = input.value;
+                }
+                input.value = '0';
+            }
+        } else if (input.disabled) {
+            // Leaving VI: put the remembered paid value back. The duration is
+            // the exception — while a legacy duration is in play the input
+            // already SHOWS the stored value (set below), so leaving VI must
+            // not re-impose it over an administrator's explicit clear. That is
+            // what keeps "Clear, then change tier" a real clear while an
+            // untouched VI->V change still carries the old value for the API to
+            // reject.
+            if (!(id === 'item-duration' && editingLegacyViDuration !== null)) {
+                input.value = input.dataset.paidValue || '';
+            }
         }
         input.disabled = free;
+    }
+    // The legacy duration is restored above, but VI must never SHOW it as an
+    // editable zero: keep the stored value visible while the lock is active.
+    if (free && editingLegacyViDuration !== null) {
+        document.getElementById('item-duration').value =
+            String(editingLegacyViDuration);
     }
     document.getElementById('item-price').min =
         document.getElementById('item-type').value === 'prestige' && !free ? '1' : '0';
@@ -419,6 +521,10 @@ function toggleItemTypeFields() {
         durHint.textContent = '';
     }
     applyFreeVIFields();
+    // The legacy-duration note/action belongs to a VI context only; stepping off
+    // VI (or onto a non-Prestige type) retires it. (No-op while the flag is
+    // null, which is the case on a fresh Add form.)
+    refreshLegacyViDurationControls(editingLegacyViDuration);
 }
 toggleItemTypeFields();
 
@@ -439,6 +545,16 @@ async function addItem() {
     // (a Diamond price is set).
     const priceRaw = (document.getElementById('item-price').value || '').trim();
     const priceValue = /^\d+$/.test(priceRaw) ? parseInt(priceRaw, 10) : null;
+    // Duration: blank or 0 = permanent (null); digits = that many hours; any
+    // other entry stays NaN so it is rejected below. This keeps a legacy VI
+    // duration the form is PRESERVING (48) intact — the old
+    // `parseInt(...) || null` turned an unreadable value into a silent 0 and,
+    // because the VI lock disables the input, that silently cleared the stored
+    // duration on any unrelated edit.
+    const durationRaw = (document.getElementById('item-duration').value || '').trim();
+    const durationValue = (durationRaw === '' || durationRaw === '0')
+        ? null
+        : (/^\d+$/.test(durationRaw) ? parseInt(durationRaw, 10) : NaN);
     // Role-granting types carry a role_id; everything else sends null. Color
     // joins role/temp_role here (cogs/shop.py grants a Colour as a role), and
     // Item (custom) correctly drops the role field it never actually used.
@@ -455,8 +571,10 @@ async function addItem() {
                        ? parseInt(prestigeTier.value) : null,
         xp_boost_multiplier: (type === 'xp_boost' || type === 'potion') && boostMult > 1
                        ? boostMult : null,
-        duration_hours:parseInt(
-            document.getElementById('item-duration').value) || null,
+        // A blank or 0 field is "permanent" (null); a blank is never silently
+        // collapsed into 0. NaN must stay NaN so a non-numeric entry is
+        // rejected below instead of being rewritten as "permanent".
+        duration_hours:durationValue,
         required_level:parseInt(
             document.getElementById('item-level').value) || 0,
         description:   document.getElementById('item-desc').value,
@@ -479,7 +597,16 @@ async function addItem() {
         payload.max_stock = null;
         if (!editingId) payload.current_stock = null;
         payload.required_level = 0;
-        payload.duration_hours = null;
+        // Legacy duration preservation. A VI row that predates the permanence
+        // rule still stores a positive duration, and VI disables the input, so
+        // parseInt above would read the locked 0 and silently clear it on ANY
+        // unrelated edit. editingLegacyViDuration is null for a NEW VI and is
+        // nulled by clearLegacyViDuration(), so:
+        //   untouched legacy VI edit -> resend the stored value (API preserves)
+        //   explicit Clear clicked   -> send null  (API stores NULL)
+        //   brand-new VI            -> send null  (unchanged behaviour)
+        payload.duration_hours = (editingLegacyViDuration === null
+                                  ? null : editingLegacyViDuration);
     }
     if (!payload.name) {
         showToast('Enter name and a coin or diamond price', 'danger');
@@ -493,6 +620,12 @@ async function addItem() {
     if (!freeVI && type !== 'prestige' && payload.price_diamonds === null
             && priceValue === null) {
         showToast('Enter name and a coin or diamond price', 'danger');
+        return;
+    }
+    if (typeof payload.duration_hours === 'number'
+            && isNaN(payload.duration_hours)) {
+        showToast('Duration must be a whole number of hours (0 = permanent)',
+                  'danger');
         return;
     }
     if (type === 'xp_boost' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
@@ -572,6 +705,12 @@ async function editItem(id) {
     if (!item) return;
     editingId = item.id;
 
+    // Leave the PREVIOUS product's VI context completely before prefilling.
+    // clearViFieldCache() drops every cached `paidValue` and releases the VI
+    // lock, so nothing from the last row can be restored over this one.
+    clearViFieldCache();
+    editingLegacyViDuration = null;
+
     document.getElementById('item-name').value = item.name || '';
     document.getElementById('item-desc').value = item.description || '';
     document.getElementById('item-price').value = item.price == null ? '' : item.price;
@@ -594,11 +733,19 @@ async function editItem(id) {
     }
 
     // Lock the (immutable) type, injecting a display option for legacy types.
+    // Remember a grandfathered VI duration BEFORE the lock, because
+    // applyFreeVIFields() zeroes the duration input on the way into VI mode.
+    if (item.type === 'prestige' && item.prestige_tier === 6
+            && typeof item.duration_hours === 'number'
+            && item.duration_hours > 0) {
+        editingLegacyViDuration = item.duration_hours;
+    }
     const typeSel = document.getElementById('item-type');
     ensureTypeOption(typeSel, item.type);
     typeSel.value = item.type;
     typeSel.disabled = true;
     toggleItemTypeFields();
+    refreshLegacyViDurationControls(editingLegacyViDuration);
 
     // Show current stock separately from the maximum (read-only).
     document.getElementById('item-current-stock-field').style.display = 'block';
@@ -620,6 +767,11 @@ async function editItem(id) {
 // Leave edit mode and reset the form back to a clean "add" state.
 function cancelShopEdit() {
     editingId = null;
+    // Drop the grandfathered duration AND every cached VI paid value, otherwise
+    // the next Add would carry the previous product's numbers.
+    editingLegacyViDuration = null;
+    clearViFieldCache();
+    refreshLegacyViDurationControls(null);
     const typeSel = document.getElementById('item-type');
     typeSel.disabled = false;
     const opts = typeSel.options ? Array.prototype.slice.call(typeSel.options) : [];
