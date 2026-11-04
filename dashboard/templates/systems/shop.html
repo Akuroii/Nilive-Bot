@@ -23,7 +23,9 @@
 <!-- ITEMS TAB -->
 <div id="tab-content-items" class="tab-content">
     <div class="card">
-        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Shop Item</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> <span id="shop-form-title">Add Shop Item</span></div>
+        <div id="shop-edit-banner"
+             style="display:none;margin:0 0 14px;padding:8px 12px;border:1px solid var(--accent);border-radius:8px;background:rgba(124,92,191,.10);font-size:13px;color:var(--text);"></div>
         <div style="display:grid;
                     grid-template-columns:1fr 1fr;gap:16px;">
             <div class="form-group">
@@ -45,14 +47,17 @@
             </div>
             <div class="form-group">
                 <label class="form-label">Type</label>
+                <!-- The five current product types. Item stores the internal
+                     value `custom`, Color stores `color`; the legacy
+                     role/temp_role/xp_boost types are no longer offered for
+                     NEW products (existing ones stay editable via a temporary
+                     option injected by editItem()). -->
                 <select class="form-input" id="item-type" onchange="toggleItemTypeFields()">
-                    <option value="role">Permanent Role</option>
-                    <option value="temp_role">Temporary Role</option>
-                    <option value="xp_boost">⚡ XP Boost</option>
-                    <option value="prestige">⭐ Prestige</option>
-                    <option value="potion">🧪 Potion (consumable)</option>
+                    <option value="custom">📦 Item</option>
+                    <option value="color">🎨 Color</option>
+                    <option value="potion">🧪 Potion</option>
                     <option value="title">🏷️ Title</option>
-                    <option value="custom">Custom</option>
+                    <option value="prestige">⭐ Prestige</option>
                 </select>
             </div>
             <div class="form-group" id="item-prestige-tier-field" style="display:none;">
@@ -76,6 +81,7 @@
                 <label class="form-label">Role ID</label>
                 <input class="form-input" id="item-role"
                        placeholder="Right click role → Copy ID">
+                <div class="form-hint">The role a Color product grants</div>
             </div>
             <div class="form-group" id="item-boost-mult-field" style="display:none;">
                 <label class="form-label" id="item-boost-mult-label">XP Multiplier</label>
@@ -126,13 +132,27 @@
                 <input class="form-input" id="item-stock"
                        type="number" min="0" value="0">
             </div>
+            <!-- Edit-only: current stock is shown SEPARATELY from the maximum
+                 and is read-only — editing the maximum never restocks, and the
+                 maximum cannot be lowered below this. Hidden while adding (a
+                 new listing starts at current == max). -->
+            <div class="form-group" id="item-current-stock-field" style="display:none;">
+                <label class="form-label">Current stock (on hand)</label>
+                <input class="form-input" id="item-current-stock"
+                       type="text" readonly tabindex="-1"
+                       style="opacity:.72;cursor:not-allowed;">
+                <div class="form-hint">Read-only — editing the maximum does not restock</div>
+            </div>
         </div>
         <label class="form-check" style="margin-bottom:16px;">
             <input type="checkbox" id="item-featured">
             Featured item (shown first with ⭐)
         </label>
-        <button class="btn btn-primary"
+        <button class="btn btn-primary" id="shop-submit-btn"
                 onclick="addItem()">Add Item</button>
+        <button class="btn btn-secondary" id="shop-cancel-edit"
+                onclick="cancelShopEdit()"
+                style="display:none;margin-left:8px;">Cancel</button>
         <div id="shop-status"
              style="margin-top:10px;font-size:13px;"></div>
     </div>
@@ -151,6 +171,11 @@
                 <tbody hx-get="/api/shop/items"
                        hx-trigger="load"
                        hx-swap="innerHTML">
+                    {# Finalized type display names (fallback render only; the
+                       htmx partial in dashboard/api/economy_shop.py is the
+                       authoritative view). item[10] is prestige_tier. #}
+                    {% set TYPE_LABELS = {'custom': 'Item', 'color': 'Color', 'potion': 'Potion', 'title': 'Title', 'prestige': 'Prestige', 'role': 'Permanent Role', 'temp_role': 'Temporary Role', 'xp_boost': 'XP Boost'} %}
+                    {% set ROMAN = {1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI'} %}
                     {% for item in items %}
                     <tr>
                         <td>
@@ -170,7 +195,7 @@
                             {% endif %}
                         </td>
                         <td>
-                            {{ item[4] }}{% if item[4] == 'xp_boost' and item[10] %} ({{ item[10] }}x){% endif %}
+                            {{ TYPE_LABELS.get(item[4], item[4]) }}{% if item[4] == 'prestige' and item[10] %} {{ ROMAN.get(item[10], item[10]) }}{% endif %}
                         </td>
                         <td>
                             {% if item[0] in free_vi_ids %}
@@ -188,6 +213,11 @@
                             </span>
                         </td>
                         <td>
+                            <button class="btn btn-sm btn-secondary"
+                                onclick="editItem({{ item[0] }})"
+                                style="margin-right:6px;">
+                                Edit
+                            </button>
                             <button class="btn btn-sm btn-danger"
                                 hx-delete="/api/shop/item/{{ item[0] }}"
                                 hx-confirm="Delete {{ item[1] }}?"
@@ -281,6 +311,14 @@ __neroGlobal.isFreeVI = isFreeVI;
 __neroGlobal.applyFreeVIFields = applyFreeVIFields;
 __neroGlobal.toggleItemTypeFields = toggleItemTypeFields;
 __neroGlobal.addItem = addItem;
+__neroGlobal.editItem = editItem;
+__neroGlobal.cancelShopEdit = cancelShopEdit;
+
+// Non-null while the Add form is repurposed as an Edit form. addItem() reads
+// it to choose POST (create) vs PUT (update); editItem()/cancelShopEdit() set
+// and clear it. Declared with `var` so the wrapped page script stays
+// re-evaluation-safe (see test_dashboard_page_scripts.py).
+var editingId = null;
 
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(
@@ -357,7 +395,23 @@ function toggleItemTypeFields() {
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
         durHint.textContent = 'Titles are cosmetic and permanent — leave as 0.';
+    } else if (type === 'color') {
+        // Color is a buyable colour role: cogs/shop.py grants it as a permanent
+        // role at duration 0, or a timed role when positive. It needs a role ID.
+        roleField.style.display = 'block';
+        boostField.style.display = 'none';
+        prestigeField.style.display = 'none';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent = '0 = permanent colour role; positive = temporary (timed role).';
+    } else if (type === 'custom') {
+        // Item: an inventory product (no role). 0 = permanent, positive = timed.
+        roleField.style.display = 'none';
+        boostField.style.display = 'none';
+        prestigeField.style.display = 'none';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent = '0 = permanent inventory item; positive = timed holding.';
     } else {
+        // Legacy role / temp_role — still editable, no longer offered for new.
         roleField.style.display = 'block';
         boostField.style.display = 'none';
         prestigeField.style.display = 'none';
@@ -385,12 +439,16 @@ async function addItem() {
     // (a Diamond price is set).
     const priceRaw = (document.getElementById('item-price').value || '').trim();
     const priceValue = /^\d+$/.test(priceRaw) ? parseInt(priceRaw, 10) : null;
+    // Role-granting types carry a role_id; everything else sends null. Color
+    // joins role/temp_role here (cogs/shop.py grants a Colour as a role), and
+    // Item (custom) correctly drops the role field it never actually used.
+    const needsRole = ['color', 'role', 'temp_role'].indexOf(type) !== -1;
     const payload = {
         name:          document.getElementById('item-name').value,
         price:         priceValue === null ? 0 : priceValue,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
         type:          type,
-        role_id:       ['xp_boost', 'prestige', 'potion', 'title'].indexOf(type) === -1
+        role_id:       needsRole
                        ? (document.getElementById('item-role').value || null)
                        : null,
         prestige_tier: type === 'prestige' && prestigeTier
@@ -407,14 +465,19 @@ async function addItem() {
         featured:      document.getElementById('item-featured')
                                .checked ? 1 : 0,
         max_stock:     stock > 0 ? stock : null,
-        current_stock: stock > 0 ? stock : null,
     };
+    // A NEW listing starts at full stock (current == max), the existing create
+    // behavior. An EDIT never sends current_stock, so the server preserves the
+    // stock on hand — editing the maximum does not restock.
+    if (!editingId) {
+        payload.current_stock = payload.max_stock;
+    }
     const freeVI = isFreeVI();
     if (freeVI) {
         payload.price = 0;
         payload.price_diamonds = null;
         payload.max_stock = null;
-        payload.current_stock = null;
+        if (!editingId) payload.current_stock = null;
         payload.required_level = 0;
         payload.duration_hours = null;
     }
@@ -453,18 +516,139 @@ async function addItem() {
             return;
         }
     }
-    const res  = await fetch('/api/shop/item', {
-        method:  'POST',
+    // Create posts to the collection; edit PUTs to the item. The global fetch
+    // wrapper (dashboard.js) injects the X-CSRF-Token on both non-GET calls.
+    const url    = editingId ? '/api/shop/item/' + editingId : '/api/shop/item';
+    const method = editingId ? 'PUT' : 'POST';
+    const res  = await fetch(url, {
+        method:  method,
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(payload),
     });
     const data = await res.json();
     if (data.success) {
-        showToast('Item added!');
+        showToast(editingId ? 'Item updated!' : 'Item added!');
         setTimeout(() => location.reload(), 800);
     } else {
-        showToast('Error saving', 'danger');
+        showToast(data.error || 'Error saving', 'danger');
     }
+}
+
+// Add a temporary, non-selectable option so the LOCKED type <select> can show
+// a legacy product's type (role/temp_role/xp_boost) that the create dropdown no
+// longer lists. Never used for the five current types (they are already there).
+function ensureTypeOption(sel, type) {
+    if (!sel || !type) return;
+    const opts = sel.options || [];
+    for (let i = 0; i < opts.length; i++) {
+        if (opts[i].value === type) return;
+    }
+    const legacy = {
+        role: 'Permanent Role (legacy)',
+        temp_role: 'Temporary Role (legacy)',
+        xp_boost: 'XP Boost (legacy)',
+    };
+    const opt = document.createElement('option');
+    opt.value = type;
+    opt.textContent = legacy[type] || type;
+    opt.disabled = true;          // cannot be chosen for a new product
+    opt.setAttribute('data-temporary', '1');
+    sel.appendChild(opt);
+}
+
+// Load one product into the Add form and switch the form into edit mode. The
+// type is locked (immutable); current stock is shown read-only beside the
+// editable maximum; the submit button PUTs.
+async function editItem(id) {
+    let item = null;
+    try {
+        const res = await fetch('/api/shop/item/' + id);
+        const data = await res.json();
+        if (data && data.success) item = data.item;
+        else showToast((data && data.error) || 'Could not load this item', 'danger');
+    } catch (e) {
+        showToast('Could not load this item', 'danger');
+    }
+    if (!item) return;
+    editingId = item.id;
+
+    document.getElementById('item-name').value = item.name || '';
+    document.getElementById('item-desc').value = item.description || '';
+    document.getElementById('item-price').value = item.price == null ? '' : item.price;
+    document.getElementById('item-price-diamonds').value =
+        item.price_diamonds == null ? '' : item.price_diamonds;
+    document.getElementById('item-role').value = item.role_id == null ? '' : item.role_id;
+    document.getElementById('item-boost-mult').value =
+        item.xp_boost_multiplier == null ? '' : item.xp_boost_multiplier;
+    document.getElementById('item-duration').value =
+        item.duration_hours == null ? '0' : item.duration_hours;
+    document.getElementById('item-level').value =
+        item.required_level == null ? '0' : item.required_level;
+    document.getElementById('item-icon').value = item.icon_url || '';
+    document.getElementById('item-rarity').value = item.rarity || 'common';
+    document.getElementById('item-featured').checked = !!item.featured;
+    document.getElementById('item-stock').value =
+        item.max_stock == null ? '0' : item.max_stock;
+    if (item.type === 'prestige' && item.prestige_tier != null) {
+        document.getElementById('item-prestige-tier').value = String(item.prestige_tier);
+    }
+
+    // Lock the (immutable) type, injecting a display option for legacy types.
+    const typeSel = document.getElementById('item-type');
+    ensureTypeOption(typeSel, item.type);
+    typeSel.value = item.type;
+    typeSel.disabled = true;
+    toggleItemTypeFields();
+
+    // Show current stock separately from the maximum (read-only).
+    document.getElementById('item-current-stock-field').style.display = 'block';
+    document.getElementById('item-current-stock').value =
+        item.current_stock == null ? 'Unlimited' : item.current_stock;
+
+    document.getElementById('shop-form-title').textContent = 'Edit Shop Item';
+    document.getElementById('shop-submit-btn').textContent = 'Save Changes';
+    document.getElementById('shop-cancel-edit').style.display = 'inline-block';
+    const banner = document.getElementById('shop-edit-banner');
+    banner.textContent = 'Editing “' + (item.name || '') +
+        '” — the product type cannot be changed.';
+    banner.style.display = 'block';
+    if (banner.scrollIntoView) {
+        banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+}
+
+// Leave edit mode and reset the form back to a clean "add" state.
+function cancelShopEdit() {
+    editingId = null;
+    const typeSel = document.getElementById('item-type');
+    typeSel.disabled = false;
+    const opts = typeSel.options ? Array.prototype.slice.call(typeSel.options) : [];
+    for (let i = 0; i < opts.length; i++) {
+        if (opts[i].getAttribute && opts[i].getAttribute('data-temporary') === '1') {
+            opts[i].remove();
+        }
+    }
+    typeSel.value = 'custom';
+    document.getElementById('item-name').value = '';
+    document.getElementById('item-desc').value = '';
+    document.getElementById('item-price').value = '';
+    document.getElementById('item-price-diamonds').value = '';
+    document.getElementById('item-role').value = '';
+    document.getElementById('item-boost-mult').value = '';
+    document.getElementById('item-duration').value = '0';
+    document.getElementById('item-level').value = '0';
+    document.getElementById('item-icon').value = '';
+    document.getElementById('item-rarity').value = 'common';
+    document.getElementById('item-featured').checked = false;
+    document.getElementById('item-stock').value = '0';
+    document.getElementById('item-prestige-tier').value = '1';
+    toggleItemTypeFields();   // re-enables any VI-locked fields, restores labels
+    document.getElementById('item-current-stock-field').style.display = 'none';
+    document.getElementById('item-current-stock').value = '';
+    document.getElementById('shop-form-title').textContent = 'Add Shop Item';
+    document.getElementById('shop-submit-btn').textContent = 'Add Item';
+    document.getElementById('shop-cancel-edit').style.display = 'none';
+    document.getElementById('shop-edit-banner').style.display = 'none';
 }
 
 })();

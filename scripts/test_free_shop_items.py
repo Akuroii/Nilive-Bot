@@ -318,10 +318,17 @@ class FreeListingApiTests(unittest.TestCase):
                                 headers={"X-CSRF-Token": "free-csrf"})
 
     def test_normal_item_with_price_zero_is_accepted_and_stored_as_zero(self):
+        # UPDATED for the finalized Product-Management decision: NEW XP Boost
+        # creation is now refused at the API (existing boosts + their purchase
+        # path are untouched), so `xp_boost` is no longer a creatable free
+        # listing. It is replaced here by `color` — the fifth admin-facing type
+        # (Item/Color/Potion/Title/Prestige), which grants a role and therefore
+        # carries a role_id. The xp_boost *creation block* itself is asserted in
+        # scripts/test_shop_product_management.py.
         for kind, extra in (("title", {}), ("custom", {}), ("role", {"role_id": 55}),
                             ("temp_role", {"role_id": 55, "duration_hours": 2}),
                             ("potion", {"xp_boost_multiplier": 2, "duration_hours": 2}),
-                            ("xp_boost", {"xp_boost_multiplier": 2, "duration_hours": 2})):
+                            ("color", {"role_id": 55})):
             with self.subTest(kind=kind):
                 payload = dict(name=f"Free {kind}", type=kind, price=0, **extra)
                 response = self.post(payload)

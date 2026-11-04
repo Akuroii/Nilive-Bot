@@ -6,6 +6,16 @@ booleans, floats, containers and values outside SQLite's integer range do not.
 import re
 
 
+# The five admin-facing product types (finalized): Item -> internal `custom`,
+# Color -> internal `color`, plus Potion, Title and Prestige. This is the
+# canonical "types the create form offers" list the template and tests refer to.
+# The validator STILL accepts the legacy `role`/`temp_role`/`xp_boost` values so
+# EXISTING products remain editable; new XP Boost creation is refused at the add
+# endpoint (dashboard/api/economy_shop.py), and role/temp_role are simply no
+# longer offered by the create UI. Stored `type` values are never renamed.
+PUBLIC_SHOP_TYPES = ("custom", "color", "potion", "title", "prestige")
+
+
 class ShopValidationError(ValueError):
     pass
 
@@ -69,7 +79,16 @@ def shop_input(data):
         None if option_parent in (None, "")
         else integer(option_parent, "Option parent ID", minimum=1))
     kind = text(data.get("type"), "Item type", required=True)
-    if kind not in {"role", "temp_role", "xp_boost", "prestige", "potion", "title", "custom"}:
+    # `color` is the fifth admin-facing product type (Item/Color/Potion/Title/
+    # Prestige). It is NOT a new reward type: cogs/shop.py already resolves a
+    # Colour purchase to the existing role grant (permanent) or timed-role
+    # holding (positive duration) under CATEGORY_COLOR — so a Colour listing
+    # carries a role_id exactly like `role`/`temp_role` and needs no purchase
+    # -engine change. Legacy `role`/`temp_role`/`xp_boost` stay valid here so
+    # EXISTING products remain editable; new XP Boost creation is refused at
+    # the add endpoint (dashboard/api/economy_shop.py), not in this shared
+    # validator, so a legacy boost can still have its safe fields edited.
+    if kind not in {"role", "temp_role", "xp_boost", "prestige", "potion", "title", "custom", "color"}:
         raise ShopValidationError("Invalid Shop item type.")
     result["type"] = kind
     vi = kind == "prestige" and integer(data.get("prestige_tier"), "Prestige tier", minimum=1, maximum=6) == 6
@@ -119,8 +138,20 @@ def shop_input(data):
             raise ShopValidationError("Effect multiplier must be greater than 1.")
         if result["duration_hours"] is None:
             raise ShopValidationError("Effect duration must be positive.")
-    if kind in {"role", "temp_role"} and result["role_id"] is None:
+    if kind in {"role", "temp_role", "color"} and result["role_id"] is None:
         raise ShopValidationError("A role item requires a role ID.")
     if kind == "temp_role" and result["duration_hours"] is None:
         raise ShopValidationError("A temporary role requires a positive duration.")
+    # Finalized type rules: Title and Prestige are permanent grants and may NOT
+    # carry a duration. A submitted positive duration is REJECTED (not silently
+    # zeroed) so the rule is explicit and an unfinished form can't smuggle a
+    # timed Title/Prestige through. A duration of 0 (or omitted) is normalized
+    # to None above and accepted as "permanent". Prestige VI already had its
+    # duration forced to None by the unmetered branch, so it never trips this.
+    # Item (custom) and Color KEEP duration semantics (0/None = permanent,
+    # positive = timed holding / timed role) and Potion keeps its effect
+    # duration (validated above).
+    if kind in {"title", "prestige"} and result["duration_hours"] is not None:
+        raise ShopValidationError(
+            "Title and Prestige products are permanent and cannot have a duration.")
     return result

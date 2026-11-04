@@ -1,0 +1,392 @@
+"""Shop Product Management — Add / Edit / Delete CRUD + finalized type rules.
+
+Covers the decisions locked for this pass (dashboard API surface only; the
+purchase engine, ledger, timed ownership, cogs/shop.py and wallet/inventory are
+out of scope and untouched):
+
+  * the five admin-facing product types — Item (internal `custom`), Color
+    (internal `color`), Potion, Title, Prestige — plus their rules:
+      - Color grants a role, so it requires a role_id (like role/temp_role);
+      - Title and Prestige are permanent (a submitted duration is normalized
+        away); Item/Color keep duration semantics (0 = permanent, >0 = timed).
+  * NEW XP Boost creation is refused at the API, while EXISTING boosts (and
+    role/temp_role) stay editable on their safe fields and keep their type.
+  * the real update endpoint PUT /api/shop/item/<id>: permission + CSRF +
+    validation, `type`/`category_id`/`option_of_id` immutability, the stock
+    rules (current_stock is ALWAYS preserved — an explicit current_stock key is
+    ignored; editing the maximum never restocks; the maximum can't drop below
+    the preserved current stock),
+    and the explicit icon_url clear (absent key keeps, present-but-blank clears).
+  * the item_catalog COALESCE review: an edit keeps the rank-card catalog in
+    step, but a blanked shop icon does NOT wipe the catalog's cached icon.
+  * the admin table renders the correct type display names and an Edit button,
+    and the root-with-options delete guard is not weakened by editing.
+
+Real Flask routes + permissions + CSRF + scratch SQLite; no HTTP server.
+Run:  python -m pytest test_shop_product_management.py
+      python test_shop_product_management.py
+"""
+import asyncio
+import time
+import unittest
+
+from phase1_support import (
+    GUILD, USER, execute, reset_database, rows, mutation_snapshot,
+)
+import dashboard.app as dashboard
+
+app = dashboard.app
+app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
+
+OTHER_GUILD = 99901   # a second guild — proves cross-guild isolation
+CSRF = "pm-csrf"
+
+
+def seed_item(guild=GUILD, name="VIP", kind="role", price=1500, role_id=99,
+              duration=None, max_stock=None, current_stock=None, icon=None,
+              rarity="common", category_id=None, option_of_id=None,
+              prestige_tier=None, diamonds=None, multiplier=None,
+              required_level=0, description=None, featured=0, enabled=1):
+    """Insert a listing directly (bypassing the API) so a test can start from
+    an exact stored state — including legacy types the create form no longer
+    offers."""
+    return execute(
+        "INSERT INTO shop_items (guild_id,name,type,price,description,role_id,"
+        "duration_hours,max_stock,current_stock,required_level,required_role_id,"
+        "price_diamonds,icon_url,rarity,prestige_tier,xp_boost_multiplier,"
+        "category_id,option_of_id,featured,enabled) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (guild, name, kind, price, description, role_id, duration, max_stock,
+         current_stock, required_level, None, diamonds, icon, rarity,
+         prestige_tier, multiplier, category_id, option_of_id, featured, enabled))
+
+
+class ProductManagementTests(unittest.TestCase):
+    def setUp(self):
+        asyncio.run(reset_database())
+        execute("INSERT INTO dashboard_users (guild_id,user_id,permission_level,enabled) "
+                "VALUES (?,?,'admin',1)", (GUILD, USER))
+        self.client = app.test_client()
+        with self.client.session_transaction() as session:
+            session.update(user={"id": USER, "username": "PM", "avatar": None},
+                           guild_id=GUILD, expires_at=time.time() + 7200,
+                           csrf_token=CSRF)
+
+    # ── request helpers ──────────────────────────────────────────────────
+    def post(self, payload, csrf=True):
+        return self.client.post("/api/shop/item", json=payload,
+                                headers={"X-CSRF-Token": CSRF} if csrf else {})
+
+    def put(self, item_id, payload, csrf=True):
+        return self.client.put(f"/api/shop/item/{item_id}", json=payload,
+                               headers={"X-CSRF-Token": CSRF} if csrf else {})
+
+    def get(self, item_id):
+        return self.client.get(f"/api/shop/item/{item_id}")
+
+    def delete(self, item_id, csrf=True):
+        return self.client.delete(f"/api/shop/item/{item_id}",
+                                  headers={"X-CSRF-Token": CSRF} if csrf else {})
+
+    def one(self, sql, args=()):
+        r = rows(sql, args)
+        return r[0] if r else None
+
+    def field(self, item_id, column):
+        return self.one(f"SELECT {column} FROM shop_items WHERE id=?", (item_id,))[0]
+
+    # ══ ADD — the five current types + the XP Boost block ═══════════════
+    def test_add_item_custom_succeeds(self):
+        r = self.post(dict(name="Cape", type="custom", price=250))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIs(r.get_json()["success"], True)
+        self.assertEqual(self.one("SELECT type,price FROM shop_items WHERE name='Cape'"),
+                         ("custom", 250))
+
+    def test_add_color_succeeds_and_stores_internal_value(self):
+        r = self.post(dict(name="Red Name", type="color", price=300, role_id=4242))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT type,price,role_id FROM shop_items WHERE name='Red Name'"),
+            ("color", 300, 4242))
+
+    def test_add_color_requires_role_id(self):
+        before = mutation_snapshot()
+        r = self.post(dict(name="No Role Colour", type="color", price=300))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIs(r.get_json()["success"], False)
+        self.assertIn("role", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before, "an invalid color was persisted")
+
+    def test_add_xp_boost_is_blocked_but_not_persisted(self):
+        before = mutation_snapshot()
+        r = self.post(dict(name="Boost", type="xp_boost", price=100,
+                           xp_boost_multiplier=2, duration_hours=4))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIs(r.get_json()["success"], False)
+        self.assertIn("xp boost", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before, "a blocked XP Boost was persisted")
+
+    def test_add_legacy_role_type_still_accepted_for_backward_compatibility(self):
+        # role/temp_role are no longer OFFERED by the create form, but the API
+        # keeps accepting them so nothing that already integrates breaks; only
+        # XP Boost creation is explicitly refused.
+        r = self.post(dict(name="Roll", type="role", price=100, role_id=123))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.field(rows("SELECT id FROM shop_items WHERE name='Roll'")[0][0], "type"),
+                         "role")
+
+    def test_add_title_with_a_duration_is_rejected_as_permanent(self):
+        before = mutation_snapshot()
+        r = self.post(dict(name="Hero", type="title", price=0, duration_hours=8))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("permanent", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before)
+        # a permanent Title (no duration) is still accepted
+        self.assertEqual(self.post(dict(name="Hero", type="title", price=0)).status_code, 200)
+        self.assertIsNone(self.field(rows("SELECT id FROM shop_items WHERE name='Hero'")[0][0],
+                                     "duration_hours"))
+
+    def test_add_prestige_i_to_v_with_a_duration_is_rejected_as_permanent(self):
+        before = mutation_snapshot()
+        r = self.post(dict(name="Prestige III", type="prestige", price=500,
+                           prestige_tier=3, duration_hours=8))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(mutation_snapshot(), before)
+        # permanent Prestige (no duration) still persists its tier and price
+        self.assertEqual(
+            self.post(dict(name="Prestige III", type="prestige", price=500,
+                           prestige_tier=3)).status_code, 200)
+        self.assertEqual(
+            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
+                     "WHERE name='Prestige III'"), (None, 500, 3))
+
+    # ══ GET — edit prefill ══════════════════════════════════════════════
+    def test_get_returns_the_full_row_for_prefill(self):
+        item = seed_item(kind="custom", name="Cape", price=250, icon="https://x/i.png",
+                         rarity="epic", max_stock=20, current_stock=12)
+        r = self.get(item)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        body = r.get_json()
+        self.assertIs(body["success"], True)
+        self.assertEqual(body["item"]["id"], item)
+        self.assertEqual(body["item"]["type"], "custom")
+        self.assertEqual(body["item"]["max_stock"], 20)
+        self.assertEqual(body["item"]["current_stock"], 12)
+        self.assertEqual(body["item"]["icon_url"], "https://x/i.png")
+
+    def test_get_is_guild_scoped(self):
+        other = seed_item(guild=OTHER_GUILD, name="Foreign", kind="custom", price=1)
+        self.assertEqual(self.get(other).status_code, 404)
+        self.assertEqual(self.get(123456).status_code, 404)
+
+    # ══ EDIT — safe fields, immutability, stock, icon ═══════════════════
+    def test_edit_updates_safe_fields(self):
+        item = seed_item(kind="custom", name="Cape", price=250, description="old",
+                         rarity="common")
+        r = self.put(item, dict(name="Royal Cape", price=400, description="new",
+                                rarity="legendary"))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIs(r.get_json()["success"], True)
+        self.assertEqual(
+            self.one("SELECT name,price,description,rarity FROM shop_items WHERE id=?", (item,)),
+            ("Royal Cape", 400, "new", "legendary"))
+
+    def test_edit_cannot_change_the_type(self):
+        item = seed_item(kind="custom", name="Cape", price=250)
+        r = self.put(item, dict(type="title"))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.field(item, "type"), "custom")
+
+    def test_edit_cannot_smuggle_in_a_new_xp_boost_by_retyping(self):
+        item = seed_item(kind="custom", name="Cape", price=250)
+        r = self.put(item, dict(type="xp_boost", xp_boost_multiplier=2, duration_hours=4))
+        # `type` is immutable, so this is a no-op re-type: the row STAYS a custom
+        # Item and never becomes an XP Boost. (A stray xp_boost_multiplier is
+        # inert on a non-boost type — the purchase engine only reads it for
+        # potion/xp_boost — and the create/edit form never sends one for Item,
+        # exactly as the add path already behaves.)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.field(item, "type"), "custom")
+        self.assertEqual(self.field(item, "duration_hours"), 4)
+
+    def test_edit_preserves_category_id(self):
+        cat = execute("INSERT INTO shop_categories (guild_id,name,emoji,enabled,sort_order) "
+                      "VALUES (?, 'Boosts', '⚡', 1, 0)", (GUILD,))
+        item = seed_item(kind="custom", name="Cape", price=250, category_id=cat)
+        r = self.put(item, dict(name="Cape v2"))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.field(item, "category_id"), cat)
+
+    def test_edit_preserves_option_of_id_and_keeps_the_family_intact(self):
+        root = seed_item(kind="custom", name="Bundle", price=100)
+        child = seed_item(kind="custom", name="Option A", price=50, option_of_id=root)
+        r = self.put(child, dict(name="Option A v2", price=60))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.field(child, "option_of_id"), root)
+        # the root still has its option, so the delete guard must still hold
+        self.assertEqual(self.delete(root).status_code, 409)
+
+    def test_edit_max_stock_does_not_restock_current(self):
+        item = seed_item(kind="custom", name="Cape", price=250, max_stock=20, current_stock=12)
+        r = self.put(item, dict(max_stock=30))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.one("SELECT max_stock,current_stock FROM shop_items WHERE id=?",
+                                  (item,)), (30, 12))
+
+    def test_edit_max_stock_below_current_is_rejected(self):
+        item = seed_item(kind="custom", name="Cape", price=250, max_stock=20, current_stock=12)
+        before = mutation_snapshot()
+        r = self.put(item, dict(max_stock=5))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("stock", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before, "a rejected stock edit changed the row")
+
+    def test_edit_ignores_an_explicit_current_stock_key(self):
+        # Finalized: stock quantities are NOT managed by Product Management.
+        # PUT always preserves current_stock, even when a client sends the key
+        # explicitly — it is ignored, not applied and not an error. The UI's
+        # current-stock field is read-only to match.
+        item = seed_item(kind="custom", name="Cape", price=250, max_stock=20, current_stock=12)
+        r = self.put(item, dict(current_stock=18, price=300))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.one("SELECT current_stock,price FROM shop_items WHERE id=?",
+                                  (item,)), (12, 300))
+        # even junk in the ignored key must not block or corrupt the edit
+        r = self.put(item, dict(current_stock="garbage", name="Cape v2"))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.one("SELECT current_stock,name FROM shop_items WHERE id=?",
+                                  (item,)), (12, "Cape v2"))
+        # the max>=current guard still compares against the PRESERVED stock:
+        # sending current_stock=0 alongside max_stock=5 must not bypass it.
+        before = mutation_snapshot()
+        r = self.put(item, dict(current_stock=0, max_stock=5))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(mutation_snapshot(), before)
+        self.assertEqual(self.field(item, "current_stock"), 12)
+
+    def test_edit_icon_absent_keeps_present_blank_clears(self):
+        item = seed_item(kind="custom", name="Cape", price=250, icon="https://x/i.png")
+        # absent key -> kept
+        self.assertEqual(self.put(item, dict(name="Cape v2")).status_code, 200)
+        self.assertEqual(self.field(item, "icon_url"), "https://x/i.png")
+        # present-but-blank -> explicit clear
+        self.assertEqual(self.put(item, dict(icon_url="")).status_code, 200)
+        self.assertIsNone(self.field(item, "icon_url"))
+
+    def test_edit_rejects_invalid_price_without_persisting(self):
+        item = seed_item(kind="custom", name="Cape", price=250)
+        before = mutation_snapshot()
+        r = self.put(item, dict(price="garbage"))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(mutation_snapshot(), before)
+
+    def test_edit_color_cannot_drop_its_required_role(self):
+        item = seed_item(kind="color", name="Red Name", price=300, role_id=4242)
+        before = mutation_snapshot()
+        r = self.put(item, dict(role_id=None))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("role", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before)
+        self.assertEqual(self.field(item, "role_id"), 4242)
+
+    def test_edit_legacy_xp_boost_safe_fields_keeps_type_and_effect(self):
+        item = seed_item(kind="xp_boost", name="Boost", price=100, multiplier=2, duration=4)
+        r = self.put(item, dict(name="Boost v2", price=150))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT name,type,price,xp_boost_multiplier,duration_hours "
+                     "FROM shop_items WHERE id=?", (item,)),
+            ("Boost v2", "xp_boost", 150, 2, 4))
+
+    def test_edit_legacy_role_item_keeps_type(self):
+        item = seed_item(kind="role", name="VIP", price=1500, role_id=77)
+        r = self.put(item, dict(price=1200))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.one("SELECT type,price,role_id FROM shop_items WHERE id=?",
+                                  (item,)), ("role", 1200, 77))
+
+    def test_edit_is_guild_scoped_and_404s(self):
+        other = seed_item(guild=OTHER_GUILD, name="Foreign", kind="custom", price=1)
+        self.assertEqual(self.put(other, dict(name="Hijack")).status_code, 404)
+        self.assertEqual(self.put(123456, dict(name="Ghost")).status_code, 404)
+        self.assertEqual(self.field(other, "name"), "Foreign")
+
+    def test_edit_requires_admin_permission(self):
+        item = seed_item(kind="custom", name="Cape", price=250)
+        execute("UPDATE dashboard_users SET permission_level='moderator' "
+                "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        r = self.put(item, dict(name="Hacked"))
+        self.assertEqual(r.status_code, 403, r.get_json())
+        self.assertEqual(self.field(item, "name"), "Cape")
+
+    def test_edit_requires_csrf(self):
+        item = seed_item(kind="custom", name="Cape", price=250)
+        r = self.put(item, dict(name="No CSRF"), csrf=False)
+        self.assertEqual(r.status_code, 403, r.get_json())
+        self.assertEqual(self.field(item, "name"), "Cape")
+
+    # ══ item_catalog COALESCE review ════════════════════════════════════
+    def test_edit_syncs_the_catalog_value_and_rarity(self):
+        item = seed_item(kind="custom", name="Cape", price=250, rarity="common")
+        self.assertEqual(self.put(item, dict(price=300, rarity="epic")).status_code, 200)
+        self.assertEqual(
+            self.one("SELECT rarity,value_currency,value_amount FROM item_catalog "
+                     "WHERE guild_id=? AND item_name='Cape'", (GUILD,)),
+            ("epic", "balance", 300))
+
+    def test_blank_icon_clears_the_listing_but_coalesce_keeps_the_catalog_icon(self):
+        # Create through the API so the catalog is populated with the icon.
+        self.assertEqual(
+            self.post(dict(name="Cog", type="custom", price=100,
+                           icon_url="https://x/cog.png")).status_code, 200)
+        item = rows("SELECT id FROM shop_items WHERE name='Cog'")[0][0]
+        self.assertEqual(
+            self.one("SELECT icon_url FROM item_catalog WHERE guild_id=? AND item_name='Cog'",
+                     (GUILD,))[0], "https://x/cog.png")
+        # Explicit clear on the listing...
+        self.assertEqual(self.put(item, dict(icon_url="")).status_code, 200)
+        self.assertIsNone(self.field(item, "icon_url"))
+        # ...but upsert_catalog_entry's COALESCE deliberately PRESERVES the
+        # cached rank-card icon rather than wiping it. This is the documented
+        # COALESCE impact of the edit path.
+        self.assertEqual(
+            self.one("SELECT icon_url FROM item_catalog WHERE guild_id=? AND item_name='Cog'",
+                     (GUILD,))[0], "https://x/cog.png")
+
+    # ══ admin table render (the authoritative htmx partial) ═════════════
+    def test_partial_renders_display_type_names_and_edit_button(self):
+        seed_item(kind="custom", name="Cape", price=250)
+        seed_item(kind="color", name="Red Name", price=300, role_id=1)
+        seed_item(kind="potion", name="Elixir", price=50, multiplier=2, duration=2)
+        seed_item(kind="title", name="Hero", price=0)
+        seed_item(kind="prestige", name="P3", price=500, prestige_tier=3, role_id=None)
+        seed_item(kind="role", name="VIP", price=1500, role_id=2)
+        seed_item(kind="xp_boost", name="Boost", price=100, multiplier=2, duration=4, role_id=None)
+        html = self.client.get("/api/shop/items").get_data(as_text=True)
+        for label in ("Item", "Color", "Potion", "Title", "Prestige III",
+                      "Permanent Role", "XP Boost"):
+            self.assertIn(label, html, f"missing display label {label}")
+        # the raw internal values must not leak as the display type
+        self.assertNotIn(">custom<", html)
+        self.assertNotIn(">temp_role<", html)
+        self.assertIn("editItem(", html)
+        self.assertIn(">Edit<", html)
+
+    # ══ delete guard is not weakened ════════════════════════════════════
+    def test_delete_root_with_options_is_still_blocked(self):
+        root = seed_item(kind="custom", name="Bundle", price=100)
+        seed_item(kind="custom", name="Option A", price=50, option_of_id=root)
+        r = self.delete(root)
+        self.assertEqual(r.status_code, 409)
+        self.assertIsNotNone(self.one("SELECT id FROM shop_items WHERE id=?", (root,)))
+
+    def test_delete_leaf_succeeds(self):
+        item = seed_item(kind="custom", name="Cape", price=250)
+        r = self.delete(item)
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(self.one("SELECT id FROM shop_items WHERE id=?", (item,)))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
