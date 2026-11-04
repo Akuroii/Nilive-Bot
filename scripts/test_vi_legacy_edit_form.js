@@ -671,6 +671,77 @@ async function scenario(name, fn) {
     assert.equal(lastWrite().body.duration_hours, 48);
   });
 
+  // ── 26-27. stock must be a SAFE integer (Add and Edit) ────────────────
+  // A 400-digit string parses to Infinity, which JSON.stringify turns into
+  // null (= Unlimited): editing a capped product would silently drop its cap.
+  // A value above MAX_SAFE_INTEGER would be rounded to a different limit.
+  const STOCK_MSG = 'Max stock must be a whole number (0 = unlimited)';
+  const BAD_STOCK = ['9007199254740992', '9'.repeat(400), '-1', '1.5', '1e3',
+                     'abc', 'Infinity', 'NaN', '+5', '0x10'];
+
+  await scenario('26. Edit: unsafe/invalid stock is refused, cap never becomes null', async () => {
+    for (const bad of BAD_STOCK) {
+      const { ctx, el, requests, toasts } = fresh();
+      await ctx.editItem(3);                       // finite cap 20, stock 7
+      const before = requests.length;              // the GET that loaded it
+      el('item-stock').value = bad;
+      await ctx.addItem();
+      assert.equal(requests.length, before,
+        'no PUT may be sent for stock ' + JSON.stringify(bad.slice(0, 20)));
+      assert.ok(toasts.some(t => t[0] === STOCK_MSG && t[1] === 'danger'),
+        'validation message shown for ' + JSON.stringify(bad.slice(0, 20)));
+    }
+    for (const [input, want] of [['1', 1], ['250', 250],
+                                 ['9007199254740991', 9007199254740991]]) {
+      const { ctx, el, lastWrite } = fresh();
+      await ctx.editItem(3);
+      el('item-stock').value = input;
+      await ctx.addItem();
+      const w = lastWrite();
+      assert.equal(w.method, 'PUT');
+      assert.equal(w.body.max_stock, want, 'exact value for ' + input);
+      assert.equal(w.body.current_stock, undefined, 'edit never writes current_stock');
+    }
+    for (const input of ['', '0']) {
+      const { ctx, el, lastWrite } = fresh();
+      await ctx.editItem(3);
+      el('item-stock').value = input;
+      await ctx.addItem();
+      assert.equal(lastWrite().body.max_stock, null, 'unlimited for ' + JSON.stringify(input));
+    }
+  });
+
+  await scenario('27. Add: unsafe/invalid stock is refused, safe values sent exactly', async () => {
+    for (const bad of BAD_STOCK) {
+      const t = fresh();
+      t.el('item-name').value = 'Bad'; t.el('item-price').value = '100';
+      t.el('item-stock').value = bad;
+      await t.ctx.addItem();
+      assert.equal(t.requests.length, 0,
+        'no POST for stock ' + JSON.stringify(bad.slice(0, 20)));
+      assert.ok(t.toasts.some(x => x[0] === STOCK_MSG && x[1] === 'danger'),
+        'validation message shown for ' + JSON.stringify(bad.slice(0, 20)));
+    }
+    for (const [input, want] of [['1', 1], ['250', 250],
+                                 ['9007199254740991', 9007199254740991]]) {
+      const t = fresh();
+      t.el('item-name').value = 'Ok'; t.el('item-price').value = '100';
+      t.el('item-stock').value = input;
+      await t.ctx.addItem();
+      assert.equal(t.lastWrite().method, 'POST');
+      assert.equal(t.lastWrite().body.max_stock, want);
+      assert.equal(t.lastWrite().body.current_stock, want, 'new listing starts full');
+    }
+    for (const input of ['', '0']) {
+      const t = fresh();
+      t.el('item-name').value = 'Unl'; t.el('item-price').value = '100';
+      t.el('item-stock').value = input;
+      await t.ctx.addItem();
+      assert.equal(t.lastWrite().body.max_stock, null);
+      assert.equal(t.lastWrite().body.current_stock, null);
+    }
+  });
+
   // ── report ────────────────────────────────────────────────────────────
   let pass = 0, fail = 0;
   for (const [ok, name, msg] of results) {

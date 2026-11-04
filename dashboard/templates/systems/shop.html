@@ -412,9 +412,10 @@ function refreshLegacyViDurationControls(stored) {
     if (btn) btn.style.display = show ? 'inline-block' : 'none';
 }
 
-// Explicit, deliberate clear of a grandfathered VI duration. Everything else
-// stays in VI mode: free, unmetered, duration-disabled. The next PUT sends
-// duration_hours: null and the API stores NULL while keeping tier VI.
+// Explicit, deliberate clear of a grandfathered legacy duration (any Prestige
+// tier). Everything else stays as it was; in VI mode that means free,
+// unmetered, duration-disabled. The next PUT sends duration_hours: null and
+// the API stores NULL while keeping the tier.
 function clearLegacyViDuration() {
     editingLegacyViDuration = null;
     const dur = document.getElementById('item-duration');
@@ -540,6 +541,9 @@ async function addItem() {
     // else (negative, decimal, junk) stays NaN and is REJECTED below. The old
     // `parseInt(...) || 0` turned "-5" / "abc" into 0 (Unlimited) and "2.7"
     // into 2, silently removing or rewriting a product's stock limit.
+    // The accepted value must also be a SAFE integer (checked below): a very
+    // long digit string parses to Infinity, which JSON.stringify sends as null
+    // (= unlimited), and a value past MAX_SAFE_INTEGER is silently rounded.
     const stockRaw = (document.getElementById('item-stock').value || '').trim();
     const stock = stockRaw === '' ? 0
         : (/^\d+$/.test(stockRaw) ? parseInt(stockRaw, 10) : NaN);
@@ -633,7 +637,7 @@ async function addItem() {
         showToast('Enter name and a coin or diamond price', 'danger');
         return;
     }
-    if (isNaN(stock)) {
+    if (!Number.isSafeInteger(stock)) {
         showToast('Max stock must be a whole number (0 = unlimited)', 'danger');
         return;
     }
@@ -748,7 +752,7 @@ async function editItem(id) {
     }
 
     // Lock the (immutable) type, injecting a display option for legacy types.
-    // Remember a grandfathered VI duration BEFORE the lock, because
+    // Remember a grandfathered legacy duration BEFORE the lock, because
     // applyFreeVIFields() zeroes the duration input on the way into VI mode.
     // ANY Prestige tier (I-VI) can carry a legacy positive duration, and a tier
     // change to VI locks the input and shows 0. If only VI rows were remembered,
