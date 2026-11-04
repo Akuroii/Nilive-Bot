@@ -96,7 +96,14 @@ def shop_input(data):
     for field in ("description", "icon_url", "rarity"):
         result[field] = text(data.get(field), field)
     for field in ("max_stock", "price_diamonds", "role_id", "required_role_id", "duration_hours"):
-        if vi and field in {"max_stock", "required_role_id", "duration_hours", "role_id"}:
+        # VI stays unmetered for stock/role/level knobs, but duration_hours is
+        # deliberately NOT force-nulled here: ALL Prestige tiers (and Title)
+        # must REJECT a positive duration, so VI's duration takes the normal
+        # path below (None/blank/0 -> None, positive -> kept) and a positive
+        # value is then refused by the shared permanence rule at the end.
+        # Valid VI requests (duration omitted, null or 0) still normalize to
+        # None exactly as before; no other VI rule changes.
+        if vi and field in {"max_stock", "required_role_id", "role_id"}:
             result[field] = None
             continue
         value = data.get(field)
@@ -142,15 +149,14 @@ def shop_input(data):
         raise ShopValidationError("A role item requires a role ID.")
     if kind == "temp_role" and result["duration_hours"] is None:
         raise ShopValidationError("A temporary role requires a positive duration.")
-    # Finalized type rules: Title and Prestige are permanent grants and may NOT
-    # carry a duration. A submitted positive duration is REJECTED (not silently
-    # zeroed) so the rule is explicit and an unfinished form can't smuggle a
-    # timed Title/Prestige through. A duration of 0 (or omitted) is normalized
-    # to None above and accepted as "permanent". Prestige VI already had its
-    # duration forced to None by the unmetered branch, so it never trips this.
-    # Item (custom) and Color KEEP duration semantics (0/None = permanent,
-    # positive = timed holding / timed role) and Potion keeps its effect
-    # duration (validated above).
+    # Finalized type rules: Title and Prestige — ALL tiers, including VI — are
+    # permanent grants and may NOT carry a duration. A submitted positive
+    # duration is REJECTED (not silently zeroed) so the rule is explicit and
+    # an unfinished form can't smuggle a timed Title/Prestige through. A
+    # duration of 0 (or omitted) is normalized to None above and accepted as
+    # "permanent". Item (custom) and Color KEEP duration semantics (0/None =
+    # permanent, positive = timed holding / timed role) and Potion keeps its
+    # effect duration (validated above).
     if kind in {"title", "prestige"} and result["duration_hours"] is not None:
         raise ShopValidationError(
             "Title and Prestige products are permanent and cannot have a duration.")

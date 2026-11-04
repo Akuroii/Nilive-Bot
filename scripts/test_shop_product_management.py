@@ -361,6 +361,49 @@ class ProductManagementTests(unittest.TestCase):
         self.assertEqual(body["item"]["duration_hours"], 48)
         self.assertEqual(body["item"]["price"], 120)
 
+    def test_prestige_vi_with_positive_duration_is_rejected(self):
+        # LOCKED RULE: Title and ALL Prestige tiers reject positive durations.
+        # The VI unmetered branch used to force-null duration_hours BEFORE the
+        # permanence check, silently accepting (and discarding) a positive
+        # duration instead of rejecting it.
+        from utils.shop_validation import shop_input, ShopValidationError
+        # 1. the validator itself rejects VI + positive duration
+        with self.assertRaises(ShopValidationError):
+            shop_input({"name": "VI", "type": "prestige", "price": 0,
+                        "prestige_tier": 6, "duration_hours": 48})
+        # 2. the real POST API rejects the same request, mutating nothing
+        before = mutation_snapshot()
+        r = self.post(dict(name="Prestige VI", type="prestige", price=0,
+                           prestige_tier=6, duration_hours=48))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("permanent", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before)
+        # 3. valid VI requests are unaffected: duration omitted, null and 0
+        #    all still create a free, unmetered, permanent VI listing
+        for suffix, extra in (("A", {}), ("B", {"duration_hours": None}),
+                              ("C", {"duration_hours": 0})):
+            resp = self.post(dict(name=f"Prestige VI {suffix}", type="prestige",
+                                  price=0, prestige_tier=6, **extra))
+            self.assertEqual(resp.status_code, 200, resp.get_json())
+            self.assertEqual(
+                self.one("SELECT duration_hours,price,prestige_tier,max_stock "
+                         "FROM shop_items WHERE name=?", (f"Prestige VI {suffix}",)),
+                (None, 0, 6, None))
+        # 4. other VI rules unweakened: a paid VI is still refused
+        r = self.post(dict(name="Paid VI", type="prestige", price=100,
+                           prestige_tier=6))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        # 5. the legacy-duration grandfather still covers an OLD VI row with a
+        #    stored positive duration: unrelated edits stay possible and the
+        #    stored value is preserved exactly
+        v = seed_item(kind="prestige", name="Old VI", price=0,
+                      prestige_tier=6, duration=48)
+        r = self.put(v, dict(featured=1))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT duration_hours,featured FROM shop_items WHERE id=?",
+                     (v,)), (48, 1))
+
     def test_grandfather_clause_does_not_leak_to_other_types_or_creation(self):
         # A custom item's duration is NOT grandfathered: it follows normal
         # duration semantics and an edit can change it freely.
