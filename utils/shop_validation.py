@@ -103,16 +103,44 @@ def shop_input(data):
         # value is then refused by the shared permanence rule at the end.
         # Valid VI requests (duration omitted, null or 0) still normalize to
         # None exactly as before; no other VI rule changes.
-        if vi and field in {"max_stock", "required_role_id", "role_id"}:
-            result[field] = None
-            continue
         value = data.get(field)
         # Existing form convention: blank/zero maximum means unlimited stock.
-        result[field] = None if value in (None, "") else integer(value, field)
-        if result[field] == 0:
-            result[field] = None
+        normalized = None if value in (None, "") else integer(value, field)
+        if normalized == 0:
+            normalized = None
+        if vi:
+            # Prestige VI is free, Booster-only and UNMETERED: it carries no
+            # stock limit, no role requirement (role_id or required_role_id) and
+            # no permanent duration. A present-but-zero/blank value is simply
+            # the "not set" form the UI submits, so it is normalized to None.
+            # A REAL positive value is REJECTED — silently discarding it (the
+            # old behaviour) let a caller believe it had configured something
+            # the listing does not support.
+            if normalized is not None and field != "duration_hours":
+                raise ShopValidationError(
+                    "Prestige VI is free and unmetered and cannot have a "
+                    f"{field.replace('_', ' ')}.")
+            if field == "duration_hours":
+                # Positive duration falls through to the shared permanence rule
+                # below (which reports the Prestige/Title message).
+                result[field] = normalized
+            else:
+                result[field] = None
+            continue
+        result[field] = normalized
     result["featured"] = integer(data.get("featured", 0), "Featured", maximum=1)
-    result["required_level"] = 0 if vi else integer(data.get("required_level", 0), "Required level")
+    if vi:
+        # required_level 0/blank/null is the normal VI form; a real gate is
+        # refused for the same reason as stock/role above.
+        level = data.get("required_level", 0)
+        level = 0 if level in (None, "") else integer(level, "Required level")
+        if level != 0:
+            raise ShopValidationError(
+                "Prestige VI is free and unmetered and cannot have a "
+                "required level.")
+        result["required_level"] = 0
+    else:
+        result["required_level"] = integer(data.get("required_level", 0), "Required level")
     tier = data.get("prestige_tier")
     if kind == "prestige":
         result["price"], tier = prestige_terms(result["price"], tier, result["price_diamonds"])

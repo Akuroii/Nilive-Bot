@@ -30,6 +30,8 @@ import asyncio
 import time
 import unittest
 
+import aiosqlite
+
 from phase1_support import (
     GUILD, USER, execute, reset_database, rows, mutation_snapshot,
 )
@@ -743,6 +745,121 @@ class ProductManagementTests(unittest.TestCase):
         r = self.delete(item)
         self.assertEqual(r.status_code, 200)
         self.assertIsNone(self.one("SELECT id FROM shop_items WHERE id=?", (item,)))
+
+    # ══ Prestige VI strictness (API, not just the UI) ═══════════════════
+    def test_prestige_vi_rejects_every_unsupported_knob(self):
+        # LOCKED RULE: VI is free, Booster-only and UNMETERED. The old validator
+        # silently NULLed these, so a caller could believe it had configured a
+        # limit/role/level that the listing never stored. Each must now fail.
+        for label, extra in (
+            ("max_stock", dict(max_stock=5)),
+            ("role_id", dict(role_id=77)),
+            ("required_role_id", dict(required_role_id=88)),
+            ("required_level", dict(required_level=10)),
+            ("price_diamonds", dict(price_diamonds=50)),
+        ):
+            with self.subTest(knob=label):
+                before = mutation_snapshot()
+                r = self.post(dict(name=f"VI bad {label}", type="prestige",
+                                   price=0, prestige_tier=6, **extra))
+                self.assertEqual(r.status_code, 400, r.get_json())
+                self.assertEqual(mutation_snapshot(), before)
+                self.assertIsNone(
+                    self.one("SELECT id FROM shop_items WHERE name=?", (f"VI bad {label}",)))
+
+    def test_prestige_vi_accepts_unset_forms_and_stays_clean(self):
+        # Missing / null / 0 are the normal "not set" forms the UI submits and
+        # must keep working, storing the unmetered, free, permanent VI.
+        for suffix, extra in (
+            ("A", {}),
+            ("B", dict(max_stock=None, role_id=None, required_role_id=None,
+                       required_level=None, duration_hours=None)),
+            ("C", dict(max_stock=0, required_level=0, duration_hours=0)),
+        ):
+            with self.subTest(shape=suffix):
+                r = self.post(dict(name=f"VI ok {suffix}", type="prestige",
+                                   price=0, prestige_tier=6, **extra))
+                self.assertEqual(r.status_code, 200, r.get_json())
+                self.assertEqual(
+                    self.one("SELECT max_stock,role_id,required_role_id,"
+                             "required_level,price_diamonds,duration_hours,price,"
+                             "prestige_tier FROM shop_items WHERE name=?",
+                             (f"VI ok {suffix}",)),
+                    (None, None, None, 0, None, None, 0, 6))
+
+    def test_prestige_vi_edit_ignores_a_legacy_carried_role_but_rejects_submitted(self):
+        # A pre-VI-rules row can still carry role/stock columns. Turning it INTO
+        # a VI must work when the body does not mention them (they are NULLed on
+        # write), but a value the body actually SUBMITS is refused.
+        legacy = seed_item(kind="prestige", name="Legacy V role", price=500,
+                           prestige_tier=5, role_id=99, max_stock=4,
+                           current_stock=2, required_level=30)
+        r = self.put(legacy, dict(prestige_tier=6, price=0))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT max_stock,role_id,required_level,price,prestige_tier "
+                     "FROM shop_items WHERE id=?", (legacy,)),
+            (None, None, 0, 0, 6))
+        # The same row, now submitted with a role -> rejected.
+        r = self.put(legacy, dict(prestige_tier=6, price=0, role_id=55))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(self.field(legacy, "role_id"), None)
+
+    # ══ Atomic stock guard ══════════════════════════════════════════════
+    def test_edit_rechecks_stock_atomically_against_a_concurrent_refund(self):
+        # The pre-checks read `existing` from an earlier connection, so a
+        # purchase/refund landing in between could leave current_stock ABOVE the
+        # max_stock the write is about to persist. The write re-checks inside its
+        # own BEGIN IMMEDIATE. This reproduces the race deterministically by
+        # driving the endpoint with a row whose on-disk current_stock (9) is
+        # higher than the max_stock (6) being saved, while the pre-check would
+        # have seen 5 -> proving the decision is made from the WRITE-time read.
+        item = seed_item(kind="custom", name="Race", price=100,
+                         max_stock=10, current_stock=5)
+
+        # Patch the pre-check read only: report 5 (as if read before a refund),
+        # while the true row is moved to 9 before the endpoint runs.
+        import dashboard.api.economy_shop as shop_api
+        real_run_async = shop_api.run_async
+        moved = {"done": False}
+
+        def run_async(coro):
+            if not moved["done"]:
+                moved["done"] = True
+                # Apply the "concurrent refund" that beats the write.
+                import sqlite3
+                from dashboard.api.economy_shop import DB_PATH as _p
+                con = sqlite3.connect(_p)
+                try:
+                    con.execute("UPDATE shop_items SET current_stock=9 WHERE id=?",
+                                (item,))
+                    con.commit()
+                finally:
+                    con.close()
+            return real_run_async(coro)
+
+        shop_api.run_async = run_async
+        try:
+            r = self.put(item, dict(max_stock=6))
+        finally:
+            shop_api.run_async = real_run_async
+
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("lower than the current", str(r.get_json()["error"]))
+        # Nothing was written: max_stock kept at 10, and the refunded 9 survives
+        # (editing never restocks or drains).
+        self.assertEqual(
+            self.one("SELECT max_stock,current_stock FROM shop_items WHERE id=?", (item,)),
+            (10, 9))
+
+    def test_edit_preserves_current_stock_through_a_normal_save(self):
+        item = seed_item(kind="custom", name="Keep", price=100,
+                         max_stock=10, current_stock=3)
+        r = self.put(item, dict(price=250, max_stock=20))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT price,max_stock,current_stock FROM shop_items WHERE id=?",
+                     (item,)), (250, 20, 3))
 
 
 if __name__ == "__main__":

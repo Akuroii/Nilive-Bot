@@ -742,6 +742,78 @@ async function scenario(name, fn) {
     }
   });
 
+  // ── 28-29. Duration input: never Infinity, never rounded, never silent ──
+  // A 400-digit string parses to Infinity and JSON.stringify would ship that as
+  // null ("permanent"); 9007199254740992 is past MAX_SAFE_INTEGER and gets
+  // silently rounded. Both must be refused on Add AND on Edit.
+  const DUR_MSG = 'Duration must be a whole number of hours (0 = permanent)';
+  const BAD_DURATION = ['9'.repeat(400), '9007199254740992', '-1', '1.5',
+                        '1e3', 'abc', '12x', '+5'];
+
+  await scenario('28. Add: unsafe/invalid duration is refused, safe values sent', async () => {
+    for (const bad of BAD_DURATION) {
+      const t = fresh();
+      t.el('item-name').value = 'BadDur';
+      t.el('item-price').value = '100';
+      t.el('item-type').value = 'custom';
+      t.ctx.toggleItemTypeFields();
+      t.el('item-duration').value = bad;
+      await t.ctx.addItem();
+      assert.equal(t.requests.length, 0,
+        'no POST for duration ' + JSON.stringify(bad.slice(0, 20)));
+      assert.ok(t.toasts.some(x => x[0] === DUR_MSG && x[1] === 'danger'),
+        'duration validation message for ' + JSON.stringify(bad.slice(0, 20)));
+    }
+    for (const [input, want] of [['1', 1], ['48', 48],
+                                 ['9007199254740991', 9007199254740991]]) {
+      const t = fresh();
+      t.el('item-name').value = 'OkDur';
+      t.el('item-price').value = '100';
+      t.el('item-type').value = 'custom';
+      t.ctx.toggleItemTypeFields();
+      t.el('item-duration').value = input;
+      await t.ctx.addItem();
+      assert.equal(t.lastWrite().method, 'POST');
+      assert.equal(t.lastWrite().body.duration_hours, want,
+        'safe duration ' + input + ' sent exactly');
+    }
+    for (const input of ['', '0']) {
+      const t = fresh();
+      t.el('item-name').value = 'Perm';
+      t.el('item-price').value = '100';
+      t.el('item-type').value = 'custom';
+      t.ctx.toggleItemTypeFields();
+      t.el('item-duration').value = input;
+      await t.ctx.addItem();
+      assert.equal(t.lastWrite().body.duration_hours, null,
+        'blank/0 duration is permanent (null)');
+    }
+  });
+
+  await scenario('29. Edit: unsafe/invalid duration is refused, valid kept', async () => {
+    // ITEMS[3] in this harness is a Color/paid item with duration 0; use a
+    // Custom item with a real duration so "preserved" is meaningful.
+    for (const bad of BAD_DURATION) {
+      const t = fresh();
+      await t.ctx.editItem(5);            // custom item, duration 12
+      t.el('item-duration').value = bad;
+      const before = t.requests.filter(r => r.method === 'PUT').length;
+      await t.ctx.addItem();
+      const after = t.requests.filter(r => r.method === 'PUT').length;
+      assert.equal(after, before,
+        'no PUT for duration ' + JSON.stringify(bad.slice(0, 20)));
+      assert.ok(t.toasts.some(x => x[0] === DUR_MSG && x[1] === 'danger'),
+        'edit duration validation message for ' + JSON.stringify(bad.slice(0, 20)));
+    }
+    // A valid edit duration still round-trips exactly.
+    const t = fresh();
+    await t.ctx.editItem(5);
+    t.el('item-duration').value = '96';
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().method, 'PUT');
+    assert.equal(t.lastWrite().body.duration_hours, 96);
+  });
+
   // ── report ────────────────────────────────────────────────────────────
   let pass = 0, fail = 0;
   for (const [ok, name, msg] of results) {

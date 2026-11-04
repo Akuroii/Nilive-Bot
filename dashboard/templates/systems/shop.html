@@ -566,6 +566,10 @@ async function addItem() {
     // `parseInt(...) || null` turned an unreadable value into a silent 0 and,
     // because the VI lock disables the input, that silently cleared the stored
     // duration on any unrelated edit.
+    // Same SAFE-integer discipline as max_stock below: a 400-digit string parses
+    // to Infinity and a value past MAX_SAFE_INTEGER is silently rounded, so both
+    // must be refused rather than sent (JSON.stringify would ship Infinity as
+    // null, i.e. "permanent", which is the opposite of what was typed).
     const durationRaw = (document.getElementById('item-duration').value || '').trim();
     const durationValue = (durationRaw === '' || durationRaw === '0')
         ? null
@@ -641,8 +645,12 @@ async function addItem() {
         showToast('Max stock must be a whole number (0 = unlimited)', 'danger');
         return;
     }
-    if (typeof payload.duration_hours === 'number'
-            && isNaN(payload.duration_hours)) {
+    // Duration must be null (permanent) or a SAFE positive integer. NaN covers
+    // malformed input; the safe-integer test additionally rejects Infinity
+    // (400-digit entry) and values past 2^53-1 that parseInt would round.
+    if (payload.duration_hours !== null
+            && !(Number.isSafeInteger(payload.duration_hours)
+                 && payload.duration_hours > 0)) {
         showToast('Duration must be a whole number of hours (0 = permanent)',
                   'danger');
         return;

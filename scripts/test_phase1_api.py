@@ -35,12 +35,30 @@ class ListingApiTests(unittest.TestCase):
         self.assertTrue(data.get("error"), "validation needs an actionable message")
 
     def test_valid_free_vi_listing_persists_zero_and_unmetered_values(self):
-        response = self.post(dict(name="Prestige VI", type="prestige", price=0,
+        # UPDATED for the finalized VI rule: VI is free, Booster-only and
+        # UNMETERED, so a REAL stock limit is now REFUSED rather than silently
+        # discarded (it used to 200 and store NULL, which let a caller believe
+        # it had set a limit). The valid forms -- omitted / null / 0 -- still
+        # persist the free, unmetered VI exactly as before.
+        for suffix, extra in (("A", {}), ("B", dict(max_stock=None)),
+                              ("C", dict(max_stock=0))):
+            with self.subTest(shape=suffix):
+                response = self.post(dict(name=f"Prestige VI {suffix}",
+                                          type="prestige", price=0,
+                                          prestige_tier=6, **extra))
+                self.assertLess(response.status_code, 400, response.get_json())
+                self.assertIs(response.get_json()["success"], True)
+                self.assertEqual(
+                    rows("SELECT guild_id,type,price,prestige_tier,current_stock "
+                         "FROM shop_items WHERE name=?",
+                         (f"Prestige VI {suffix}",)),
+                    [(GUILD, "prestige", 0, 6, None)])
+        # A positive limit is refused and writes nothing.
+        before = rows("SELECT COUNT(*) FROM shop_items")
+        response = self.post(dict(name="VI metered", type="prestige", price=0,
                                   prestige_tier=6, max_stock=2))
-        self.assertLess(response.status_code, 400)
-        self.assertIs(response.get_json()["success"], True)
-        self.assertEqual(rows("SELECT guild_id,type,price,prestige_tier,current_stock "
-                              "FROM shop_items"), [(GUILD, "prestige", 0, 6, None)])
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertEqual(rows("SELECT COUNT(*) FROM shop_items"), before)
 
     def test_nonprestige_zero_price_listing_is_accepted_as_a_free_item(self):
         # Superseded rule: this used to assert zero was invalid outside

@@ -711,6 +711,21 @@ def update_shop_item(item_id: int):
             legacy_duration_keep = existing["duration_hours"]
             merged["duration_hours"] = 0   # validation representation only
 
+    # Prestige VI strictness is about what the CALLER SUBMITS, not about what an
+    # old row happens to still carry. A listing created while VI still had
+    # stock/role/level columns can be switched to VI with those columns simply
+    # left alone: the VI rules NULL them on write anyway, and the Edit form does
+    # not even render them for Prestige. Rejecting a CARRIED value here would
+    # make such a row impossible to turn into a VI at all. So any VI-forbidden
+    # field the body does not mention is dropped from the merged record (the
+    # validator then sees "not set" and the write stores NULL); a value the body
+    # actually submits still hits the validator's rejection below.
+    if existing["type"] == "prestige" and _tier_of(merged.get("prestige_tier")) == 6:
+        for _vi_field in ("max_stock", "role_id", "required_role_id",
+                          "required_level"):
+            if _vi_field not in raw:
+                merged[_vi_field] = None
+
     # `enabled` is a safe field the validator doesn't model; normalize it here.
     enabled_val = existing["enabled"]
     if "enabled" in raw:
@@ -771,47 +786,90 @@ def update_shop_item(item_id: int):
 
     async def write():
         async with aiosqlite.connect(DB_PATH) as db:
-            sets = [
-                "name = ?", "description = ?", "price = ?", "role_id = ?",
-                "duration_hours = ?", "featured = ?", "required_level = ?",
-                "required_role_id = ?", "max_stock = ?", "enabled = ?",
-                "price_diamonds = ?", "icon_url = ?", "rarity = ?",
-                "prestige_tier = ?", "xp_boost_multiplier = ?",
-            ]
-            params = [
-                new_name, data.get("description"), price_val,
-                data.get("role_id") or None, duration_val,
-                int(data.get("featured", 0)), int(data.get("required_level", 0)),
-                data.get("required_role_id") or None, new_max, enabled_val,
-                price_diamonds_val, icon_url_val, rarity,
-                data.get("prestige_tier"), data.get("xp_boost_multiplier"),
-            ]
-            # current_stock is intentionally NOT in the SET clause — always
-            # preserved (see the stock note above).
-            params.extend([item_id, guild_id])
-            await db.execute(
-                f"UPDATE shop_items SET {', '.join(sets)} "
-                "WHERE id = ? AND guild_id = ?", params)
-            await db.commit()
+            # ATOMIC stock guard. The checks above read `existing`, which was
+            # loaded before this connection existed; a purchase or refund that
+            # commits in between could leave current_stock ABOVE the max_stock we
+            # are about to write. Re-check inside the same transaction, against
+            # the value actually on disk, and write the limit in ONE statement so
+            # no window remains between the check and the UPDATE. current_stock
+            # is still never written here: editing must not restock.
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT current_stock FROM shop_items WHERE id=? AND guild_id=?",
+                    (item_id, guild_id))
+                fresh = await cursor.fetchone()
+                if fresh is None:
+                    await db.execute("ROLLBACK")
+                    return "missing"
+                fresh_current = fresh[0]
+                if new_max is not None and fresh_current is None:
+                    await db.execute("ROLLBACK")
+                    return "unlimited"
+                if (new_max is not None and fresh_current is not None
+                        and fresh_current > new_max):
+                    await db.execute("ROLLBACK")
+                    return "below_current"
+                sets = [
+                    "name = ?", "description = ?", "price = ?", "role_id = ?",
+                    "duration_hours = ?", "featured = ?", "required_level = ?",
+                    "required_role_id = ?", "max_stock = ?", "enabled = ?",
+                    "price_diamonds = ?", "icon_url = ?", "rarity = ?",
+                    "prestige_tier = ?", "xp_boost_multiplier = ?",
+                ]
+                params = [
+                    new_name, data.get("description"), price_val,
+                    data.get("role_id") or None, duration_val,
+                    int(data.get("featured", 0)), int(data.get("required_level", 0)),
+                    data.get("required_role_id") or None, new_max, enabled_val,
+                    price_diamonds_val, icon_url_val, rarity,
+                    data.get("prestige_tier"), data.get("xp_boost_multiplier"),
+                ]
+                # current_stock is intentionally NOT in the SET clause — always
+                # preserved (see the stock note above).
+                params.extend([item_id, guild_id])
+                await db.execute(
+                    f"UPDATE shop_items SET {', '.join(sets)} "
+                    "WHERE id = ? AND guild_id = ?", params)
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+        return None
 
-        # Keep the rank-card catalog in step with the edited listing, exactly as
-        # the add path does. COALESCE inside upsert_catalog_entry means a
-        # blanked icon_url (None) PRESERVES the catalog's cached icon rather
-        # than wiping it — see the report's "COALESCE impact" note.
-        value_currency = "diamonds" if price_diamonds_val else ("balance" if price_val else None)
-        value_amount = price_diamonds_val if price_diamonds_val else (price_val or None)
-        await upsert_catalog_entry(
-            guild_id, new_name, icon_url=icon_url_val, rarity=rarity,
-            value_currency=value_currency, value_amount=value_amount)
-
+    _stock_outcome = None
     try:
-        run_async(write())
+        _stock_outcome = run_async(write())
     except aiosqlite.IntegrityError:
         # The option-family triggers are authoritative. This update never
         # changes id/guild_id/option_of_id, so reaching here is unexpected;
         # fail closed rather than half-write.
         return jsonify({"success": False,
                         "error": "This product could not be updated."}), 409
+    if _stock_outcome == "missing":
+        # Deleted between the read and the write.
+        return jsonify({"success": False, "error": "Item not found."}), 404
+    if _stock_outcome == "unlimited":
+        return jsonify({"success": False,
+                        "error": "This product has unlimited stock. A stock limit "
+                                 "cannot be added by editing — create a new "
+                                 "product with a stock limit instead."}), 400
+    if _stock_outcome == "below_current":
+        return jsonify({"success": False,
+                        "error": "Maximum stock cannot be lower than the current "
+                                 "stock."}), 400
+
+    # Keep the rank-card catalog in step with the edited listing, exactly as
+    # the add path does. COALESCE inside upsert_catalog_entry means a
+    # blanked icon_url (None) PRESERVES the catalog's cached icon rather
+    # than wiping it — see the report's "COALESCE impact" note.
+    # Only runs once the row was actually written.
+    value_currency = "diamonds" if price_diamonds_val else ("balance" if price_val else None)
+    value_amount = price_diamonds_val if price_diamonds_val else (price_val or None)
+    run_async(upsert_catalog_entry(
+        guild_id, new_name, icon_url=icon_url_val, rarity=rarity,
+        value_currency=value_currency, value_amount=value_amount))
+
     log_action(guild_id, f"Edited shop item: {new_name}", "shop")
     return jsonify({"success": True})
 
