@@ -360,9 +360,10 @@ function isFreeVI() {
            document.getElementById('item-prestige-tier').value === '6';
 }
 
-// Non-null ONLY while the form is editing an EXISTING Prestige VI row that was
-// stored with a positive (legacy) duration — i.e. a row that predates the
-// permanence rule. It carries that stored value so the prefill can survive the
+// Non-null ONLY while the form is editing an EXISTING Prestige row (any tier
+// I-VI) that was stored with a positive (legacy) duration — i.e. a row that
+// predates the permanence rule. (The name is historical; VI is where it bites,
+// but a V(24) switched to VI must be carried too.) It carries that stored value so the prefill can survive the
 // VI field lock and so an unrelated save can send it back unchanged instead of
 // silently clearing it. Cleared by editItem(), cancelShopEdit() and
 // clearLegacyViDuration(); never set for a NEW VI.
@@ -395,11 +396,16 @@ function refreshLegacyViDurationControls(stored) {
     const note = document.getElementById('item-legacy-duration-note');
     const btn = document.getElementById('item-clear-legacy-duration');
     const show = typeof stored === 'number' && stored > 0;
+    const tierEl = document.getElementById('item-prestige-tier');
+    const isVI = !!tierEl && tierEl.value === '6';
     if (note) {
         note.textContent = show
-            ? 'This Prestige VI was created before the permanence rule and '
-              + 'still stores a ' + stored + '-hour duration. Saving keeps it; '
-              + 'Prestige VI products are permanent and unmetered.'
+            ? 'This Prestige product was created before the permanence rule and '
+              + 'still stores a ' + stored + '-hour duration. Saving keeps it. '
+              + (isVI
+                  ? 'Prestige VI is permanent and unmetered, so a stored duration '
+                    + 'must be cleared before the tier can change to VI.'
+                  : 'Changing the tier requires clearing it first (Clear below).')
             : '';
         note.style.display = show ? 'block' : 'none';
     }
@@ -530,8 +536,13 @@ toggleItemTypeFields();
 
 async function addItem() {
     const type = document.getElementById('item-type').value;
-    const stock = parseInt(
-        document.getElementById('item-stock').value) || 0;
+    // Max stock: blank or 0 = unlimited (0); plain digits = that limit; anything
+    // else (negative, decimal, junk) stays NaN and is REJECTED below. The old
+    // `parseInt(...) || 0` turned "-5" / "abc" into 0 (Unlimited) and "2.7"
+    // into 2, silently removing or rewriting a product's stock limit.
+    const stockRaw = (document.getElementById('item-stock').value || '').trim();
+    const stock = stockRaw === '' ? 0
+        : (/^\d+$/.test(stockRaw) ? parseInt(stockRaw, 10) : NaN);
     const priceDiamonds = parseInt(
         document.getElementById('item-price-diamonds').value) || 0;
     const boostMult = parseFloat(
@@ -620,6 +631,10 @@ async function addItem() {
     if (!freeVI && type !== 'prestige' && payload.price_diamonds === null
             && priceValue === null) {
         showToast('Enter name and a coin or diamond price', 'danger');
+        return;
+    }
+    if (isNaN(stock)) {
+        showToast('Max stock must be a whole number (0 = unlimited)', 'danger');
         return;
     }
     if (typeof payload.duration_hours === 'number'
@@ -735,7 +750,11 @@ async function editItem(id) {
     // Lock the (immutable) type, injecting a display option for legacy types.
     // Remember a grandfathered VI duration BEFORE the lock, because
     // applyFreeVIFields() zeroes the duration input on the way into VI mode.
-    if (item.type === 'prestige' && item.prestige_tier === 6
+    // ANY Prestige tier (I-VI) can carry a legacy positive duration, and a tier
+    // change to VI locks the input and shows 0. If only VI rows were remembered,
+    // a legacy V(24) switched to VI would read editingLegacyViDuration === null
+    // and silently send null (= an explicit clear the admin never made).
+    if (item.type === 'prestige'
             && typeof item.duration_hours === 'number'
             && item.duration_hours > 0) {
         editingLegacyViDuration = item.duration_hours;
