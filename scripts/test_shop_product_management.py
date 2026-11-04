@@ -242,6 +242,143 @@ class ProductManagementTests(unittest.TestCase):
         self.assertIn("stock", str(r.get_json()["error"]).lower())
         self.assertEqual(mutation_snapshot(), before, "a rejected stock edit changed the row")
 
+    def test_edit_unlimited_product_stays_unlimited_through_unrelated_edits(self):
+        # Unlimited products store (max_stock=NULL, current_stock=NULL).
+        # Unrelated edits — including an explicit max_stock null, which is
+        # what the UI sends for an unlimited listing — must succeed and keep
+        # BOTH stock columns NULL: editing never initializes stock.
+        item = seed_item(kind="custom", name="Endless Cape", price=250)
+        r = self.put(item, dict(name="Endless Cape v2", price=300, max_stock=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT name,price,max_stock,current_stock FROM shop_items WHERE id=?",
+                     (item,)),
+            ("Endless Cape v2", 300, None, None))
+
+    def test_edit_unlimited_to_finite_stock_transition_is_rejected(self):
+        # STOCK-INTEGRITY GUARD: an unlimited product (current_stock=NULL)
+        # must not be given a finite max_stock by editing. PUT never writes
+        # current_stock, so allowing it would produce (max_stock=N,
+        # current_stock=NULL) — a row safe_decrement_stock() can never
+        # decrement (NULL - 1 stays NULL in SQLite) nor exhaust, i.e. an
+        # infinitely-selling "finite" product.
+        item = seed_item(kind="custom", name="Endless Cape", price=250,
+                         icon="https://x/cape.png")
+        before = mutation_snapshot()
+        r = self.put(item, dict(max_stock=10))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("unlimited", str(r.get_json()["error"]).lower())
+        # the rejected request changed NOTHING: stock fields, the other
+        # stored values, and every mutation-tracked table are untouched
+        self.assertEqual(mutation_snapshot(), before,
+                         "a rejected unlimited->finite edit changed state")
+        self.assertEqual(
+            self.one("SELECT name,price,icon_url,max_stock,current_stock "
+                     "FROM shop_items WHERE id=?", (item,)),
+            ("Endless Cape", 250, "https://x/cape.png", None, None))
+        # ... even when smuggled alongside otherwise-valid field changes
+        r = self.put(item, dict(name="New Name", max_stock=10))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(self.field(item, "name"), "Endless Cape")
+
+    def test_edit_legacy_title_with_stored_duration_is_grandfathered(self):
+        # Rows created before the Title/Prestige permanence rule could legally
+        # store a positive duration. They must stay safe-field-editable while
+        # the stored duration is preserved value-for-value — never silently
+        # normalized to NULL.
+        t = seed_item(kind="title", name="Old Timed Title", price=100, duration=48)
+        # 1. body OMITS duration -> unrelated edit allowed, duration kept at 48
+        r = self.put(t, dict(price=150))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
+                                  (t,)), (48, 150))
+        # 2. the UI resubmits the SAME stored duration (number and form-string)
+        #    -> allowed, duration still exactly 48
+        r = self.put(t, dict(price=175, duration_hours=48))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
+                                  (t,)), (48, 175))
+        r = self.put(t, dict(price=180, duration_hours="48"))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
+                                  (t,)), (48, 180))
+        # 4. changing to a DIFFERENT positive duration is still rejected,
+        #    and the rejected request changes nothing
+        before = mutation_snapshot()
+        r = self.put(t, dict(duration_hours=72))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIn("permanent", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before)
+        self.assertEqual(self.field(t, "duration_hours"), 48)
+        # 3. an EXPLICIT clear with 0 works (the supported permanent form)
+        r = self.put(t, dict(duration_hours=0))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIsNone(self.field(t, "duration_hours"))
+
+    def test_edit_legacy_prestige_with_stored_duration_is_grandfathered(self):
+        p = seed_item(kind="prestige", name="Old Prestige II", price=500,
+                      prestige_tier=2, duration=24)
+        # unrelated edit allowed; duration and tier preserved exactly
+        r = self.put(p, dict(price=600))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
+                     "WHERE id=?", (p,)), (24, 600, 2))
+        # a different positive duration is still rejected
+        r = self.put(p, dict(duration_hours=12))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(self.field(p, "duration_hours"), 24)
+
+    def test_ui_duration_clear_payload_null_clears_legacy_duration(self):
+        # THE EXACT UI CLEAR PAYLOAD: the edit form computes
+        #   duration_hours: parseInt(input.value) || null
+        # so typing 0 sends JSON null (key PRESENT, value null) — not numeric
+        # 0. An explicit null is an administrator's clear, NOT an "unchanged"
+        # resubmission: the grandfather clause must step aside and the stored
+        # legacy duration must actually become NULL.
+        t = seed_item(kind="title", name="Old Timed Title", price=100, duration=48)
+        r = self.put(t, dict(price=200, duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        # cleared in the DB, and the unrelated field change persisted
+        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
+                                  (t,)), (None, 200))
+        # the PUT response reports no stale/temporary product fields: it is a
+        # bare success envelope (never the 0 used as validation representation)
+        self.assertEqual(r.get_json(), {"success": True})
+        p = seed_item(kind="prestige", name="Old Prestige II", price=500,
+                      prestige_tier=2, duration=24)
+        r = self.put(p, dict(price=700, duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(
+            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
+                     "WHERE id=?", (p,)), (None, 700, 2))
+        # Contrast check: a GRANDFATHERED edit (duration omitted) must report
+        # the REAL stored value (48) on the GET prefill — never the temporary
+        # validation representation (0).
+        t2 = seed_item(kind="title", name="Timed Title Two", price=100, duration=48)
+        self.assertEqual(self.put(t2, dict(price=120)).status_code, 200)
+        body = self.get(t2).get_json()
+        self.assertEqual(body["item"]["duration_hours"], 48)
+        self.assertEqual(body["item"]["price"], 120)
+
+    def test_grandfather_clause_does_not_leak_to_other_types_or_creation(self):
+        # A custom item's duration is NOT grandfathered: it follows normal
+        # duration semantics and an edit can change it freely.
+        c = seed_item(kind="custom", name="Timed Cape", price=100, duration=48)
+        r = self.put(c, dict(duration_hours=72))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.field(c, "duration_hours"), 72)
+        # POST creation of a timed Title is still rejected (rule unchanged).
+        r = self.post(dict(name="New Timed Title", type="title", price=0,
+                           duration_hours=8))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        # A clean (no-duration) title gains nothing from the clause: trying to
+        # SET a positive duration on it is still rejected.
+        t = seed_item(kind="title", name="Plain Title", price=100)
+        r = self.put(t, dict(duration_hours=5))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIsNone(self.field(t, "duration_hours"))
+
     def test_edit_ignores_an_explicit_current_stock_key(self):
         # Finalized: stock quantities are NOT managed by Product Management.
         # PUT always preserves current_stock, even when a client sends the key

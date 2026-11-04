@@ -655,6 +655,32 @@ def update_shop_item(item_id: int):
     if "icon_url" in raw:
         merged["icon_url"] = raw["icon_url"]
 
+    # Legacy compatibility (grandfather clause): Title/Prestige rows created
+    # before the permanence rule could legally store a positive duration, and
+    # the Edit form resubmits the stored value as-is. Such a row must stay
+    # safe-field-editable WITHOUT silently rewriting its duration. When the
+    # body OMITS duration_hours, or resubmits the UNCHANGED stored value
+    # (int or form-string), we validate the merged record as permanent — the
+    # representation the rule expects — but write the ORIGINAL stored value
+    # back untouched. Setting a DIFFERENT positive duration still fails the
+    # permanence rule, an explicit 0/blank/null is still the supported
+    # permanent clear, and POST creation validation is unaffected. The clause
+    # cannot apply to any other type and never fires for rows without a
+    # stored positive duration.
+    legacy_duration_keep = None
+    if existing["type"] in ("title", "prestige") and existing["duration_hours"]:
+        if "duration_hours" not in raw:
+            unchanged = True
+        else:
+            submitted = raw["duration_hours"]
+            unchanged = (
+                submitted == existing["duration_hours"]
+                or (isinstance(submitted, str) and submitted.strip().isdigit()
+                    and int(submitted.strip()) == existing["duration_hours"]))
+        if unchanged:
+            legacy_duration_keep = existing["duration_hours"]
+            merged["duration_hours"] = 0   # validation representation only
+
     # `enabled` is a safe field the validator doesn't model; normalize it here.
     enabled_val = existing["enabled"]
     if "enabled" in raw:
@@ -676,14 +702,33 @@ def update_shop_item(item_id: int):
     # Stock reconciliation. `current_stock` is ALWAYS preserved: editing product
     # data never restocks or drains, and a `current_stock` key in the body is
     # deliberately IGNORED — stock quantities are outside Product Management,
-    # and the UI's current-stock field is read-only to match. The only stock
-    # rule here: the maximum may never drop below the stock actually on hand.
+    # and the UI's current-stock field is read-only to match. Two rules:
+    #   1. A finite maximum requires stock on hand. An unlimited product stores
+    #      current_stock = NULL, and editing never initializes stock, so an
+    #      unlimited -> finite transition would leave (max_stock=N,
+    #      current_stock=NULL) — a row safe_decrement_stock() can never
+    #      decrement (NULL - 1 stays NULL) or exhaust: it would sell forever
+    #      while looking finite. There is no admin stock-provisioning
+    #      mechanism (stock is set once at creation, then only purchase/
+    #      refund/expiry move it), so this transition is REJECTED rather than
+    #      silently provisioning stock.
+    #   2. The maximum may never drop below the stock actually on hand.
     new_max = data["max_stock"]              # normalized: None == unlimited
     current = existing["current_stock"]      # always preserved, never written
+    if new_max is not None and current is None:
+        return jsonify({"success": False,
+                        "error": "This product has unlimited stock. A stock limit "
+                                 "cannot be added by editing — create a new "
+                                 "product with a stock limit instead."}), 400
     if new_max is not None and current is not None and current > new_max:
         return jsonify({"success": False,
                         "error": "Maximum stock cannot be lower than the current "
                                  f"stock ({current})."}), 400
+
+    # Persisted duration: the grandfathered legacy value wins (written back
+    # byte-for-byte); otherwise the validated/normalized value as usual.
+    duration_val = (legacy_duration_keep if legacy_duration_keep is not None
+                    else (data.get("duration_hours") or None))
 
     icon_url_val = data["icon_url"] or None     # "" / None -> NULL (explicit clear)
     price_val = data["price"]
@@ -705,7 +750,7 @@ def update_shop_item(item_id: int):
             ]
             params = [
                 new_name, data.get("description"), price_val,
-                data.get("role_id") or None, data.get("duration_hours") or None,
+                data.get("role_id") or None, duration_val,
                 int(data.get("featured", 0)), int(data.get("required_level", 0)),
                 data.get("required_role_id") or None, new_max, enabled_val,
                 price_diamonds_val, icon_url_val, rarity,
