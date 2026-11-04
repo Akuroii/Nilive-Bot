@@ -92,6 +92,21 @@ const ITEMS = {
   },
 };
 
+// Legacy Prestige V that predates the permanence rule and still stores 24h.
+// (ITEMS[2] is a NORMAL V with duration 0 — it can never expose the
+// V -> VI laundering bug, which needs a positive stored duration.)
+ITEMS[5] = {
+  id: 5, name: 'Old V 24h', type: 'prestige', prestige_tier: 5, price: 500,
+  price_diamonds: null, role_id: null, duration_hours: 24, max_stock: null,
+  current_stock: null, required_level: 0, required_role_id: null,
+  xp_boost_multiplier: null, icon_url: null, rarity: 'common', featured: 0,
+  description: null, category_id: null, option_of_id: null,
+};
+
+// Legacy Prestige II with a stored duration: ANY tier I-V can reach VI.
+ITEMS[6] = Object.assign({}, ITEMS[5], {
+  id: 6, name: 'Old II 12h', prestige_tier: 2, duration_hours: 12 });
+
 function fresh() {
   const els = new Map();
   const el = (id) => {
@@ -257,7 +272,11 @@ async function scenario(name, fn) {
 
     // Tier V and a non-Prestige product: hidden
     await ctx.editItem(2);
-    assert.equal(btn().style.display, 'none', 'hidden for Tier V');
+    assert.equal(btn().style.display, 'none', 'hidden for a normal Tier V');
+    // a legacy V with a stored duration DOES get it (needed for V -> VI)
+    await ctx.editItem(5);
+    assert.notEqual(btn().style.display, 'none', 'shown for legacy V(24)');
+    await ctx.editItem(2);
     await ctx.editItem(3);
     assert.equal(btn().style.display, 'none', 'hidden for a non-Prestige type');
 
@@ -376,6 +395,280 @@ async function scenario(name, fn) {
     assert.equal(w.body.duration_hours, null,
       'a VI must always submit a null duration, got ' + w.body.duration_hours);
     assert.equal(w.body.prestige_tier, 6);
+  });
+
+  // ══ V(24) legacy tier-change regression (PR #112 blocking bug) ════════
+  // A legacy Prestige V storing 24h, switched to VI. The VI lock shows 0 in
+  // the disabled duration input; the form must NOT read that 0 as the admin's
+  // explicit clear and send null.
+
+  // ── 11. legacy V(24) -> VI WITHOUT clearing must not send null ────────
+  await scenario('11. legacy V(24) -> VI without Clear keeps 24 (never null)', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(5);
+    assert.equal(el('item-duration').value, '24', 'V prefill shows the stored 24');
+    assert.equal(el('item-duration').disabled, false, 'V duration is editable');
+    el('item-prestige-tier').value = '6';
+    ctx.toggleItemTypeFields();
+    // VI lock is on, but the form must not DISPLAY 0 for a stored 24
+    assert.equal(el('item-duration').disabled, true);
+    const shownBeforeSave = el('item-duration').value;
+    await ctx.addItem();
+    const w = lastWrite();
+    assert.equal(w.method, 'PUT');
+    assert.equal(w.url, '/api/shop/item/5');
+    assert.notEqual(w.body.duration_hours, null,
+      'THE BUG: V(24) -> VI silently sent null, an un-requested clear');
+    assert.equal(w.body.duration_hours, 24,
+      'the old positive duration must reach the API so its guard rejects it');
+    assert.deepEqual(
+      { tier: w.body.prestige_tier, price: w.body.price,
+        diamonds: w.body.price_diamonds, stock: w.body.max_stock,
+        level: w.body.required_level },
+      { tier: 6, price: 0, diamonds: null, stock: null, level: 0 });
+    assert.equal(w.body.current_stock, undefined, 'an edit never writes current_stock');
+    assert.equal(shownBeforeSave, '24',
+      'the locked field must keep showing the stored duration');
+    assert.notEqual(el('item-clear-legacy-duration').style.display, 'none',
+      'the Clear action must be offered so the admin CAN clear deliberately');
+  });
+
+  // ── 12. V(24) unrelated edit stays V and keeps 24 ─────────────────────
+  await scenario('12. legacy V(24) unrelated edit keeps 24 on a V', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(5);
+    el('item-price').value = '650';
+    await ctx.addItem();
+    const w = lastWrite();
+    assert.equal(w.body.prestige_tier, 5);
+    assert.equal(w.body.price, 650);
+    assert.equal(w.body.duration_hours, 24);
+  });
+
+  // ── 13. V(24) -> VI -> explicit Clear sends null, stays VI ────────────
+  await scenario('13. legacy V(24) -> VI then Clear sends null and stays VI', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(5);
+    el('item-prestige-tier').value = '6';
+    ctx.toggleItemTypeFields();
+    ctx.clearLegacyViDuration();
+    assert.equal(el('item-duration').value, '0');
+    assert.equal(el('item-duration').disabled, true, 'VI lock stays on');
+    assert.equal(el('item-clear-legacy-duration').style.display, 'none',
+      'Clear retires itself once used');
+    await ctx.addItem();
+    const w = lastWrite();
+    assert.equal(w.body.duration_hours, null, 'explicit clear must send null');
+    assert.equal(w.body.prestige_tier, 6);
+    assert.equal(w.body.price, 0);
+    assert.equal(w.body.price_diamonds, null);
+    assert.equal(w.body.max_stock, null);
+    assert.equal(w.body.required_level, 0);
+  });
+
+  // ── 14. Clear while still V, THEN switch to VI ────────────────────────
+  await scenario('14. Clear on V(24) first, then V -> VI, sends null', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(5);
+    ctx.clearLegacyViDuration();
+    assert.equal(el('item-prestige-tier').value, '5', 'Clear does not change tier');
+    assert.equal(el('item-duration').disabled, false, 'still a V: editable');
+    el('item-prestige-tier').value = '6';
+    ctx.toggleItemTypeFields();
+    await ctx.addItem();
+    const w = lastWrite();
+    assert.equal(w.body.duration_hours, null);
+    assert.equal(w.body.prestige_tier, 6);
+  });
+
+  // ── 15. V(24) -> VI -> back to V without clearing: 24, not 0/null ─────
+  await scenario('15. V(24) -> VI -> V without Clear still carries 24', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(5);
+    el('item-prestige-tier').value = '6';
+    ctx.toggleItemTypeFields();
+    el('item-prestige-tier').value = '5';
+    ctx.toggleItemTypeFields();
+    assert.equal(el('item-duration').disabled, false);
+    assert.equal(el('item-duration').value, '24',
+      'a round trip through VI must not eat the stored duration');
+    assert.equal(el('item-price').value, '500', 'paid price restored');
+    await ctx.addItem();
+    const w = lastWrite();
+    assert.equal(w.body.prestige_tier, 5);
+    assert.equal(w.body.duration_hours, 24);
+    assert.equal(w.body.price, 500);
+  });
+
+  // ── 16. Clear then VI -> V (from a V(24) start) sends null ────────────
+  await scenario('16. V(24) -> VI -> Clear -> V sends null, not 24', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(5);
+    el('item-prestige-tier').value = '6';
+    ctx.toggleItemTypeFields();
+    ctx.clearLegacyViDuration();
+    el('item-prestige-tier').value = '5';
+    ctx.toggleItemTypeFields();
+    el('item-price').value = '500';
+    await ctx.addItem();
+    const w = lastWrite();
+    assert.equal(w.body.prestige_tier, 5);
+    assert.equal(w.body.duration_hours, null);
+  });
+
+  // ── 17. no leakage of 24 between products / after Cancel ──────────────
+  await scenario('17. legacy V(24) leaks nothing into other products or Add', async () => {
+    // a) V(24) then a NORMAL V(0) -> VI: no 24 may follow
+    let t = fresh();
+    await t.ctx.editItem(5);
+    await t.ctx.editItem(2);
+    assert.equal(t.el('item-clear-legacy-duration').style.display, 'none');
+    t.el('item-prestige-tier').value = '6';
+    t.ctx.toggleItemTypeFields();
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().url, '/api/shop/item/2');
+    assert.equal(t.lastWrite().body.duration_hours, null,
+      'normal V(0) -> VI must stay a plain permanent VI');
+    // b) V(24) then a paid Color
+    t = fresh();
+    await t.ctx.editItem(5);
+    await t.ctx.editItem(3);
+    assert.equal(t.el('item-duration').value, '0');
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().url, '/api/shop/item/3');
+    assert.equal(t.lastWrite().body.duration_hours, null);
+    // c) V(24) -> Cancel -> brand-new VI
+    t = fresh();
+    await t.ctx.editItem(5);
+    t.el('item-prestige-tier').value = '6';
+    t.ctx.toggleItemTypeFields();
+    t.ctx.cancelShopEdit();
+    assert.equal(t.el('item-clear-legacy-duration').style.display, 'none');
+    assert.equal(t.el('item-duration').value, '0');
+    t.el('item-type').value = 'prestige';
+    t.el('item-prestige-tier').value = '6';
+    t.ctx.toggleItemTypeFields();
+    t.el('item-name').value = 'Fresh VI';
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().method, 'POST');
+    assert.equal(t.lastWrite().body.duration_hours, null);
+  });
+
+  // ── 18. legacy VI(48) still behaves; V(24) is not special-cased to VI ─
+  await scenario('18. VI(48) unrelated edit 48, Clear null, VI -> V rejected-path 48', async () => {
+    let t = fresh();
+    await t.ctx.editItem(1);
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().body.duration_hours, 48);
+    t = fresh();
+    await t.ctx.editItem(1);
+    t.ctx.clearLegacyViDuration();
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().body.duration_hours, null);
+    t = fresh();
+    await t.ctx.editItem(1);
+    t.el('item-prestige-tier').value = '5';
+    t.ctx.toggleItemTypeFields();
+    t.el('item-price').value = '500';
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().body.prestige_tier, 5);
+    assert.equal(t.lastWrite().body.duration_hours, 48,
+      'un-cleared VI(48) -> V must still reach the API as 48');
+  });
+
+  // ── 19. note wording follows the tier ─────────────────────────────────
+  await scenario('19. legacy note names the right rule for V and VI', async () => {
+    const { ctx, el } = fresh();
+    await ctx.editItem(5);
+    const note = () => el('item-legacy-duration-note').textContent;
+    assert.ok(/24-hour/.test(note()), note());
+    assert.ok(!/created before the permanence rule and still stores a 24-hour duration\. Saving keeps it\. Prestige VI/.test(note()));
+    assert.ok(/Clear/.test(note()), 'V note points at Clear: ' + note());
+    el('item-prestige-tier').value = '6';
+    ctx.toggleItemTypeFields();
+    assert.ok(/cleared before the tier can change to VI/.test(note()), note());
+  });
+
+  // ── 20. the laundering path is not V-only: legacy II(12) -> VI ─────────
+  await scenario('20. legacy II(12) -> VI without Clear keeps 12 (never null)', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(6);
+    el('item-prestige-tier').value = '6';
+    ctx.toggleItemTypeFields();
+    await ctx.addItem();
+    assert.equal(lastWrite().body.prestige_tier, 6);
+    assert.equal(lastWrite().body.duration_hours, 12);
+  });
+
+  // ── 21-24. Max stock input: never silently becomes Unlimited ──────────
+  // Old code: parseInt(v) || 0  ->  "-5" / "abc" => 0 => max_stock null.
+  await scenario('21. Edit: negative, decimal, junk stock is rejected, nothing sent', async () => {
+    for (const bad of ['-5', '2.7', 'abc', '1e3', '5x', '+5', '--1']) {
+      const { ctx, el, requests, toasts } = fresh();
+      await ctx.editItem(3);                       // Color: max 20, current 7
+      el('item-stock').value = bad;
+      const before = requests.length;
+      await ctx.addItem();
+      assert.equal(requests.length, before,
+        'stock ' + JSON.stringify(bad) + ' must NOT produce a PUT');
+      const t = toasts.at(-1);
+      assert.ok(t && /Max stock must be a whole number/.test(t[0]) && t[1] === 'danger',
+        'clear message for ' + JSON.stringify(bad) + ': ' + JSON.stringify(t));
+    }
+  });
+
+  await scenario('22. Edit: positive whole stock is sent as that number', async () => {
+    for (const [input, want] of [['20', 20], ['35', 35], [' 7 ', 7], ['1', 1]]) {
+      const { ctx, el, lastWrite } = fresh();
+      await ctx.editItem(3);
+      el('item-stock').value = input;
+      await ctx.addItem();
+      const w = lastWrite();
+      assert.equal(w.method, 'PUT');
+      assert.equal(w.body.max_stock, want, 'stock ' + JSON.stringify(input));
+      assert.equal(w.body.current_stock, undefined, 'edit never writes current_stock');
+    }
+  });
+
+  await scenario('23. Edit: blank or 0 keeps the Unlimited meaning (null)', async () => {
+    for (const input of ['', '0', '   ']) {
+      const { ctx, el, lastWrite } = fresh();
+      await ctx.editItem(3);
+      el('item-stock').value = input;
+      await ctx.addItem();
+      assert.equal(lastWrite().body.max_stock, null, JSON.stringify(input));
+    }
+  });
+
+  await scenario('24. Add: valid stock creates at full stock; invalid stock is refused', async () => {
+    let t = fresh();
+    t.el('item-name').value = 'Stocked'; t.el('item-price').value = '100';
+    t.el('item-stock').value = '15';
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().method, 'POST');
+    assert.equal(t.lastWrite().body.max_stock, 15);
+    assert.equal(t.lastWrite().body.current_stock, 15, 'new listing starts full');
+    t = fresh();
+    t.el('item-name').value = 'Unl'; t.el('item-price').value = '100';
+    t.el('item-stock').value = '0';
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().body.max_stock, null);
+    assert.equal(t.lastWrite().body.current_stock, null);
+    for (const bad of ['-1', '3.5', 'abc']) {
+      t = fresh();
+      t.el('item-name').value = 'Bad'; t.el('item-price').value = '100';
+      t.el('item-stock').value = bad;
+      await t.ctx.addItem();
+      assert.equal(t.requests.length, 0, 'no POST for stock ' + bad);
+    }
+  });
+
+  await scenario('25. VI forms are unaffected by the stock check (locked 0 -> null)', async () => {
+    const { ctx, el, lastWrite } = fresh();
+    await ctx.editItem(1);
+    await ctx.addItem();
+    assert.equal(lastWrite().body.max_stock, null);
+    assert.equal(lastWrite().body.duration_hours, 48);
   });
 
   // ── report ────────────────────────────────────────────────────────────

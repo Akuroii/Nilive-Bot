@@ -633,6 +633,103 @@ class ProductManagementTests(unittest.TestCase):
         self.assertIn("editItem(", html)
         self.assertIn(">Edit<", html)
 
+    # ══ legacy tier change, with the EXACT payloads the real form now sends ══
+    # scripts/test_vi_legacy_edit_form.js executes the real template script and
+    # asserts these payload shapes; this class proves what the API and the DB do
+    # with them. (V(24) -> VI used to send duration_hours: null on its own.)
+    @staticmethod
+    def ui_payload(**over):
+        base = dict(name="Old V", price=500, price_diamonds=None, type="prestige",
+                    role_id=None, prestige_tier=5, xp_boost_multiplier=None,
+                    duration_hours=24, required_level=0, description="",
+                    icon_url=None, rarity="common", featured=0, max_stock=None)
+        base.update(over)
+        return base
+
+    def vi_row(self, p):
+        return self.one(
+            "SELECT duration_hours,price,prestige_tier,max_stock,required_level,"
+            "role_id,price_diamonds,current_stock FROM shop_items WHERE id=?", (p,))
+
+    def test_ui_legacy_v24_to_vi_without_clear_is_rejected_and_unchanged(self):
+        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
+                      prestige_tier=5, duration=24)
+        before = mutation_snapshot()
+        before_row = self.vi_row(p)
+        # What the repaired form sends for V(24) -> VI with NO explicit clear:
+        # the stored 24 travels with the VI-locked values.
+        r = self.put(p, self.ui_payload(prestige_tier=6, price=0, duration_hours=24))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertIs(r.get_json()["success"], False)
+        self.assertIn("duration", str(r.get_json()["error"]).lower())
+        self.assertEqual(mutation_snapshot(), before, "a rejected tier change wrote")
+        self.assertEqual(self.vi_row(p), before_row)
+        self.assertEqual(before_row[:3], (24, 500, 5))
+
+    def test_ui_legacy_v24_to_vi_after_explicit_clear_stores_null_free_vi(self):
+        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
+                      prestige_tier=5, duration=24, max_stock=None,
+                      current_stock=None, required_level=0)
+        # What the form sends after "Clear legacy duration": null + VI terms.
+        r = self.put(p, self.ui_payload(prestige_tier=6, price=0, duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        # (duration, price, tier, max_stock, level, role, diamonds, current_stock)
+        self.assertEqual(self.vi_row(p), (None, 0, 6, None, 0, None, None, None))
+
+    def test_ui_normal_v_without_legacy_duration_to_vi_still_works(self):
+        p = seed_item(kind="prestige", name="Normal V", price=500, role_id=None,
+                      prestige_tier=5, duration=None)
+        r = self.put(p, self.ui_payload(name="Normal V", prestige_tier=6, price=0,
+                                         duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.vi_row(p), (None, 0, 6, None, 0, None, None, None))
+        # also via a stored 0 (older rows): same outcome
+        q = seed_item(kind="prestige", name="Zero V", price=500, role_id=None,
+                      prestige_tier=5, duration=0)
+        r = self.put(q, self.ui_payload(name="Zero V", prestige_tier=6, price=0,
+                                         duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIsNone(self.field(q, "duration_hours"))
+
+    def test_ui_legacy_v24_unrelated_edit_keeps_24_and_tier(self):
+        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
+                      prestige_tier=5, duration=24)
+        r = self.put(p, self.ui_payload(price=650, duration_hours=24))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.vi_row(p)[:3], (24, 650, 5))
+
+    def test_ui_legacy_v24_to_other_tier_without_clear_is_rejected(self):
+        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
+                      prestige_tier=5, duration=24)
+        before = mutation_snapshot()
+        r = self.put(p, self.ui_payload(prestige_tier=4, duration_hours=24))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(mutation_snapshot(), before)
+
+    def test_ui_legacy_vi48_paths_still_hold(self):
+        v = seed_item(kind="prestige", name="Old VI", price=0, role_id=None,
+                      prestige_tier=6, duration=48)
+        vi = dict(name="Old VI", prestige_tier=6, price=0, duration_hours=48)
+        # unrelated edit resends 48 -> preserved exactly
+        r = self.put(v, self.ui_payload(**vi, description="edited"))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.field(v, "duration_hours"), 48)
+        # VI -> V with the 48 still present -> rejected, row untouched
+        before = mutation_snapshot()
+        r = self.put(v, self.ui_payload(name="Old VI", prestige_tier=5, price=500,
+                                         duration_hours=48))
+        self.assertEqual(r.status_code, 400, r.get_json())
+        self.assertEqual(mutation_snapshot(), before)
+        # explicit Clear (stays VI) -> NULL
+        r = self.put(v, self.ui_payload(**{**vi, "duration_hours": None}))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIsNone(self.field(v, "duration_hours"))
+        # explicit clear followed by VI -> V works and stays permanent
+        r = self.put(v, self.ui_payload(name="Old VI", prestige_tier=5, price=500,
+                                         duration_hours=None))
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(self.vi_row(v)[:3], (None, 500, 5))
+
     # ══ delete guard is not weakened ════════════════════════════════════
     def test_delete_root_with_options_is_still_blocked(self):
         root = seed_item(kind="custom", name="Bundle", price=100)
