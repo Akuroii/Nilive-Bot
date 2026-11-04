@@ -1,0 +1,2468 @@
+diff --git a/dashboard/api/economy_shop.py b/dashboard/api/economy_shop.py
+index c312399..9a2573f 100644
+--- a/dashboard/api/economy_shop.py
++++ b/dashboard/api/economy_shop.py
+@@ -290,6 +290,23 @@ def save_exchange_rate_api():
+     return jsonify({"success": True, "rate": rate})
+ 
+ 
++# Finalized product-type display names. The five admin-facing types map their
++# internal value to a label (Item->custom, Color->color, Potion, Title,
++# Prestige); the legacy internal types keep a clear label so EXISTING rows stay
++# readable in the admin table without being re-typed. Prestige is special-cased
++# with its tier below. Stored `type` values are never renamed.
++SHOP_TYPE_DISPLAY = {
++    "custom": "Item",
++    "color": "Color",
++    "potion": "Potion",
++    "title": "Title",
++    "prestige": "Prestige",
++    "role": "Permanent Role",
++    "temp_role": "Temporary Role",
++    "xp_boost": "XP Boost",
++}
++
++
+ @api_bp.route("/shop/items")
+ @require_api_permission(LEVEL_ADMIN)
+ def shop_items_partial():
+@@ -351,7 +368,9 @@ def shop_items_partial():
+         # Prestige shop items carry a permanent tier (r[12]). The render
+         # uses the tier label solely for display; the source of Prestige
+         # state is levels.prestige + booster status, never the shop item.
+-        type_display = _esc(r[4])
++        # Every other type shows its finalized display name (Item/Color/
++        # Potion/Title, and readable labels for legacy role/temp_role/xp_boost).
++        type_display = _esc(SHOP_TYPE_DISPLAY.get(r[4], r[4]))
+         if (r[4] == "prestige" and r[12]):
+             try:
+                 from utils.prestige import tier_label
+@@ -371,7 +390,14 @@ def shop_items_partial():
+             f"<td>{type_display}</td>"
+             f"<td>{dur}</td>"
+             f"<td><span class='badge {status}'>{label}</span></td>"
+-            f"<td><button class='btn btn-sm btn-danger' "
++            f"<td>"
++            # r[0] (item id) is an INTEGER from the DB, interpolated raw into
++            # the inline onclick exactly like the members partial's
++            # openEditModal('{user_id}', ...) — numeric, so not an injection
++            # vector. editItem() prefills the Add form in edit mode and PUTs.
++            f"<button class='btn btn-sm btn-secondary' "
++            f"onclick='editItem({r[0]})' style='margin-right:6px;'>Edit</button>"
++            f"<button class='btn btn-sm btn-danger' "
+             f"hx-delete='/api/shop/item/{r[0]}' "
+             f"hx-confirm='Delete this item?' "
+             f"hx-target='closest tr' "
+@@ -419,6 +445,17 @@ def add_shop_item():
+     guild_id = get_session_guild_id()
+     from utils.shop_validation import shop_input, ShopValidationError
+     raw = request.get_json(silent=True) if request.is_json else request.form.to_dict()
++    # Finalized decision: no NEW XP Boost products. The XP Boost purchase path
++    # and every EXISTING boost listing stay untouched (cogs/shop.py is out of
++    # scope); this only closes the creation door, which the dashboard UI no
++    # longer offers either. Refused BEFORE validation so any create attempt gets
++    # one clear message regardless of the other fields, and so a malformed boost
++    # payload can't surface a confusing validation error instead of the block.
++    _raw_type = raw.get("type") if isinstance(raw, dict) else None
++    if isinstance(_raw_type, str) and _raw_type.strip().lower() == "xp_boost":
++        return jsonify({"success": False,
++                        "error": "XP Boost products can no longer be created. "
++                                 "Existing XP Boost items are unaffected."}), 400
+     try:
+         data = shop_input(raw)
+     except ShopValidationError as exc:
+@@ -512,6 +549,273 @@ def add_shop_item():
+     return jsonify({"success": True})
+ 
+ 
++# Columns the Edit form may prefill / the update may write. `type`,
++# `category_id` and `option_of_id` are read for prefill and validation but are
++# NEVER written by the update (type is immutable; category/option links are
++# owned by the Category API and the option-family triggers).
++_SHOP_ITEM_EDIT_KEYS = (
++    "name", "description", "price", "type", "role_id", "duration_hours",
++    "featured", "enabled", "required_level", "required_role_id", "max_stock",
++    "current_stock", "price_diamonds", "icon_url", "rarity", "prestige_tier",
++    "xp_boost_multiplier", "category_id", "option_of_id",
++)
++_SHOP_ITEM_EDIT_SELECT = (
++    "name, description, price, type, role_id, duration_hours, featured, "
++    "enabled, required_level, required_role_id, max_stock, current_stock, "
++    "price_diamonds, icon_url, rarity, prestige_tier, xp_boost_multiplier, "
++    "category_id, option_of_id"
++)
++
++
++@api_bp.route("/shop/item/<int:item_id>", methods=["GET"])
++@require_api_permission(LEVEL_ADMIN)
++def get_shop_item(item_id: int):
++    """Full row for the Edit form prefill.
++
++    Guild-scoped: an unknown id and an id belonging to another guild return the
++    SAME 404, so cross-guild existence is never disclosed (matching the
++    Category API's convention)."""
++    guild_id = get_session_guild_id()
++
++    async def fetch():
++        async with aiosqlite.connect(DB_PATH) as db:
++            cursor = await db.execute(
++                f"SELECT id, {_SHOP_ITEM_EDIT_SELECT} "
++                "FROM shop_items WHERE id = ? AND guild_id = ?",
++                (item_id, guild_id))
++            row = await cursor.fetchone()
++            return dict(zip(("id",) + _SHOP_ITEM_EDIT_KEYS, row)) if row else None
++
++    item = run_async(fetch())
++    if item is None:
++        return jsonify({"success": False, "error": "Item not found."}), 404
++    return jsonify({"success": True, "item": item})
++
++
++@api_bp.route("/shop/item/<int:item_id>", methods=["PUT"])
++@require_api_permission(LEVEL_ADMIN)
++def update_shop_item(item_id: int):
++    """Update the editable fields of ONE product in the session guild.
++
++    True CRUD update, deliberately conservative:
++      * `type` is IMMUTABLE — the STORED type always wins over the body, so a
++        legacy role/temp_role/xp_boost product can have its safe fields edited
++        but can never be re-typed (and a new XP Boost can't be smuggled in by
++        editing something else into one).
++      * `category_id` and `option_of_id` are PRESERVED — never in the SET
++        clause, so the option-family integrity triggers (which fire only on
++        UPDATE OF id/option_of_id/guild_id) never run and the root-with-options
++        delete guard is untouched.
++      * Stock: `current_stock` is ALWAYS preserved — a `current_stock` key in
++        the body is deliberately IGNORED (stock quantities are not managed by
++        Product Management; the UI shows the value read-only). `max_stock` may
++        change but NEVER restocks, and the maximum may not be lowered below the
++        stock actually on hand.
++      * `icon_url`: an ABSENT key keeps the stored icon; a PRESENT-but-blank key
++        is an explicit clear (the same present/absent convention the currency
++        -config API in this file already uses).
++      * Every other field re-runs the SAME shop_input validator as creation,
++        against the STORED type, so an edit can't smuggle in values a create
++        would reject (and Title/Prestige permanence, Color's role requirement,
++        Prestige pricing etc. all still hold).
++    """
++    guild_id = get_session_guild_id()
++    raw = request.get_json(silent=True) if request.is_json else request.form.to_dict()
++    if not isinstance(raw, dict):
++        return jsonify({"success": False, "error": "A Shop item object is required."}), 400
++
++    from utils.shop_validation import shop_input, ShopValidationError
++
++    async def fetch_existing():
++        async with aiosqlite.connect(DB_PATH) as db:
++            cursor = await db.execute(
++                f"SELECT {_SHOP_ITEM_EDIT_SELECT} "
++                "FROM shop_items WHERE id = ? AND guild_id = ?",
++                (item_id, guild_id))
++            return await cursor.fetchone()
++
++    existing_row = run_async(fetch_existing())
++    if existing_row is None:
++        return jsonify({"success": False, "error": "Item not found."}), 404
++    existing = dict(zip(_SHOP_ITEM_EDIT_KEYS, existing_row))
++
++    # Merge: stored values, overridden ONLY by keys present in the body. This
++    # gives PATCH-style partial updates while still running the full validator.
++    merged = dict(existing)
++    for key in ("name", "description", "price", "role_id", "duration_hours",
++                "featured", "required_level", "required_role_id", "max_stock",
++                "price_diamonds", "rarity", "prestige_tier",
++                "xp_boost_multiplier"):
++        if key in raw:
++            merged[key] = raw[key]
++    merged["type"] = existing["type"]                  # immutable
++    merged["option_of_id"] = existing["option_of_id"]  # preserved
++    # icon_url: present -> take the body value (blank == explicit clear);
++    # absent -> keep the stored icon.
++    if "icon_url" in raw:
++        merged["icon_url"] = raw["icon_url"]
++
++    # Legacy compatibility (grandfather clause): Title/Prestige rows created
++    # before the permanence rule could legally store a positive duration, and
++    # the Edit form resubmits the stored value as-is. Such a row must stay
++    # safe-field-editable WITHOUT silently rewriting its duration. When the
++    # body OMITS duration_hours, or resubmits the UNCHANGED stored value
++    # (int or form-string), we validate the merged record as permanent — the
++    # representation the rule expects — but write the ORIGINAL stored value
++    # back untouched. Setting a DIFFERENT positive duration still fails the
++    # permanence rule, an explicit 0/blank/null is still the supported
++    # permanent clear, and POST creation validation is unaffected. The clause
++    # cannot apply to any other type and never fires for rows without a
++    # stored positive duration.
++    def _tier_of(value):
++        """Normalize a stored/submitted Prestige tier for COMPARISON only.
++
++        The Edit form sends the <select>'s string value, so `5` and `"5"` are
++        the same tier and must not read as a change. Blank/missing/null is
++        None. The persisted value still comes from the validator below.
++        """
++        if isinstance(value, bool):
++            return None
++        if isinstance(value, int):
++            return value
++        if isinstance(value, str) and value.strip().isdigit():
++            return int(value.strip())
++        return None
++
++    legacy_duration_keep = None
++    if existing["type"] in ("title", "prestige") and existing["duration_hours"]:
++        # TIER GUARD (Prestige only). The grandfather clause exists to keep an
++        # OLD duration editable on the row that already stored it; it must NOT
++        # carry that duration across a TIER CHANGE. Without this guard a legacy
++        # VI(48) edited into a V became a timed Prestige V, and a legacy V(24)
++        # edited into a VI became a timed product that claims to be permanent
++        # and unmetered. When the tier actually changes the clause steps aside,
++        # so the merged duration goes through the normal permanence rule: an
++        # omitted or resubmitted positive value is REJECTED (nothing written),
++        # while an explicit clear still passes and stores NULL.
++        # Title is deliberately tier-blind: a Title carries no tier, and its
++        # safe-field edits must keep behaving exactly as before.
++        tier_unchanged = (
++            existing["type"] != "prestige"
++            or _tier_of(merged.get("prestige_tier"))
++            == _tier_of(existing["prestige_tier"]))
++        if "duration_hours" not in raw:
++            unchanged = True
++        else:
++            submitted = raw["duration_hours"]
++            unchanged = (
++                submitted == existing["duration_hours"]
++                or (isinstance(submitted, str) and submitted.strip().isdigit()
++                    and int(submitted.strip()) == existing["duration_hours"]))
++        if unchanged and tier_unchanged:
++            legacy_duration_keep = existing["duration_hours"]
++            merged["duration_hours"] = 0   # validation representation only
++
++    # `enabled` is a safe field the validator doesn't model; normalize it here.
++    enabled_val = existing["enabled"]
++    if "enabled" in raw:
++        _e = raw["enabled"]
++        if isinstance(_e, bool):
++            enabled_val = 1 if _e else 0
++        elif isinstance(_e, int) and _e in (0, 1):
++            enabled_val = _e
++        elif isinstance(_e, str) and _e.strip() in ("0", "1"):
++            enabled_val = int(_e.strip())
++        else:
++            return jsonify({"success": False, "error": "Enabled must be 0 or 1."}), 400
++
++    try:
++        data = shop_input(merged)
++    except ShopValidationError as exc:
++        return jsonify({"success": False, "error": str(exc)}), 400
++
++    # Stock reconciliation. `current_stock` is ALWAYS preserved: editing product
++    # data never restocks or drains, and a `current_stock` key in the body is
++    # deliberately IGNORED — stock quantities are outside Product Management,
++    # and the UI's current-stock field is read-only to match. Two rules:
++    #   1. A finite maximum requires stock on hand. An unlimited product stores
++    #      current_stock = NULL, and editing never initializes stock, so an
++    #      unlimited -> finite transition would leave (max_stock=N,
++    #      current_stock=NULL) — a row safe_decrement_stock() can never
++    #      decrement (NULL - 1 stays NULL) or exhaust: it would sell forever
++    #      while looking finite. There is no admin stock-provisioning
++    #      mechanism (stock is set once at creation, then only purchase/
++    #      refund/expiry move it), so this transition is REJECTED rather than
++    #      silently provisioning stock.
++    #   2. The maximum may never drop below the stock actually on hand.
++    new_max = data["max_stock"]              # normalized: None == unlimited
++    current = existing["current_stock"]      # always preserved, never written
++    if new_max is not None and current is None:
++        return jsonify({"success": False,
++                        "error": "This product has unlimited stock. A stock limit "
++                                 "cannot be added by editing — create a new "
++                                 "product with a stock limit instead."}), 400
++    if new_max is not None and current is not None and current > new_max:
++        return jsonify({"success": False,
++                        "error": "Maximum stock cannot be lower than the current "
++                                 f"stock ({current})."}), 400
++
++    # Persisted duration: the grandfathered legacy value wins (written back
++    # byte-for-byte); otherwise the validated/normalized value as usual.
++    duration_val = (legacy_duration_keep if legacy_duration_keep is not None
++                    else (data.get("duration_hours") or None))
++
++    icon_url_val = data["icon_url"] or None     # "" / None -> NULL (explicit clear)
++    price_val = data["price"]
++    price_diamonds_val = data["price_diamonds"]
++    new_name = data["name"]
++    from utils.item_catalog import is_valid_rarity, upsert_catalog_entry
++    rarity = (data.get("rarity") or "common").strip().lower()
++    if not is_valid_rarity(rarity):
++        rarity = "common"
++
++    async def write():
++        async with aiosqlite.connect(DB_PATH) as db:
++            sets = [
++                "name = ?", "description = ?", "price = ?", "role_id = ?",
++                "duration_hours = ?", "featured = ?", "required_level = ?",
++                "required_role_id = ?", "max_stock = ?", "enabled = ?",
++                "price_diamonds = ?", "icon_url = ?", "rarity = ?",
++                "prestige_tier = ?", "xp_boost_multiplier = ?",
++            ]
++            params = [
++                new_name, data.get("description"), price_val,
++                data.get("role_id") or None, duration_val,
++                int(data.get("featured", 0)), int(data.get("required_level", 0)),
++                data.get("required_role_id") or None, new_max, enabled_val,
++                price_diamonds_val, icon_url_val, rarity,
++                data.get("prestige_tier"), data.get("xp_boost_multiplier"),
++            ]
++            # current_stock is intentionally NOT in the SET clause — always
++            # preserved (see the stock note above).
++            params.extend([item_id, guild_id])
++            await db.execute(
++                f"UPDATE shop_items SET {', '.join(sets)} "
++                "WHERE id = ? AND guild_id = ?", params)
++            await db.commit()
++
++        # Keep the rank-card catalog in step with the edited listing, exactly as
++        # the add path does. COALESCE inside upsert_catalog_entry means a
++        # blanked icon_url (None) PRESERVES the catalog's cached icon rather
++        # than wiping it — see the report's "COALESCE impact" note.
++        value_currency = "diamonds" if price_diamonds_val else ("balance" if price_val else None)
++        value_amount = price_diamonds_val if price_diamonds_val else (price_val or None)
++        await upsert_catalog_entry(
++            guild_id, new_name, icon_url=icon_url_val, rarity=rarity,
++            value_currency=value_currency, value_amount=value_amount)
++
++    try:
++        run_async(write())
++    except aiosqlite.IntegrityError:
++        # The option-family triggers are authoritative. This update never
++        # changes id/guild_id/option_of_id, so reaching here is unexpected;
++        # fail closed rather than half-write.
++        return jsonify({"success": False,
++                        "error": "This product could not be updated."}), 409
++    log_action(guild_id, f"Edited shop item: {new_name}", "shop")
++    return jsonify({"success": True})
++
++
+ @api_bp.route("/shop/purchase-history")
+ @require_api_permission(LEVEL_ADMIN)
+ def shop_purchase_history():
+diff --git a/dashboard/templates/systems/shop.html b/dashboard/templates/systems/shop.html
+index d3a1398..2a7dcc1 100644
+--- a/dashboard/templates/systems/shop.html
++++ b/dashboard/templates/systems/shop.html
+@@ -23,7 +23,9 @@
+ <!-- ITEMS TAB -->
+ <div id="tab-content-items" class="tab-content">
+     <div class="card">
+-        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Shop Item</div>
++        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> <span id="shop-form-title">Add Shop Item</span></div>
++        <div id="shop-edit-banner"
++             style="display:none;margin:0 0 14px;padding:8px 12px;border:1px solid var(--accent);border-radius:8px;background:rgba(124,92,191,.10);font-size:13px;color:var(--text);"></div>
+         <div style="display:grid;
+                     grid-template-columns:1fr 1fr;gap:16px;">
+             <div class="form-group">
+@@ -45,14 +47,17 @@
+             </div>
+             <div class="form-group">
+                 <label class="form-label">Type</label>
++                <!-- The five current product types. Item stores the internal
++                     value `custom`, Color stores `color`; the legacy
++                     role/temp_role/xp_boost types are no longer offered for
++                     NEW products (existing ones stay editable via a temporary
++                     option injected by editItem()). -->
+                 <select class="form-input" id="item-type" onchange="toggleItemTypeFields()">
+-                    <option value="role">Permanent Role</option>
+-                    <option value="temp_role">Temporary Role</option>
+-                    <option value="xp_boost">⚡ XP Boost</option>
+-                    <option value="prestige">⭐ Prestige</option>
+-                    <option value="potion">🧪 Potion (consumable)</option>
++                    <option value="custom">📦 Item</option>
++                    <option value="color">🎨 Color</option>
++                    <option value="potion">🧪 Potion</option>
+                     <option value="title">🏷️ Title</option>
+-                    <option value="custom">Custom</option>
++                    <option value="prestige">⭐ Prestige</option>
+                 </select>
+             </div>
+             <div class="form-group" id="item-prestige-tier-field" style="display:none;">
+@@ -76,6 +81,7 @@
+                 <label class="form-label">Role ID</label>
+                 <input class="form-input" id="item-role"
+                        placeholder="Right click role → Copy ID">
++                <div class="form-hint">The role a Color product grants</div>
+             </div>
+             <div class="form-group" id="item-boost-mult-field" style="display:none;">
+                 <label class="form-label" id="item-boost-mult-label">XP Multiplier</label>
+@@ -83,13 +89,28 @@
+                        type="number" min="1.1" step="0.1" placeholder="e.g. 2">
+                 <div class="form-hint">e.g. 2 = double XP while active</div>
+             </div>
+-            <div class="form-group">
++            <div class="form-group" id="item-duration-field">
+                 <label class="form-label" id="item-duration-label">
+                     Duration hours (0 = permanent)
+                 </label>
+                 <input class="form-input" id="item-duration"
+                        type="number" min="0" value="0">
+                 <div class="form-hint" id="item-duration-hint"></div>
++                <!-- Edit-only escape hatch for a row created BEFORE the
++                     Title/Prestige permanence rule, which can legally hold a
++                     positive duration. VI disables the duration input, so
++                     without an explicit action an administrator could never
++                     clear that stored value while keeping the product at VI.
++                     Shown only for an existing Prestige VI whose STORED
++                     duration is positive; see refreshLegacyViDurationControls(). -->
++                <div class="form-hint" id="item-legacy-duration-note"
++                     style="display:none;margin-top:6px;"></div>
++                <button type="button" class="btn btn-sm btn-secondary"
++                        id="item-clear-legacy-duration"
++                        onclick="clearLegacyViDuration()"
++                        style="display:none;margin-top:6px;">
++                    Clear legacy duration
++                </button>
+             </div>
+             <div class="form-group">
+                 <label class="form-label">
+@@ -126,13 +147,27 @@
+                 <input class="form-input" id="item-stock"
+                        type="number" min="0" value="0">
+             </div>
++            <!-- Edit-only: current stock is shown SEPARATELY from the maximum
++                 and is read-only — editing the maximum never restocks, and the
++                 maximum cannot be lowered below this. Hidden while adding (a
++                 new listing starts at current == max). -->
++            <div class="form-group" id="item-current-stock-field" style="display:none;">
++                <label class="form-label">Current stock (on hand)</label>
++                <input class="form-input" id="item-current-stock"
++                       type="text" readonly tabindex="-1"
++                       style="opacity:.72;cursor:not-allowed;">
++                <div class="form-hint">Read-only — editing the maximum does not restock</div>
++            </div>
+         </div>
+         <label class="form-check" style="margin-bottom:16px;">
+             <input type="checkbox" id="item-featured">
+             Featured item (shown first with ⭐)
+         </label>
+-        <button class="btn btn-primary"
++        <button class="btn btn-primary" id="shop-submit-btn"
+                 onclick="addItem()">Add Item</button>
++        <button class="btn btn-secondary" id="shop-cancel-edit"
++                onclick="cancelShopEdit()"
++                style="display:none;margin-left:8px;">Cancel</button>
+         <div id="shop-status"
+              style="margin-top:10px;font-size:13px;"></div>
+     </div>
+@@ -151,6 +186,11 @@
+                 <tbody hx-get="/api/shop/items"
+                        hx-trigger="load"
+                        hx-swap="innerHTML">
++                    {# Finalized type display names (fallback render only; the
++                       htmx partial in dashboard/api/economy_shop.py is the
++                       authoritative view). item[10] is prestige_tier. #}
++                    {% set TYPE_LABELS = {'custom': 'Item', 'color': 'Color', 'potion': 'Potion', 'title': 'Title', 'prestige': 'Prestige', 'role': 'Permanent Role', 'temp_role': 'Temporary Role', 'xp_boost': 'XP Boost'} %}
++                    {% set ROMAN = {1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI'} %}
+                     {% for item in items %}
+                     <tr>
+                         <td>
+@@ -170,7 +210,7 @@
+                             {% endif %}
+                         </td>
+                         <td>
+-                            {{ item[4] }}{% if item[4] == 'xp_boost' and item[10] %} ({{ item[10] }}x){% endif %}
++                            {{ TYPE_LABELS.get(item[4], item[4]) }}{% if item[4] == 'prestige' and item[10] %} {{ ROMAN.get(item[10], item[10]) }}{% endif %}
+                         </td>
+                         <td>
+                             {% if item[0] in free_vi_ids %}
+@@ -188,6 +228,11 @@
+                             </span>
+                         </td>
+                         <td>
++                            <button class="btn btn-sm btn-secondary"
++                                onclick="editItem({{ item[0] }})"
++                                style="margin-right:6px;">
++                                Edit
++                            </button>
+                             <button class="btn btn-sm btn-danger"
+                                 hx-delete="/api/shop/item/{{ item[0] }}"
+                                 hx-confirm="Delete {{ item[1] }}?"
+@@ -281,6 +326,15 @@ __neroGlobal.isFreeVI = isFreeVI;
+ __neroGlobal.applyFreeVIFields = applyFreeVIFields;
+ __neroGlobal.toggleItemTypeFields = toggleItemTypeFields;
+ __neroGlobal.addItem = addItem;
++__neroGlobal.editItem = editItem;
++__neroGlobal.cancelShopEdit = cancelShopEdit;
++__neroGlobal.clearLegacyViDuration = clearLegacyViDuration;
++
++// Non-null while the Add form is repurposed as an Edit form. addItem() reads
++// it to choose POST (create) vs PUT (update); editItem()/cancelShopEdit() set
++// and clear it. Declared with `var` so the wrapped page script stays
++// re-evaluation-safe (see test_dashboard_page_scripts.py).
++var editingId = null;
+ 
+ function switchTab(name) {
+     document.querySelectorAll('.tab-content').forEach(
+@@ -305,18 +359,110 @@ function isFreeVI() {
+     return document.getElementById('item-type').value === 'prestige' &&
+            document.getElementById('item-prestige-tier').value === '6';
+ }
++
++// Non-null ONLY while the form is editing an EXISTING Prestige row (any tier
++// I-VI) that was stored with a positive (legacy) duration — i.e. a row that
++// predates the permanence rule. (The name is historical; VI is where it bites,
++// but a V(24) switched to VI must be carried too.) It carries that stored value so the prefill can survive the
++// VI field lock and so an unrelated save can send it back unchanged instead of
++// silently clearing it. Cleared by editItem(), cancelShopEdit() and
++// clearLegacyViDuration(); never set for a NEW VI.
++var editingLegacyViDuration = null;
++
++// Every control the VI lock owns. applyFreeVIFields() caches a `paidValue` on
++// these while VI is active; clearViFieldCache() is the ONLY place that cache is
++// dropped, so no value can outlive the VI row it belonged to.
++var VI_LOCKED_FIELDS = ['item-price', 'item-price-diamonds', 'item-stock',
++                        'item-level', 'item-duration'];
++
++// Drop the cached paid values AND the VI lock in one place. Called whenever the
++// form leaves a VI context (loading another product, Cancel). Without this the
++// cache leaked: editing a legacy VI and then a paid product restored VI's "0"
++// over the paid price, dropped its stock limit and zeroed its level gate.
++function clearViFieldCache() {
++    for (const id of VI_LOCKED_FIELDS) {
++        const input = document.getElementById(id);
++        if (!input) continue;
++        delete input.dataset.paidValue;
++        input.disabled = false;
++    }
++    const label = document.getElementById('item-duration-label');
++    if (label) label.textContent = 'Duration hours (0 = permanent)';
++}
++
++// Show the legacy-duration note/action ONLY for an existing VI row whose stored
++// duration is still positive. `stored` is that value (or null).
++function refreshLegacyViDurationControls(stored) {
++    const note = document.getElementById('item-legacy-duration-note');
++    const btn = document.getElementById('item-clear-legacy-duration');
++    const show = typeof stored === 'number' && stored > 0;
++    const tierEl = document.getElementById('item-prestige-tier');
++    const isVI = !!tierEl && tierEl.value === '6';
++    if (note) {
++        note.textContent = show
++            ? 'This Prestige product was created before the permanence rule and '
++              + 'still stores a ' + stored + '-hour duration. Saving keeps it. '
++              + (isVI
++                  ? 'Prestige VI is permanent and unmetered, so a stored duration '
++                    + 'must be cleared before the tier can change to VI.'
++                  : 'Changing the tier requires clearing it first (Clear below).')
++            : '';
++        note.style.display = show ? 'block' : 'none';
++    }
++    if (btn) btn.style.display = show ? 'inline-block' : 'none';
++}
++
++// Explicit, deliberate clear of a grandfathered VI duration. Everything else
++// stays in VI mode: free, unmetered, duration-disabled. The next PUT sends
++// duration_hours: null and the API stores NULL while keeping tier VI.
++function clearLegacyViDuration() {
++    editingLegacyViDuration = null;
++    const dur = document.getElementById('item-duration');
++    delete dur.dataset.paidValue;   // no stale cached "48" to restore
++    dur.value = '0';
++    refreshLegacyViDurationControls(null);
++    applyFreeVIFields();            // keep VI free/unmetered/disabled
++}
++
+ function applyFreeVIFields() {
+     const free = isFreeVI();
+-    for (const id of ['item-price', 'item-price-diamonds', 'item-stock', 'item-level', 'item-duration']) {
++    for (const id of VI_LOCKED_FIELDS) {
+         const input = document.getElementById(id);
+-        if (free && !input.disabled) {
+-            input.dataset.paidValue = input.value;
+-            input.value = '0';
+-        } else if (!free && input.disabled) {
+-            input.value = input.dataset.paidValue || '';
++        if (free) {
++            if (!input.disabled) {
++                // Cache the paid value only on the transition INTO the lock, and
++                // never cache the grandfathered legacy duration: it is carried
++                // by editingLegacyViDuration, and caching it here is what let a
++                // tier change launder 48 hours onto a different product.
++                if (id === 'item-duration') {
++                    if (editingLegacyViDuration === null) {
++                        input.dataset.paidValue = input.value;
++                    }
++                } else {
++                    input.dataset.paidValue = input.value;
++                }
++                input.value = '0';
++            }
++        } else if (input.disabled) {
++            // Leaving VI: put the remembered paid value back. The duration is
++            // the exception — while a legacy duration is in play the input
++            // already SHOWS the stored value (set below), so leaving VI must
++            // not re-impose it over an administrator's explicit clear. That is
++            // what keeps "Clear, then change tier" a real clear while an
++            // untouched VI->V change still carries the old value for the API to
++            // reject.
++            if (!(id === 'item-duration' && editingLegacyViDuration !== null)) {
++                input.value = input.dataset.paidValue || '';
++            }
+         }
+         input.disabled = free;
+     }
++    // The legacy duration is restored above, but VI must never SHOW it as an
++    // editable zero: keep the stored value visible while the lock is active.
++    if (free && editingLegacyViDuration !== null) {
++        document.getElementById('item-duration').value =
++            String(editingLegacyViDuration);
++    }
+     document.getElementById('item-price').min =
+         document.getElementById('item-type').value === 'prestige' && !free ? '1' : '0';
+     if (free) {
+@@ -357,7 +503,23 @@ function toggleItemTypeFields() {
+         prestigeField.style.display = 'none';
+         durLabel.textContent = 'Duration hours (0 = permanent)';
+         durHint.textContent = 'Titles are cosmetic and permanent — leave as 0.';
++    } else if (type === 'color') {
++        // Color is a buyable colour role: cogs/shop.py grants it as a permanent
++        // role at duration 0, or a timed role when positive. It needs a role ID.
++        roleField.style.display = 'block';
++        boostField.style.display = 'none';
++        prestigeField.style.display = 'none';
++        durLabel.textContent = 'Duration hours (0 = permanent)';
++        durHint.textContent = '0 = permanent colour role; positive = temporary (timed role).';
++    } else if (type === 'custom') {
++        // Item: an inventory product (no role). 0 = permanent, positive = timed.
++        roleField.style.display = 'none';
++        boostField.style.display = 'none';
++        prestigeField.style.display = 'none';
++        durLabel.textContent = 'Duration hours (0 = permanent)';
++        durHint.textContent = '0 = permanent inventory item; positive = timed holding.';
+     } else {
++        // Legacy role / temp_role — still editable, no longer offered for new.
+         roleField.style.display = 'block';
+         boostField.style.display = 'none';
+         prestigeField.style.display = 'none';
+@@ -365,13 +527,22 @@ function toggleItemTypeFields() {
+         durHint.textContent = '';
+     }
+     applyFreeVIFields();
++    // The legacy-duration note/action belongs to a VI context only; stepping off
++    // VI (or onto a non-Prestige type) retires it. (No-op while the flag is
++    // null, which is the case on a fresh Add form.)
++    refreshLegacyViDurationControls(editingLegacyViDuration);
+ }
+ toggleItemTypeFields();
+ 
+ async function addItem() {
+     const type = document.getElementById('item-type').value;
+-    const stock = parseInt(
+-        document.getElementById('item-stock').value) || 0;
++    // Max stock: blank or 0 = unlimited (0); plain digits = that limit; anything
++    // else (negative, decimal, junk) stays NaN and is REJECTED below. The old
++    // `parseInt(...) || 0` turned "-5" / "abc" into 0 (Unlimited) and "2.7"
++    // into 2, silently removing or rewriting a product's stock limit.
++    const stockRaw = (document.getElementById('item-stock').value || '').trim();
++    const stock = stockRaw === '' ? 0
++        : (/^\d+$/.test(stockRaw) ? parseInt(stockRaw, 10) : NaN);
+     const priceDiamonds = parseInt(
+         document.getElementById('item-price-diamonds').value) || 0;
+     const boostMult = parseFloat(
+@@ -385,20 +556,36 @@ async function addItem() {
+     // (a Diamond price is set).
+     const priceRaw = (document.getElementById('item-price').value || '').trim();
+     const priceValue = /^\d+$/.test(priceRaw) ? parseInt(priceRaw, 10) : null;
++    // Duration: blank or 0 = permanent (null); digits = that many hours; any
++    // other entry stays NaN so it is rejected below. This keeps a legacy VI
++    // duration the form is PRESERVING (48) intact — the old
++    // `parseInt(...) || null` turned an unreadable value into a silent 0 and,
++    // because the VI lock disables the input, that silently cleared the stored
++    // duration on any unrelated edit.
++    const durationRaw = (document.getElementById('item-duration').value || '').trim();
++    const durationValue = (durationRaw === '' || durationRaw === '0')
++        ? null
++        : (/^\d+$/.test(durationRaw) ? parseInt(durationRaw, 10) : NaN);
++    // Role-granting types carry a role_id; everything else sends null. Color
++    // joins role/temp_role here (cogs/shop.py grants a Colour as a role), and
++    // Item (custom) correctly drops the role field it never actually used.
++    const needsRole = ['color', 'role', 'temp_role'].indexOf(type) !== -1;
+     const payload = {
+         name:          document.getElementById('item-name').value,
+         price:         priceValue === null ? 0 : priceValue,
+         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
+         type:          type,
+-        role_id:       ['xp_boost', 'prestige', 'potion', 'title'].indexOf(type) === -1
++        role_id:       needsRole
+                        ? (document.getElementById('item-role').value || null)
+                        : null,
+         prestige_tier: type === 'prestige' && prestigeTier
+                        ? parseInt(prestigeTier.value) : null,
+         xp_boost_multiplier: (type === 'xp_boost' || type === 'potion') && boostMult > 1
+                        ? boostMult : null,
+-        duration_hours:parseInt(
+-            document.getElementById('item-duration').value) || null,
++        // A blank or 0 field is "permanent" (null); a blank is never silently
++        // collapsed into 0. NaN must stay NaN so a non-numeric entry is
++        // rejected below instead of being rewritten as "permanent".
++        duration_hours:durationValue,
+         required_level:parseInt(
+             document.getElementById('item-level').value) || 0,
+         description:   document.getElementById('item-desc').value,
+@@ -407,16 +594,30 @@ async function addItem() {
+         featured:      document.getElementById('item-featured')
+                                .checked ? 1 : 0,
+         max_stock:     stock > 0 ? stock : null,
+-        current_stock: stock > 0 ? stock : null,
+     };
++    // A NEW listing starts at full stock (current == max), the existing create
++    // behavior. An EDIT never sends current_stock, so the server preserves the
++    // stock on hand — editing the maximum does not restock.
++    if (!editingId) {
++        payload.current_stock = payload.max_stock;
++    }
+     const freeVI = isFreeVI();
+     if (freeVI) {
+         payload.price = 0;
+         payload.price_diamonds = null;
+         payload.max_stock = null;
+-        payload.current_stock = null;
++        if (!editingId) payload.current_stock = null;
+         payload.required_level = 0;
+-        payload.duration_hours = null;
++        // Legacy duration preservation. A VI row that predates the permanence
++        // rule still stores a positive duration, and VI disables the input, so
++        // parseInt above would read the locked 0 and silently clear it on ANY
++        // unrelated edit. editingLegacyViDuration is null for a NEW VI and is
++        // nulled by clearLegacyViDuration(), so:
++        //   untouched legacy VI edit -> resend the stored value (API preserves)
++        //   explicit Clear clicked   -> send null  (API stores NULL)
++        //   brand-new VI            -> send null  (unchanged behaviour)
++        payload.duration_hours = (editingLegacyViDuration === null
++                                  ? null : editingLegacyViDuration);
+     }
+     if (!payload.name) {
+         showToast('Enter name and a coin or diamond price', 'danger');
+@@ -432,6 +633,16 @@ async function addItem() {
+         showToast('Enter name and a coin or diamond price', 'danger');
+         return;
+     }
++    if (isNaN(stock)) {
++        showToast('Max stock must be a whole number (0 = unlimited)', 'danger');
++        return;
++    }
++    if (typeof payload.duration_hours === 'number'
++            && isNaN(payload.duration_hours)) {
++        showToast('Duration must be a whole number of hours (0 = permanent)',
++                  'danger');
++        return;
++    }
+     if (type === 'xp_boost' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
+         showToast('XP Boost items need a multiplier > 1 and a duration', 'danger');
+         return;
+@@ -453,18 +664,162 @@ async function addItem() {
+             return;
+         }
+     }
+-    const res  = await fetch('/api/shop/item', {
+-        method:  'POST',
++    // Create posts to the collection; edit PUTs to the item. The global fetch
++    // wrapper (dashboard.js) injects the X-CSRF-Token on both non-GET calls.
++    const url    = editingId ? '/api/shop/item/' + editingId : '/api/shop/item';
++    const method = editingId ? 'PUT' : 'POST';
++    const res  = await fetch(url, {
++        method:  method,
+         headers: { 'Content-Type': 'application/json' },
+         body:    JSON.stringify(payload),
+     });
+     const data = await res.json();
+     if (data.success) {
+-        showToast('Item added!');
++        showToast(editingId ? 'Item updated!' : 'Item added!');
+         setTimeout(() => location.reload(), 800);
+     } else {
+-        showToast('Error saving', 'danger');
++        showToast(data.error || 'Error saving', 'danger');
++    }
++}
++
++// Add a temporary, non-selectable option so the LOCKED type <select> can show
++// a legacy product's type (role/temp_role/xp_boost) that the create dropdown no
++// longer lists. Never used for the five current types (they are already there).
++function ensureTypeOption(sel, type) {
++    if (!sel || !type) return;
++    const opts = sel.options || [];
++    for (let i = 0; i < opts.length; i++) {
++        if (opts[i].value === type) return;
++    }
++    const legacy = {
++        role: 'Permanent Role (legacy)',
++        temp_role: 'Temporary Role (legacy)',
++        xp_boost: 'XP Boost (legacy)',
++    };
++    const opt = document.createElement('option');
++    opt.value = type;
++    opt.textContent = legacy[type] || type;
++    opt.disabled = true;          // cannot be chosen for a new product
++    opt.setAttribute('data-temporary', '1');
++    sel.appendChild(opt);
++}
++
++// Load one product into the Add form and switch the form into edit mode. The
++// type is locked (immutable); current stock is shown read-only beside the
++// editable maximum; the submit button PUTs.
++async function editItem(id) {
++    let item = null;
++    try {
++        const res = await fetch('/api/shop/item/' + id);
++        const data = await res.json();
++        if (data && data.success) item = data.item;
++        else showToast((data && data.error) || 'Could not load this item', 'danger');
++    } catch (e) {
++        showToast('Could not load this item', 'danger');
++    }
++    if (!item) return;
++    editingId = item.id;
++
++    // Leave the PREVIOUS product's VI context completely before prefilling.
++    // clearViFieldCache() drops every cached `paidValue` and releases the VI
++    // lock, so nothing from the last row can be restored over this one.
++    clearViFieldCache();
++    editingLegacyViDuration = null;
++
++    document.getElementById('item-name').value = item.name || '';
++    document.getElementById('item-desc').value = item.description || '';
++    document.getElementById('item-price').value = item.price == null ? '' : item.price;
++    document.getElementById('item-price-diamonds').value =
++        item.price_diamonds == null ? '' : item.price_diamonds;
++    document.getElementById('item-role').value = item.role_id == null ? '' : item.role_id;
++    document.getElementById('item-boost-mult').value =
++        item.xp_boost_multiplier == null ? '' : item.xp_boost_multiplier;
++    document.getElementById('item-duration').value =
++        item.duration_hours == null ? '0' : item.duration_hours;
++    document.getElementById('item-level').value =
++        item.required_level == null ? '0' : item.required_level;
++    document.getElementById('item-icon').value = item.icon_url || '';
++    document.getElementById('item-rarity').value = item.rarity || 'common';
++    document.getElementById('item-featured').checked = !!item.featured;
++    document.getElementById('item-stock').value =
++        item.max_stock == null ? '0' : item.max_stock;
++    if (item.type === 'prestige' && item.prestige_tier != null) {
++        document.getElementById('item-prestige-tier').value = String(item.prestige_tier);
++    }
++
++    // Lock the (immutable) type, injecting a display option for legacy types.
++    // Remember a grandfathered VI duration BEFORE the lock, because
++    // applyFreeVIFields() zeroes the duration input on the way into VI mode.
++    // ANY Prestige tier (I-VI) can carry a legacy positive duration, and a tier
++    // change to VI locks the input and shows 0. If only VI rows were remembered,
++    // a legacy V(24) switched to VI would read editingLegacyViDuration === null
++    // and silently send null (= an explicit clear the admin never made).
++    if (item.type === 'prestige'
++            && typeof item.duration_hours === 'number'
++            && item.duration_hours > 0) {
++        editingLegacyViDuration = item.duration_hours;
++    }
++    const typeSel = document.getElementById('item-type');
++    ensureTypeOption(typeSel, item.type);
++    typeSel.value = item.type;
++    typeSel.disabled = true;
++    toggleItemTypeFields();
++    refreshLegacyViDurationControls(editingLegacyViDuration);
++
++    // Show current stock separately from the maximum (read-only).
++    document.getElementById('item-current-stock-field').style.display = 'block';
++    document.getElementById('item-current-stock').value =
++        item.current_stock == null ? 'Unlimited' : item.current_stock;
++
++    document.getElementById('shop-form-title').textContent = 'Edit Shop Item';
++    document.getElementById('shop-submit-btn').textContent = 'Save Changes';
++    document.getElementById('shop-cancel-edit').style.display = 'inline-block';
++    const banner = document.getElementById('shop-edit-banner');
++    banner.textContent = 'Editing “' + (item.name || '') +
++        '” — the product type cannot be changed.';
++    banner.style.display = 'block';
++    if (banner.scrollIntoView) {
++        banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
++    }
++}
++
++// Leave edit mode and reset the form back to a clean "add" state.
++function cancelShopEdit() {
++    editingId = null;
++    // Drop the grandfathered duration AND every cached VI paid value, otherwise
++    // the next Add would carry the previous product's numbers.
++    editingLegacyViDuration = null;
++    clearViFieldCache();
++    refreshLegacyViDurationControls(null);
++    const typeSel = document.getElementById('item-type');
++    typeSel.disabled = false;
++    const opts = typeSel.options ? Array.prototype.slice.call(typeSel.options) : [];
++    for (let i = 0; i < opts.length; i++) {
++        if (opts[i].getAttribute && opts[i].getAttribute('data-temporary') === '1') {
++            opts[i].remove();
++        }
+     }
++    typeSel.value = 'custom';
++    document.getElementById('item-name').value = '';
++    document.getElementById('item-desc').value = '';
++    document.getElementById('item-price').value = '';
++    document.getElementById('item-price-diamonds').value = '';
++    document.getElementById('item-role').value = '';
++    document.getElementById('item-boost-mult').value = '';
++    document.getElementById('item-duration').value = '0';
++    document.getElementById('item-level').value = '0';
++    document.getElementById('item-icon').value = '';
++    document.getElementById('item-rarity').value = 'common';
++    document.getElementById('item-featured').checked = false;
++    document.getElementById('item-stock').value = '0';
++    document.getElementById('item-prestige-tier').value = '1';
++    toggleItemTypeFields();   // re-enables any VI-locked fields, restores labels
++    document.getElementById('item-current-stock-field').style.display = 'none';
++    document.getElementById('item-current-stock').value = '';
++    document.getElementById('shop-form-title').textContent = 'Add Shop Item';
++    document.getElementById('shop-submit-btn').textContent = 'Add Item';
++    document.getElementById('shop-cancel-edit').style.display = 'none';
++    document.getElementById('shop-edit-banner').style.display = 'none';
+ }
+ 
+ })();
+diff --git a/scripts/test_free_shop_items.py b/scripts/test_free_shop_items.py
+index 5c78828..15872b3 100644
+--- a/scripts/test_free_shop_items.py
++++ b/scripts/test_free_shop_items.py
+@@ -318,10 +318,17 @@ class FreeListingApiTests(unittest.TestCase):
+                                 headers={"X-CSRF-Token": "free-csrf"})
+ 
+     def test_normal_item_with_price_zero_is_accepted_and_stored_as_zero(self):
++        # UPDATED for the finalized Product-Management decision: NEW XP Boost
++        # creation is now refused at the API (existing boosts + their purchase
++        # path are untouched), so `xp_boost` is no longer a creatable free
++        # listing. It is replaced here by `color` — the fifth admin-facing type
++        # (Item/Color/Potion/Title/Prestige), which grants a role and therefore
++        # carries a role_id. The xp_boost *creation block* itself is asserted in
++        # scripts/test_shop_product_management.py.
+         for kind, extra in (("title", {}), ("custom", {}), ("role", {"role_id": 55}),
+                             ("temp_role", {"role_id": 55, "duration_hours": 2}),
+                             ("potion", {"xp_boost_multiplier": 2, "duration_hours": 2}),
+-                            ("xp_boost", {"xp_boost_multiplier": 2, "duration_hours": 2})):
++                            ("color", {"role_id": 55})):
+             with self.subTest(kind=kind):
+                 payload = dict(name=f"Free {kind}", type=kind, price=0, **extra)
+                 response = self.post(payload)
+diff --git a/scripts/test_shop_product_management.py b/scripts/test_shop_product_management.py
+new file mode 100644
+index 0000000..edcbe89
+--- /dev/null
++++ b/scripts/test_shop_product_management.py
+@@ -0,0 +1,749 @@
++"""Shop Product Management — Add / Edit / Delete CRUD + finalized type rules.
++
++Covers the decisions locked for this pass (dashboard API surface only; the
++purchase engine, ledger, timed ownership, cogs/shop.py and wallet/inventory are
++out of scope and untouched):
++
++  * the five admin-facing product types — Item (internal `custom`), Color
++    (internal `color`), Potion, Title, Prestige — plus their rules:
++      - Color grants a role, so it requires a role_id (like role/temp_role);
++      - Title and Prestige are permanent (a submitted duration is normalized
++        away); Item/Color keep duration semantics (0 = permanent, >0 = timed).
++  * NEW XP Boost creation is refused at the API, while EXISTING boosts (and
++    role/temp_role) stay editable on their safe fields and keep their type.
++  * the real update endpoint PUT /api/shop/item/<id>: permission + CSRF +
++    validation, `type`/`category_id`/`option_of_id` immutability, the stock
++    rules (current_stock is ALWAYS preserved — an explicit current_stock key is
++    ignored; editing the maximum never restocks; the maximum can't drop below
++    the preserved current stock),
++    and the explicit icon_url clear (absent key keeps, present-but-blank clears).
++  * the item_catalog COALESCE review: an edit keeps the rank-card catalog in
++    step, but a blanked shop icon does NOT wipe the catalog's cached icon.
++  * the admin table renders the correct type display names and an Edit button,
++    and the root-with-options delete guard is not weakened by editing.
++
++Real Flask routes + permissions + CSRF + scratch SQLite; no HTTP server.
++Run:  python -m pytest test_shop_product_management.py
++      python test_shop_product_management.py
++"""
++import asyncio
++import time
++import unittest
++
++from phase1_support import (
++    GUILD, USER, execute, reset_database, rows, mutation_snapshot,
++)
++import dashboard.app as dashboard
++
++app = dashboard.app
++app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
++
++OTHER_GUILD = 99901   # a second guild — proves cross-guild isolation
++CSRF = "pm-csrf"
++
++
++def seed_item(guild=GUILD, name="VIP", kind="role", price=1500, role_id=99,
++              duration=None, max_stock=None, current_stock=None, icon=None,
++              rarity="common", category_id=None, option_of_id=None,
++              prestige_tier=None, diamonds=None, multiplier=None,
++              required_level=0, description=None, featured=0, enabled=1):
++    """Insert a listing directly (bypassing the API) so a test can start from
++    an exact stored state — including legacy types the create form no longer
++    offers."""
++    return execute(
++        "INSERT INTO shop_items (guild_id,name,type,price,description,role_id,"
++        "duration_hours,max_stock,current_stock,required_level,required_role_id,"
++        "price_diamonds,icon_url,rarity,prestige_tier,xp_boost_multiplier,"
++        "category_id,option_of_id,featured,enabled) "
++        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
++        (guild, name, kind, price, description, role_id, duration, max_stock,
++         current_stock, required_level, None, diamonds, icon, rarity,
++         prestige_tier, multiplier, category_id, option_of_id, featured, enabled))
++
++
++class ProductManagementTests(unittest.TestCase):
++    def setUp(self):
++        asyncio.run(reset_database())
++        execute("INSERT INTO dashboard_users (guild_id,user_id,permission_level,enabled) "
++                "VALUES (?,?,'admin',1)", (GUILD, USER))
++        self.client = app.test_client()
++        with self.client.session_transaction() as session:
++            session.update(user={"id": USER, "username": "PM", "avatar": None},
++                           guild_id=GUILD, expires_at=time.time() + 7200,
++                           csrf_token=CSRF)
++
++    # ── request helpers ──────────────────────────────────────────────────
++    def post(self, payload, csrf=True):
++        return self.client.post("/api/shop/item", json=payload,
++                                headers={"X-CSRF-Token": CSRF} if csrf else {})
++
++    def put(self, item_id, payload, csrf=True):
++        return self.client.put(f"/api/shop/item/{item_id}", json=payload,
++                               headers={"X-CSRF-Token": CSRF} if csrf else {})
++
++    def get(self, item_id):
++        return self.client.get(f"/api/shop/item/{item_id}")
++
++    def delete(self, item_id, csrf=True):
++        return self.client.delete(f"/api/shop/item/{item_id}",
++                                  headers={"X-CSRF-Token": CSRF} if csrf else {})
++
++    def one(self, sql, args=()):
++        r = rows(sql, args)
++        return r[0] if r else None
++
++    def field(self, item_id, column):
++        return self.one(f"SELECT {column} FROM shop_items WHERE id=?", (item_id,))[0]
++
++    # ══ ADD — the five current types + the XP Boost block ═══════════════
++    def test_add_item_custom_succeeds(self):
++        r = self.post(dict(name="Cape", type="custom", price=250))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertIs(r.get_json()["success"], True)
++        self.assertEqual(self.one("SELECT type,price FROM shop_items WHERE name='Cape'"),
++                         ("custom", 250))
++
++    def test_add_color_succeeds_and_stores_internal_value(self):
++        r = self.post(dict(name="Red Name", type="color", price=300, role_id=4242))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT type,price,role_id FROM shop_items WHERE name='Red Name'"),
++            ("color", 300, 4242))
++
++    def test_add_color_requires_role_id(self):
++        before = mutation_snapshot()
++        r = self.post(dict(name="No Role Colour", type="color", price=300))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIs(r.get_json()["success"], False)
++        self.assertIn("role", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before, "an invalid color was persisted")
++
++    def test_add_xp_boost_is_blocked_but_not_persisted(self):
++        before = mutation_snapshot()
++        r = self.post(dict(name="Boost", type="xp_boost", price=100,
++                           xp_boost_multiplier=2, duration_hours=4))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIs(r.get_json()["success"], False)
++        self.assertIn("xp boost", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before, "a blocked XP Boost was persisted")
++
++    def test_add_legacy_role_type_still_accepted_for_backward_compatibility(self):
++        # role/temp_role are no longer OFFERED by the create form, but the API
++        # keeps accepting them so nothing that already integrates breaks; only
++        # XP Boost creation is explicitly refused.
++        r = self.post(dict(name="Roll", type="role", price=100, role_id=123))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.field(rows("SELECT id FROM shop_items WHERE name='Roll'")[0][0], "type"),
++                         "role")
++
++    def test_add_title_with_a_duration_is_rejected_as_permanent(self):
++        before = mutation_snapshot()
++        r = self.post(dict(name="Hero", type="title", price=0, duration_hours=8))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIn("permanent", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before)
++        # a permanent Title (no duration) is still accepted
++        self.assertEqual(self.post(dict(name="Hero", type="title", price=0)).status_code, 200)
++        self.assertIsNone(self.field(rows("SELECT id FROM shop_items WHERE name='Hero'")[0][0],
++                                     "duration_hours"))
++
++    def test_add_prestige_i_to_v_with_a_duration_is_rejected_as_permanent(self):
++        before = mutation_snapshot()
++        r = self.post(dict(name="Prestige III", type="prestige", price=500,
++                           prestige_tier=3, duration_hours=8))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(mutation_snapshot(), before)
++        # permanent Prestige (no duration) still persists its tier and price
++        self.assertEqual(
++            self.post(dict(name="Prestige III", type="prestige", price=500,
++                           prestige_tier=3)).status_code, 200)
++        self.assertEqual(
++            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
++                     "WHERE name='Prestige III'"), (None, 500, 3))
++
++    # ══ GET — edit prefill ══════════════════════════════════════════════
++    def test_get_returns_the_full_row_for_prefill(self):
++        item = seed_item(kind="custom", name="Cape", price=250, icon="https://x/i.png",
++                         rarity="epic", max_stock=20, current_stock=12)
++        r = self.get(item)
++        self.assertEqual(r.status_code, 200, r.get_json())
++        body = r.get_json()
++        self.assertIs(body["success"], True)
++        self.assertEqual(body["item"]["id"], item)
++        self.assertEqual(body["item"]["type"], "custom")
++        self.assertEqual(body["item"]["max_stock"], 20)
++        self.assertEqual(body["item"]["current_stock"], 12)
++        self.assertEqual(body["item"]["icon_url"], "https://x/i.png")
++
++    def test_get_is_guild_scoped(self):
++        other = seed_item(guild=OTHER_GUILD, name="Foreign", kind="custom", price=1)
++        self.assertEqual(self.get(other).status_code, 404)
++        self.assertEqual(self.get(123456).status_code, 404)
++
++    # ══ EDIT — safe fields, immutability, stock, icon ═══════════════════
++    def test_edit_updates_safe_fields(self):
++        item = seed_item(kind="custom", name="Cape", price=250, description="old",
++                         rarity="common")
++        r = self.put(item, dict(name="Royal Cape", price=400, description="new",
++                                rarity="legendary"))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertIs(r.get_json()["success"], True)
++        self.assertEqual(
++            self.one("SELECT name,price,description,rarity FROM shop_items WHERE id=?", (item,)),
++            ("Royal Cape", 400, "new", "legendary"))
++
++    def test_edit_cannot_change_the_type(self):
++        item = seed_item(kind="custom", name="Cape", price=250)
++        r = self.put(item, dict(type="title"))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.field(item, "type"), "custom")
++
++    def test_edit_cannot_smuggle_in_a_new_xp_boost_by_retyping(self):
++        item = seed_item(kind="custom", name="Cape", price=250)
++        r = self.put(item, dict(type="xp_boost", xp_boost_multiplier=2, duration_hours=4))
++        # `type` is immutable, so this is a no-op re-type: the row STAYS a custom
++        # Item and never becomes an XP Boost. (A stray xp_boost_multiplier is
++        # inert on a non-boost type — the purchase engine only reads it for
++        # potion/xp_boost — and the create/edit form never sends one for Item,
++        # exactly as the add path already behaves.)
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.field(item, "type"), "custom")
++        self.assertEqual(self.field(item, "duration_hours"), 4)
++
++    def test_edit_preserves_category_id(self):
++        cat = execute("INSERT INTO shop_categories (guild_id,name,emoji,enabled,sort_order) "
++                      "VALUES (?, 'Boosts', '⚡', 1, 0)", (GUILD,))
++        item = seed_item(kind="custom", name="Cape", price=250, category_id=cat)
++        r = self.put(item, dict(name="Cape v2"))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.field(item, "category_id"), cat)
++
++    def test_edit_preserves_option_of_id_and_keeps_the_family_intact(self):
++        root = seed_item(kind="custom", name="Bundle", price=100)
++        child = seed_item(kind="custom", name="Option A", price=50, option_of_id=root)
++        r = self.put(child, dict(name="Option A v2", price=60))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.field(child, "option_of_id"), root)
++        # the root still has its option, so the delete guard must still hold
++        self.assertEqual(self.delete(root).status_code, 409)
++
++    def test_edit_max_stock_does_not_restock_current(self):
++        item = seed_item(kind="custom", name="Cape", price=250, max_stock=20, current_stock=12)
++        r = self.put(item, dict(max_stock=30))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.one("SELECT max_stock,current_stock FROM shop_items WHERE id=?",
++                                  (item,)), (30, 12))
++
++    def test_edit_max_stock_below_current_is_rejected(self):
++        item = seed_item(kind="custom", name="Cape", price=250, max_stock=20, current_stock=12)
++        before = mutation_snapshot()
++        r = self.put(item, dict(max_stock=5))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIn("stock", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before, "a rejected stock edit changed the row")
++
++    def test_edit_unlimited_product_stays_unlimited_through_unrelated_edits(self):
++        # Unlimited products store (max_stock=NULL, current_stock=NULL).
++        # Unrelated edits — including an explicit max_stock null, which is
++        # what the UI sends for an unlimited listing — must succeed and keep
++        # BOTH stock columns NULL: editing never initializes stock.
++        item = seed_item(kind="custom", name="Endless Cape", price=250)
++        r = self.put(item, dict(name="Endless Cape v2", price=300, max_stock=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT name,price,max_stock,current_stock FROM shop_items WHERE id=?",
++                     (item,)),
++            ("Endless Cape v2", 300, None, None))
++
++    def test_edit_unlimited_to_finite_stock_transition_is_rejected(self):
++        # STOCK-INTEGRITY GUARD: an unlimited product (current_stock=NULL)
++        # must not be given a finite max_stock by editing. PUT never writes
++        # current_stock, so allowing it would produce (max_stock=N,
++        # current_stock=NULL) — a row safe_decrement_stock() can never
++        # decrement (NULL - 1 stays NULL in SQLite) nor exhaust, i.e. an
++        # infinitely-selling "finite" product.
++        item = seed_item(kind="custom", name="Endless Cape", price=250,
++                         icon="https://x/cape.png")
++        before = mutation_snapshot()
++        r = self.put(item, dict(max_stock=10))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIn("unlimited", str(r.get_json()["error"]).lower())
++        # the rejected request changed NOTHING: stock fields, the other
++        # stored values, and every mutation-tracked table are untouched
++        self.assertEqual(mutation_snapshot(), before,
++                         "a rejected unlimited->finite edit changed state")
++        self.assertEqual(
++            self.one("SELECT name,price,icon_url,max_stock,current_stock "
++                     "FROM shop_items WHERE id=?", (item,)),
++            ("Endless Cape", 250, "https://x/cape.png", None, None))
++        # ... even when smuggled alongside otherwise-valid field changes
++        r = self.put(item, dict(name="New Name", max_stock=10))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(self.field(item, "name"), "Endless Cape")
++
++    def test_edit_legacy_title_with_stored_duration_is_grandfathered(self):
++        # Rows created before the Title/Prestige permanence rule could legally
++        # store a positive duration. They must stay safe-field-editable while
++        # the stored duration is preserved value-for-value — never silently
++        # normalized to NULL.
++        t = seed_item(kind="title", name="Old Timed Title", price=100, duration=48)
++        # 1. body OMITS duration -> unrelated edit allowed, duration kept at 48
++        r = self.put(t, dict(price=150))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
++                                  (t,)), (48, 150))
++        # 2. the UI resubmits the SAME stored duration (number and form-string)
++        #    -> allowed, duration still exactly 48
++        r = self.put(t, dict(price=175, duration_hours=48))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
++                                  (t,)), (48, 175))
++        r = self.put(t, dict(price=180, duration_hours="48"))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
++                                  (t,)), (48, 180))
++        # 4. changing to a DIFFERENT positive duration is still rejected,
++        #    and the rejected request changes nothing
++        before = mutation_snapshot()
++        r = self.put(t, dict(duration_hours=72))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIn("permanent", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before)
++        self.assertEqual(self.field(t, "duration_hours"), 48)
++        # 3. an EXPLICIT clear with 0 works (the supported permanent form)
++        r = self.put(t, dict(duration_hours=0))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertIsNone(self.field(t, "duration_hours"))
++
++    def test_edit_legacy_prestige_with_stored_duration_is_grandfathered(self):
++        p = seed_item(kind="prestige", name="Old Prestige II", price=500,
++                      prestige_tier=2, duration=24)
++        # unrelated edit allowed; duration and tier preserved exactly
++        r = self.put(p, dict(price=600))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
++                     "WHERE id=?", (p,)), (24, 600, 2))
++        # a different positive duration is still rejected
++        r = self.put(p, dict(duration_hours=12))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(self.field(p, "duration_hours"), 24)
++        # the SAME tier resubmitted as a number or a form-string is not a tier
++        # change, so the grandfathered value is still preserved
++        for same_tier in (2, "2"):
++            r = self.put(p, dict(prestige_tier=same_tier, price=650))
++            self.assertEqual(r.status_code, 200, r.get_json())
++            self.assertEqual(
++                self.one("SELECT duration_hours,prestige_tier FROM shop_items "
++                         "WHERE id=?", (p,)), (24, 2))
++
++    def test_legacy_prestige_tier_change_cannot_carry_the_old_duration(self):
++        # THE TIER-CHANGE HOLE: the grandfather clause keys off a stored
++        # positive duration, but it must NOT carry that duration across a
++        # CHANGE OF TIER. A legacy VI(48) turned into a V used to become a
++        # timed Prestige V; a legacy V(24) turned into a VI became a product
++        # claiming to be permanent and unmetered while holding a duration.
++        v = seed_item(kind="prestige", name="Old VI", price=0,
++                      prestige_tier=6, duration=48)
++        before = mutation_snapshot()
++        # 1. the old duration is still present -> REJECTED, nothing written
++        r = self.put(v, dict(prestige_tier=5, price=500, duration_hours=48))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(mutation_snapshot(), before)
++        self.assertEqual(
++            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
++                     "WHERE id=?", (v,)), (48, 0, 6))
++        # 1b. omitted duration is not an escape hatch either: the clause steps
++        #     aside entirely, so the still-stored positive value fails the
++        #     permanence rule
++        r = self.put(v, dict(prestige_tier=5, price=500))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(self.field(v, "prestige_tier"), 6)
++        # 2. an EXPLICIT clear first, then the tier change, is allowed and
++        #    stores NULL — never the old 48
++        r = self.put(v, dict(duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertIsNone(self.field(v, "duration_hours"))
++        r = self.put(v, dict(prestige_tier=5, price=500))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
++                     "WHERE id=?", (v,)), (None, 500, 5))
++        # 3. V(24) -> VI must end up genuinely free, unmetered and permanent
++        p = seed_item(kind="prestige", name="Old V", price=500,
++                      prestige_tier=5, duration=24)
++        r = self.put(p, dict(prestige_tier=6, price=0, duration_hours=24))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(
++            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
++                     "WHERE id=?", (p,)), (24, 500, 5))
++        r = self.put(p, dict(prestige_tier=6, price=0))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        # ... and only an explicit clear lets the VI through, with VI terms
++        r = self.put(p, dict(prestige_tier=6, price=0, duration_hours=0))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT duration_hours,price,prestige_tier,max_stock,"
++                     "required_level,role_id FROM shop_items WHERE id=?", (p,)),
++            (None, 0, 6, None, 0, None))
++
++    def test_legacy_title_edit_is_tier_blind(self):
++        # The tier guard is Prestige-only. A Title carries no tier, so its
++        # safe-field edits and its grandfathered duration must behave exactly
++        # as before — the new comparison must not accidentally fire on Title's
++        # NULL tier (None == None must stay true).
++        t = seed_item(kind="title", name="Old Title", price=100, duration=48)
++        for payload in (dict(price=110), dict(price=120, duration_hours=48),
++                        dict(price=130, duration_hours="48"),
++                        dict(price=140, prestige_tier=None),
++                        dict(price=150, prestige_tier="")):
++            r = self.put(t, payload)
++            self.assertEqual(r.status_code, 200, (payload, r.get_json()))
++            self.assertEqual(self.field(t, "duration_hours"), 48, payload)
++        self.assertEqual(self.field(t, "price"), 150)
++        # a Title still cannot gain a DIFFERENT positive duration
++        r = self.put(t, dict(duration_hours=72))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        # and an explicit clear still works
++        r = self.put(t, dict(duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertIsNone(self.field(t, "duration_hours"))
++
++    def test_ui_duration_clear_payload_null_clears_legacy_duration(self):
++        # THE EXACT UI CLEAR PAYLOAD: the edit form computes
++        #   duration_hours: parseInt(input.value) || null
++        # so typing 0 sends JSON null (key PRESENT, value null) — not numeric
++        # 0. An explicit null is an administrator's clear, NOT an "unchanged"
++        # resubmission: the grandfather clause must step aside and the stored
++        # legacy duration must actually become NULL.
++        t = seed_item(kind="title", name="Old Timed Title", price=100, duration=48)
++        r = self.put(t, dict(price=200, duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        # cleared in the DB, and the unrelated field change persisted
++        self.assertEqual(self.one("SELECT duration_hours,price FROM shop_items WHERE id=?",
++                                  (t,)), (None, 200))
++        # the PUT response reports no stale/temporary product fields: it is a
++        # bare success envelope (never the 0 used as validation representation)
++        self.assertEqual(r.get_json(), {"success": True})
++        p = seed_item(kind="prestige", name="Old Prestige II", price=500,
++                      prestige_tier=2, duration=24)
++        r = self.put(p, dict(price=700, duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT duration_hours,price,prestige_tier FROM shop_items "
++                     "WHERE id=?", (p,)), (None, 700, 2))
++        # Contrast check: a GRANDFATHERED edit (duration omitted) must report
++        # the REAL stored value (48) on the GET prefill — never the temporary
++        # validation representation (0).
++        t2 = seed_item(kind="title", name="Timed Title Two", price=100, duration=48)
++        self.assertEqual(self.put(t2, dict(price=120)).status_code, 200)
++        body = self.get(t2).get_json()
++        self.assertEqual(body["item"]["duration_hours"], 48)
++        self.assertEqual(body["item"]["price"], 120)
++
++    def test_prestige_vi_with_positive_duration_is_rejected(self):
++        # LOCKED RULE: Title and ALL Prestige tiers reject positive durations.
++        # The VI unmetered branch used to force-null duration_hours BEFORE the
++        # permanence check, silently accepting (and discarding) a positive
++        # duration instead of rejecting it.
++        from utils.shop_validation import shop_input, ShopValidationError
++        # 1. the validator itself rejects VI + positive duration
++        with self.assertRaises(ShopValidationError):
++            shop_input({"name": "VI", "type": "prestige", "price": 0,
++                        "prestige_tier": 6, "duration_hours": 48})
++        # 2. the real POST API rejects the same request, mutating nothing
++        before = mutation_snapshot()
++        r = self.post(dict(name="Prestige VI", type="prestige", price=0,
++                           prestige_tier=6, duration_hours=48))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIn("permanent", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before)
++        # 3. valid VI requests are unaffected: duration omitted, null and 0
++        #    all still create a free, unmetered, permanent VI listing
++        for suffix, extra in (("A", {}), ("B", {"duration_hours": None}),
++                              ("C", {"duration_hours": 0})):
++            resp = self.post(dict(name=f"Prestige VI {suffix}", type="prestige",
++                                  price=0, prestige_tier=6, **extra))
++            self.assertEqual(resp.status_code, 200, resp.get_json())
++            self.assertEqual(
++                self.one("SELECT duration_hours,price,prestige_tier,max_stock "
++                         "FROM shop_items WHERE name=?", (f"Prestige VI {suffix}",)),
++                (None, 0, 6, None))
++        # 4. other VI rules unweakened: a paid VI is still refused
++        r = self.post(dict(name="Paid VI", type="prestige", price=100,
++                           prestige_tier=6))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        # 5. the legacy-duration grandfather still covers an OLD VI row with a
++        #    stored positive duration: unrelated edits stay possible and the
++        #    stored value is preserved exactly
++        v = seed_item(kind="prestige", name="Old VI", price=0,
++                      prestige_tier=6, duration=48)
++        r = self.put(v, dict(featured=1))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT duration_hours,featured FROM shop_items WHERE id=?",
++                     (v,)), (48, 1))
++
++    def test_grandfather_clause_does_not_leak_to_other_types_or_creation(self):
++        # A custom item's duration is NOT grandfathered: it follows normal
++        # duration semantics and an edit can change it freely.
++        c = seed_item(kind="custom", name="Timed Cape", price=100, duration=48)
++        r = self.put(c, dict(duration_hours=72))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.field(c, "duration_hours"), 72)
++        # POST creation of a timed Title is still rejected (rule unchanged).
++        r = self.post(dict(name="New Timed Title", type="title", price=0,
++                           duration_hours=8))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        # A clean (no-duration) title gains nothing from the clause: trying to
++        # SET a positive duration on it is still rejected.
++        t = seed_item(kind="title", name="Plain Title", price=100)
++        r = self.put(t, dict(duration_hours=5))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIsNone(self.field(t, "duration_hours"))
++
++    def test_edit_ignores_an_explicit_current_stock_key(self):
++        # Finalized: stock quantities are NOT managed by Product Management.
++        # PUT always preserves current_stock, even when a client sends the key
++        # explicitly — it is ignored, not applied and not an error. The UI's
++        # current-stock field is read-only to match.
++        item = seed_item(kind="custom", name="Cape", price=250, max_stock=20, current_stock=12)
++        r = self.put(item, dict(current_stock=18, price=300))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.one("SELECT current_stock,price FROM shop_items WHERE id=?",
++                                  (item,)), (12, 300))
++        # even junk in the ignored key must not block or corrupt the edit
++        r = self.put(item, dict(current_stock="garbage", name="Cape v2"))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.one("SELECT current_stock,name FROM shop_items WHERE id=?",
++                                  (item,)), (12, "Cape v2"))
++        # the max>=current guard still compares against the PRESERVED stock:
++        # sending current_stock=0 alongside max_stock=5 must not bypass it.
++        before = mutation_snapshot()
++        r = self.put(item, dict(current_stock=0, max_stock=5))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(mutation_snapshot(), before)
++        self.assertEqual(self.field(item, "current_stock"), 12)
++
++    def test_edit_icon_absent_keeps_present_blank_clears(self):
++        item = seed_item(kind="custom", name="Cape", price=250, icon="https://x/i.png")
++        # absent key -> kept
++        self.assertEqual(self.put(item, dict(name="Cape v2")).status_code, 200)
++        self.assertEqual(self.field(item, "icon_url"), "https://x/i.png")
++        # present-but-blank -> explicit clear
++        self.assertEqual(self.put(item, dict(icon_url="")).status_code, 200)
++        self.assertIsNone(self.field(item, "icon_url"))
++
++    def test_edit_rejects_invalid_price_without_persisting(self):
++        item = seed_item(kind="custom", name="Cape", price=250)
++        before = mutation_snapshot()
++        r = self.put(item, dict(price="garbage"))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(mutation_snapshot(), before)
++
++    def test_edit_color_cannot_drop_its_required_role(self):
++        item = seed_item(kind="color", name="Red Name", price=300, role_id=4242)
++        before = mutation_snapshot()
++        r = self.put(item, dict(role_id=None))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIn("role", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before)
++        self.assertEqual(self.field(item, "role_id"), 4242)
++
++    def test_edit_legacy_xp_boost_safe_fields_keeps_type_and_effect(self):
++        item = seed_item(kind="xp_boost", name="Boost", price=100, multiplier=2, duration=4)
++        r = self.put(item, dict(name="Boost v2", price=150))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(
++            self.one("SELECT name,type,price,xp_boost_multiplier,duration_hours "
++                     "FROM shop_items WHERE id=?", (item,)),
++            ("Boost v2", "xp_boost", 150, 2, 4))
++
++    def test_edit_legacy_role_item_keeps_type(self):
++        item = seed_item(kind="role", name="VIP", price=1500, role_id=77)
++        r = self.put(item, dict(price=1200))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.one("SELECT type,price,role_id FROM shop_items WHERE id=?",
++                                  (item,)), ("role", 1200, 77))
++
++    def test_edit_is_guild_scoped_and_404s(self):
++        other = seed_item(guild=OTHER_GUILD, name="Foreign", kind="custom", price=1)
++        self.assertEqual(self.put(other, dict(name="Hijack")).status_code, 404)
++        self.assertEqual(self.put(123456, dict(name="Ghost")).status_code, 404)
++        self.assertEqual(self.field(other, "name"), "Foreign")
++
++    def test_edit_requires_admin_permission(self):
++        item = seed_item(kind="custom", name="Cape", price=250)
++        execute("UPDATE dashboard_users SET permission_level='moderator' "
++                "WHERE guild_id=? AND user_id=?", (GUILD, USER))
++        r = self.put(item, dict(name="Hacked"))
++        self.assertEqual(r.status_code, 403, r.get_json())
++        self.assertEqual(self.field(item, "name"), "Cape")
++
++    def test_edit_requires_csrf(self):
++        item = seed_item(kind="custom", name="Cape", price=250)
++        r = self.put(item, dict(name="No CSRF"), csrf=False)
++        self.assertEqual(r.status_code, 403, r.get_json())
++        self.assertEqual(self.field(item, "name"), "Cape")
++
++    # ══ item_catalog COALESCE review ════════════════════════════════════
++    def test_edit_syncs_the_catalog_value_and_rarity(self):
++        item = seed_item(kind="custom", name="Cape", price=250, rarity="common")
++        self.assertEqual(self.put(item, dict(price=300, rarity="epic")).status_code, 200)
++        self.assertEqual(
++            self.one("SELECT rarity,value_currency,value_amount FROM item_catalog "
++                     "WHERE guild_id=? AND item_name='Cape'", (GUILD,)),
++            ("epic", "balance", 300))
++
++    def test_blank_icon_clears_the_listing_but_coalesce_keeps_the_catalog_icon(self):
++        # Create through the API so the catalog is populated with the icon.
++        self.assertEqual(
++            self.post(dict(name="Cog", type="custom", price=100,
++                           icon_url="https://x/cog.png")).status_code, 200)
++        item = rows("SELECT id FROM shop_items WHERE name='Cog'")[0][0]
++        self.assertEqual(
++            self.one("SELECT icon_url FROM item_catalog WHERE guild_id=? AND item_name='Cog'",
++                     (GUILD,))[0], "https://x/cog.png")
++        # Explicit clear on the listing...
++        self.assertEqual(self.put(item, dict(icon_url="")).status_code, 200)
++        self.assertIsNone(self.field(item, "icon_url"))
++        # ...but upsert_catalog_entry's COALESCE deliberately PRESERVES the
++        # cached rank-card icon rather than wiping it. This is the documented
++        # COALESCE impact of the edit path.
++        self.assertEqual(
++            self.one("SELECT icon_url FROM item_catalog WHERE guild_id=? AND item_name='Cog'",
++                     (GUILD,))[0], "https://x/cog.png")
++
++    # ══ admin table render (the authoritative htmx partial) ═════════════
++    def test_partial_renders_display_type_names_and_edit_button(self):
++        seed_item(kind="custom", name="Cape", price=250)
++        seed_item(kind="color", name="Red Name", price=300, role_id=1)
++        seed_item(kind="potion", name="Elixir", price=50, multiplier=2, duration=2)
++        seed_item(kind="title", name="Hero", price=0)
++        seed_item(kind="prestige", name="P3", price=500, prestige_tier=3, role_id=None)
++        seed_item(kind="role", name="VIP", price=1500, role_id=2)
++        seed_item(kind="xp_boost", name="Boost", price=100, multiplier=2, duration=4, role_id=None)
++        html = self.client.get("/api/shop/items").get_data(as_text=True)
++        for label in ("Item", "Color", "Potion", "Title", "Prestige III",
++                      "Permanent Role", "XP Boost"):
++            self.assertIn(label, html, f"missing display label {label}")
++        # the raw internal values must not leak as the display type
++        self.assertNotIn(">custom<", html)
++        self.assertNotIn(">temp_role<", html)
++        self.assertIn("editItem(", html)
++        self.assertIn(">Edit<", html)
++
++    # ══ legacy tier change, with the EXACT payloads the real form now sends ══
++    # scripts/test_vi_legacy_edit_form.js executes the real template script and
++    # asserts these payload shapes; this class proves what the API and the DB do
++    # with them. (V(24) -> VI used to send duration_hours: null on its own.)
++    @staticmethod
++    def ui_payload(**over):
++        base = dict(name="Old V", price=500, price_diamonds=None, type="prestige",
++                    role_id=None, prestige_tier=5, xp_boost_multiplier=None,
++                    duration_hours=24, required_level=0, description="",
++                    icon_url=None, rarity="common", featured=0, max_stock=None)
++        base.update(over)
++        return base
++
++    def vi_row(self, p):
++        return self.one(
++            "SELECT duration_hours,price,prestige_tier,max_stock,required_level,"
++            "role_id,price_diamonds,current_stock FROM shop_items WHERE id=?", (p,))
++
++    def test_ui_legacy_v24_to_vi_without_clear_is_rejected_and_unchanged(self):
++        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
++                      prestige_tier=5, duration=24)
++        before = mutation_snapshot()
++        before_row = self.vi_row(p)
++        # What the repaired form sends for V(24) -> VI with NO explicit clear:
++        # the stored 24 travels with the VI-locked values.
++        r = self.put(p, self.ui_payload(prestige_tier=6, price=0, duration_hours=24))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertIs(r.get_json()["success"], False)
++        self.assertIn("duration", str(r.get_json()["error"]).lower())
++        self.assertEqual(mutation_snapshot(), before, "a rejected tier change wrote")
++        self.assertEqual(self.vi_row(p), before_row)
++        self.assertEqual(before_row[:3], (24, 500, 5))
++
++    def test_ui_legacy_v24_to_vi_after_explicit_clear_stores_null_free_vi(self):
++        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
++                      prestige_tier=5, duration=24, max_stock=None,
++                      current_stock=None, required_level=0)
++        # What the form sends after "Clear legacy duration": null + VI terms.
++        r = self.put(p, self.ui_payload(prestige_tier=6, price=0, duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        # (duration, price, tier, max_stock, level, role, diamonds, current_stock)
++        self.assertEqual(self.vi_row(p), (None, 0, 6, None, 0, None, None, None))
++
++    def test_ui_normal_v_without_legacy_duration_to_vi_still_works(self):
++        p = seed_item(kind="prestige", name="Normal V", price=500, role_id=None,
++                      prestige_tier=5, duration=None)
++        r = self.put(p, self.ui_payload(name="Normal V", prestige_tier=6, price=0,
++                                         duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.vi_row(p), (None, 0, 6, None, 0, None, None, None))
++        # also via a stored 0 (older rows): same outcome
++        q = seed_item(kind="prestige", name="Zero V", price=500, role_id=None,
++                      prestige_tier=5, duration=0)
++        r = self.put(q, self.ui_payload(name="Zero V", prestige_tier=6, price=0,
++                                         duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertIsNone(self.field(q, "duration_hours"))
++
++    def test_ui_legacy_v24_unrelated_edit_keeps_24_and_tier(self):
++        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
++                      prestige_tier=5, duration=24)
++        r = self.put(p, self.ui_payload(price=650, duration_hours=24))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.vi_row(p)[:3], (24, 650, 5))
++
++    def test_ui_legacy_v24_to_other_tier_without_clear_is_rejected(self):
++        p = seed_item(kind="prestige", name="Old V", price=500, role_id=None,
++                      prestige_tier=5, duration=24)
++        before = mutation_snapshot()
++        r = self.put(p, self.ui_payload(prestige_tier=4, duration_hours=24))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(mutation_snapshot(), before)
++
++    def test_ui_legacy_vi48_paths_still_hold(self):
++        v = seed_item(kind="prestige", name="Old VI", price=0, role_id=None,
++                      prestige_tier=6, duration=48)
++        vi = dict(name="Old VI", prestige_tier=6, price=0, duration_hours=48)
++        # unrelated edit resends 48 -> preserved exactly
++        r = self.put(v, self.ui_payload(**vi, description="edited"))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.field(v, "duration_hours"), 48)
++        # VI -> V with the 48 still present -> rejected, row untouched
++        before = mutation_snapshot()
++        r = self.put(v, self.ui_payload(name="Old VI", prestige_tier=5, price=500,
++                                         duration_hours=48))
++        self.assertEqual(r.status_code, 400, r.get_json())
++        self.assertEqual(mutation_snapshot(), before)
++        # explicit Clear (stays VI) -> NULL
++        r = self.put(v, self.ui_payload(**{**vi, "duration_hours": None}))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertIsNone(self.field(v, "duration_hours"))
++        # explicit clear followed by VI -> V works and stays permanent
++        r = self.put(v, self.ui_payload(name="Old VI", prestige_tier=5, price=500,
++                                         duration_hours=None))
++        self.assertEqual(r.status_code, 200, r.get_json())
++        self.assertEqual(self.vi_row(v)[:3], (None, 500, 5))
++
++    # ══ delete guard is not weakened ════════════════════════════════════
++    def test_delete_root_with_options_is_still_blocked(self):
++        root = seed_item(kind="custom", name="Bundle", price=100)
++        seed_item(kind="custom", name="Option A", price=50, option_of_id=root)
++        r = self.delete(root)
++        self.assertEqual(r.status_code, 409)
++        self.assertIsNotNone(self.one("SELECT id FROM shop_items WHERE id=?", (root,)))
++
++    def test_delete_leaf_succeeds(self):
++        item = seed_item(kind="custom", name="Cape", price=250)
++        r = self.delete(item)
++        self.assertEqual(r.status_code, 200)
++        self.assertIsNone(self.one("SELECT id FROM shop_items WHERE id=?", (item,)))
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+diff --git a/scripts/test_vi_legacy_edit_form.js b/scripts/test_vi_legacy_edit_form.js
+new file mode 100644
+index 0000000..02ea51f
+--- /dev/null
++++ b/scripts/test_vi_legacy_edit_form.js
+@@ -0,0 +1,682 @@
++// Execute the ACTUAL Shop template script in a VM and prove the edit-form
++// behaviour for legacy Prestige VI rows. No browser, no server, no mocks of the
++// code under test: the script below is sliced out of the real template, so a
++// regression in shop.html fails here.
++//
++// Covers the cross-product form-state corruption (VI cached values leaking into
++// another product's edit), Cancel cleanliness, legacy VI duration preservation,
++// the explicit "Clear legacy duration" action, and the exact PUT/POST payloads
++// the real Flask API then receives.
++//
++// Run:  node scripts/test_vi_legacy_edit_form.js
++const fs = require('node:fs');
++const vm = require('node:vm');
++const path = require('node:path');
++const assert = require('node:assert/strict');
++
++const source = fs.readFileSync(
++  path.join(__dirname, '../dashboard/templates/systems/shop.html'), 'utf8');
++// The page script is the LAST <script> block in the template.
++const script = source.slice(source.indexOf('<script>' ) + 8).split('</script>')[0];
++
++// A minimal element stub that behaves like a real form control where it
++// matters: `value` and `textContent` always coerce to strings (a browser never
++// hands back a number), and <select> keeps a live, ordered option list.
++function makeEl(id, tag) {
++  const el = {
++    id, tagName: tag || 'input', disabled: false, checked: false,
++    dataset: {}, style: {}, _options: [], attrs: {}, _v: '', _t: '', _d: '',
++    classList: { add() {}, remove() {} },
++    scrollIntoView() {},
++    getAttribute(k) { return this.attrs[k] === undefined ? null : this.attrs[k]; },
++    setAttribute(k, v) { this.attrs[k] = String(v); },
++    appendChild(c) { this._options.push(c); c.parent = this; },
++    remove() {
++      if (this.parent) {
++        this.parent._options = this.parent._options.filter(o => o !== this);
++      }
++    },
++  };
++  Object.defineProperty(el, 'options', { get() { return this._options; } });
++  Object.defineProperty(el, 'value', {
++    get() { return this._v; },
++    set(nv) { this._v = (nv === null || nv === undefined) ? '' : String(nv); },
++  });
++  Object.defineProperty(el, 'textContent', {
++    get() { return this._t; }, set(nv) { this._t = String(nv); },
++  });
++  Object.defineProperty(el, 'className', {
++    get() { return this._d; }, set(nv) {
++      this._d = String(nv);
++      this.style.display = this._d.indexOf('hidden') !== -1 ? 'none' : '';
++    },
++  });
++  return el;
++}
++
++const CURRENT_TYPES = [
++  ['custom', '📦 Item'], ['color', '🎨 Color'], ['potion', '🧪 Potion'],
++  ['title', '🏷️ Title'], ['prestige', '⭐ Prestige'],
++];
++
++// Two products with deliberately DIFFERENT values in every cached field, so any
++// leakage between them is unmistakable.
++const ITEMS = {
++  1: {
++    id: 1, name: 'Old VI', type: 'prestige', prestige_tier: 6, price: 0,
++    price_diamonds: null, role_id: null, duration_hours: 48, max_stock: null,
++    current_stock: null, required_level: 0, required_role_id: null,
++    xp_boost_multiplier: null, icon_url: null, rarity: 'common', featured: 0,
++    description: null, category_id: null, option_of_id: null,
++  },
++  2: {
++    id: 2, name: 'Old V', type: 'prestige', prestige_tier: 5, price: 500,
++    price_diamonds: null, role_id: null, duration_hours: 0, max_stock: null,
++    current_stock: null, required_level: 0, required_role_id: null,
++    xp_boost_multiplier: null, icon_url: null, rarity: 'common', featured: 0,
++    description: null, category_id: null, option_of_id: null,
++  },
++  3: {
++    id: 3, name: 'VIP Role', type: 'color', prestige_tier: null, price: 1500,
++    price_diamonds: null, role_id: 77, duration_hours: 0, max_stock: 20,
++    current_stock: 7, required_level: 10, required_role_id: null,
++    xp_boost_multiplier: null, icon_url: 'https://x/i.png', rarity: 'epic',
++    featured: 1, description: 'd', category_id: 2, option_of_id: null,
++  },
++  4: {
++    id: 4, name: 'Normal VI', type: 'prestige', prestige_tier: 6, price: 0,
++    price_diamonds: null, role_id: null, duration_hours: 0, max_stock: null,
++    current_stock: null, required_level: 0, required_role_id: null,
++    xp_boost_multiplier: null, icon_url: null, rarity: 'common', featured: 0,
++    description: null, category_id: null, option_of_id: null,
++  },
++};
++
++// Legacy Prestige V that predates the permanence rule and still stores 24h.
++// (ITEMS[2] is a NORMAL V with duration 0 — it can never expose the
++// V -> VI laundering bug, which needs a positive stored duration.)
++ITEMS[5] = {
++  id: 5, name: 'Old V 24h', type: 'prestige', prestige_tier: 5, price: 500,
++  price_diamonds: null, role_id: null, duration_hours: 24, max_stock: null,
++  current_stock: null, required_level: 0, required_role_id: null,
++  xp_boost_multiplier: null, icon_url: null, rarity: 'common', featured: 0,
++  description: null, category_id: null, option_of_id: null,
++};
++
++// Legacy Prestige II with a stored duration: ANY tier I-V can reach VI.
++ITEMS[6] = Object.assign({}, ITEMS[5], {
++  id: 6, name: 'Old II 12h', prestige_tier: 2, duration_hours: 12 });
++
++function fresh() {
++  const els = new Map();
++  const el = (id) => {
++    if (!els.has(id)) els.set(id, makeEl(id));
++    return els.get(id);
++  };
++  const typeSel = el('item-type');
++  typeSel.tagName = 'select';
++  for (const [value, label] of CURRENT_TYPES) {
++    const opt = makeEl('opt-' + value, 'option');
++    opt.value = value;
++    opt.textContent = label;
++    typeSel.appendChild(opt);
++  }
++  const requests = [];
++  const toasts = [];
++  const ctx = vm.createContext({
++    document: {
++      getElementById: el,
++      querySelectorAll: () => [],
++      createElement: (tag) => makeEl('new-' + tag, tag),
++    },
++    showToast: (...args) => toasts.push(args),
++    currencyNameFor: (key) => key,
++    fetch: async (url, opts) => {
++      const method = (opts && opts.method) || 'GET';
++      requests.push({
++        url, method,
++        body: opts && opts.body ? JSON.parse(opts.body) : null,
++      });
++      if (method === 'GET') {
++        const id = parseInt(url.split('/').pop(), 10);
++        return { json: async () => ({ success: true, item: ITEMS[id] }) };
++      }
++      return { json: async () => ({ success: true }) };
++    },
++    setTimeout: () => {},
++    location: { reload() {} },
++    console, Array, JSON, parseInt, parseFloat, String, Boolean, Number,
++    Object, RegExp, Error, Promise, Math, isNaN,
++  });
++  vm.runInContext(script, ctx);
++  const lastWrite = () => requests.filter(
++    r => r.method === 'PUT' || r.method === 'POST').at(-1);
++  return { ctx, el, requests, toasts, lastWrite };
++}
++
++const results = [];
++async function scenario(name, fn) {
++  try { await fn(); results.push([true, name]); }
++  catch (e) { results.push([false, name, String(e.message).replace(/\n+/g, ' | ')]); }
++}
++
++(async () => {
++  // ── 1. legacy VI(48) unrelated edit preserves 48 ──────────────────────
++  await scenario('1. legacy VI(48) unrelated edit preserves 48', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(1);
++    assert.equal(el('item-duration').value, '48',
++      'the prefill must keep the stored legacy duration, not zero it');
++    assert.equal(el('item-duration').disabled, true, 'VI keeps duration disabled');
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.method, 'PUT');
++    assert.equal(w.url, '/api/shop/item/1');
++    assert.equal(w.body.duration_hours, 48,
++      'PUT must resend the stored 48, not null');
++    assert.equal(w.body.prestige_tier, 6);
++  });
++
++  // ── 2. VI -> V with 48 still present rejects ──────────────────────────
++  await scenario('2. VI -> V with the legacy 48 still present is rejected', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(1);
++    el('item-prestige-tier').value = '5';
++    ctx.toggleItemTypeFields();
++    el('item-price').disabled = false;
++    el('item-price').value = '500';
++    el('item-duration').disabled = false;
++    await ctx.addItem();
++    const w = lastWrite();
++    // The UI must not launder the grandfather through a tier change: it sends
++    // the untouched 48, which the API (Phase 1) now refuses.
++    assert.equal(w.body.prestige_tier, 5);
++    assert.equal(w.body.duration_hours, 48,
++      'the stale 48 must reach the API so the tier guard can reject it');
++  });
++
++  // ── 3. explicit clear, then VI -> V stores NULL ───────────────────────
++  await scenario('3. explicit clear followed by VI -> V sends null', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(1);
++    el('item-duration').value = '0';
++    el('item-prestige-tier').value = '5';
++    ctx.toggleItemTypeFields();
++    el('item-price').disabled = false;
++    el('item-price').value = '500';
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.prestige_tier, 5);
++    assert.equal(w.body.duration_hours, null);
++  });
++
++  // ── 4. V -> VI is free, unmetered, permanent ──────────────────────────
++  await scenario('4. V -> VI becomes free, unmetered and permanent', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(2);
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.prestige_tier, 6);
++    assert.equal(w.body.price, 0, 'VI must be free');
++    assert.equal(w.body.price_diamonds, null, 'VI takes no Diamonds');
++    assert.equal(w.body.max_stock, null, 'VI is unmetered');
++    assert.equal(w.body.required_level, 0);
++    assert.equal(w.body.duration_hours, null, 'VI must be permanent');
++  });
++
++  // ── 5. Clear action sends null and keeps VI ───────────────────────────
++  await scenario('5. Clear legacy duration sends null and preserves VI', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(1);
++    assert.equal(typeof ctx.clearLegacyViDuration, 'function',
++      'clearLegacyViDuration must be part of the page API');
++    ctx.clearLegacyViDuration();
++    // Still VI, still free/unmetered, still duration-disabled.
++    assert.equal(el('item-type').value, 'prestige');
++    assert.equal(el('item-prestige-tier').value, '6');
++    assert.equal(el('item-duration').disabled, true, 'VI mode stays active');
++    assert.equal(el('item-duration').value, '0');
++    assert.equal(el('item-price').disabled, true);
++    assert.equal(el('item-stock').disabled, true);
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.duration_hours, null, 'clear must send null');
++    assert.equal(w.body.prestige_tier, 6, 'tier stays VI');
++    assert.equal(w.body.price, 0);
++    assert.equal(w.body.max_stock, null);
++  });
++
++  // ── 6. Clear button visibility ────────────────────────────────────────
++  await scenario('6. Clear action appears only for a legacy VI duration', async () => {
++    const { ctx, el } = fresh();
++    const btn = () => el('item-clear-legacy-duration');
++    ctx.cancelShopEdit();
++    assert.equal(btn().style.display, 'none', 'hidden on a fresh Add form');
++
++    // a NEW VI being set up by hand: still hidden
++    el('item-type').value = 'prestige';
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    assert.equal(btn().style.display, 'none', 'hidden for a new VI');
++
++    // an existing VI with NO legacy duration: hidden
++    await ctx.editItem(4);
++    assert.equal(btn().style.display, 'none', 'hidden for a normal VI');
++
++    // a normal VI that the user has not cleared: hidden
++    await ctx.editItem(1);
++    assert.notEqual(btn().style.display, 'none',
++      'shown for an existing VI with a positive stored duration');
++
++    // Tier V and a non-Prestige product: hidden
++    await ctx.editItem(2);
++    assert.equal(btn().style.display, 'none', 'hidden for a normal Tier V');
++    // a legacy V with a stored duration DOES get it (needed for V -> VI)
++    await ctx.editItem(5);
++    assert.notEqual(btn().style.display, 'none', 'shown for legacy V(24)');
++    await ctx.editItem(2);
++    await ctx.editItem(3);
++    assert.equal(btn().style.display, 'none', 'hidden for a non-Prestige type');
++
++    // after the clear is used, the action retires: hidden again
++    await ctx.editItem(1);
++    ctx.clearLegacyViDuration();
++    assert.equal(el('item-duration').value, '0');
++    // (a fresh load of the same row still shows it until the save lands)
++    await ctx.editItem(1);
++    assert.notEqual(btn().style.display, 'none');
++  });
++
++  // ── 7. Cancel restores a clean Add form ───────────────────────────────
++  await scenario('7. Cancel restores clean Add defaults with no cached values', async () => {
++    const { ctx, el, requests, lastWrite } = fresh();
++    await ctx.editItem(1);
++    ctx.clearLegacyViDuration();
++    ctx.cancelShopEdit();
++    assert.equal(el('item-type').disabled, false, 'type unlock');
++    assert.equal(el('item-type').value, 'custom', 'back to the first type');
++    assert.equal(el('item-duration').value, '0');
++    assert.equal(el('item-duration').disabled, false, 'VI lock released');
++    assert.equal(el('item-price').disabled, false);
++    assert.equal(el('item-price').value, '');
++    assert.equal(el('item-price').min, '0');
++    assert.equal(el('item-stock').disabled, false);
++    assert.equal(el('item-stock').value, '0');
++    assert.equal(el('item-level').value, '0');
++    assert.equal(el('item-level').disabled, false);
++    assert.equal(el('item-price-diamonds').value, '');
++    assert.equal(el('item-name').value, '');
++    assert.equal(el('item-current-stock-field').style.display, 'none');
++    assert.equal(el('item-current-stock').value, '');
++    assert.equal(el('shop-form-title').textContent, 'Add Shop Item');
++    assert.equal(el('shop-submit-btn').textContent, 'Add Item');
++    assert.equal(el('item-clear-legacy-duration').style.display, 'none');
++    // A submit right after Cancel is a CREATE — never a PUT to the old row.
++    el('item-name').value = 'Brand New';
++    el('item-price').value = '250';
++    const before = requests.length;
++    await ctx.addItem();
++    assert.equal(requests.length, before + 1);
++    const w = lastWrite();
++    assert.equal(w.method, 'POST', 'must not PUT the previously edited row');
++    assert.equal(w.url, '/api/shop/item');
++    assert.equal(w.body.duration_hours, null);
++    assert.equal(w.body.price, 250);
++  });
++
++  // ── 8. No cached-value leakage between products ───────────────────────
++  await scenario('8. editing VI then another product leaks nothing', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(1);   // VI: zeroes+disables price/stock/level/duration
++    await ctx.editItem(3);   // Color: paid, 20 stock, level 10, role 77
++    assert.equal(el('item-price').value, '1500', 'price must be the Color price');
++    assert.equal(el('item-price').disabled, false);
++    assert.equal(el('item-stock').value, '20');
++    assert.equal(el('item-level').value, '10');
++    assert.equal(el('item-duration').value, '0');
++    assert.equal(el('item-duration').disabled, false);
++    assert.equal(el('item-role').value, '77');
++    assert.equal(el('item-current-stock').value, '7');
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.url, '/api/shop/item/3');
++    assert.equal(w.body.price, 1500, 'the paid price must never be zeroed');
++    assert.equal(w.body.max_stock, 20, 'the stock limit must never be dropped');
++    assert.equal(w.body.required_level, 10, 'the level gate must survive');
++    assert.equal(w.body.duration_hours, null, 'no stale duration may leak in');
++    assert.equal(w.body.current_stock, undefined,
++      'an edit must never write current_stock');
++  });
++
++  // ── 9. New VI still creates with null duration ────────────────────────
++  await scenario('9. new VI still creates with a null duration', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    ctx.cancelShopEdit();
++    el('item-type').value = 'prestige';
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    el('item-name').value = 'New VI';
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.method, 'POST');
++    assert.equal(w.body.type, 'prestige');
++    assert.equal(w.body.prestige_tier, 6);
++    assert.equal(w.body.duration_hours, null);
++    assert.equal(w.body.price, 0);
++    assert.equal(w.body.price_diamonds, null);
++    assert.equal(w.body.max_stock, null);
++    assert.equal(w.body.required_level, 0);
++    assert.equal(w.body.current_stock, null, 'a new VI has no stock claim');
++    assert.equal(el('item-clear-legacy-duration').style.display, 'none');
++  });
++
++  // ── 10. A VI can never carry a duration out of the form ───────────────
++  // VI is permanent by rule, so the form locks the duration input and always
++  // sends null. Even a tampered input (impossible through the real UI, since
++  // the field is disabled) must not produce a positive duration. The API is the
++  // separate authority that REJECTS a positive VI duration from a direct
++  // caller — proven in scripts/test_shop_product_management.py
++  // (test_prestige_vi_with_positive_duration_is_rejected).
++  await scenario('10. a VI can never submit a positive duration', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    ctx.cancelShopEdit();
++    el('item-type').value = 'prestige';
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    el('item-name').value = 'Bad VI';
++    assert.equal(el('item-duration').disabled, true,
++      'VI locks the duration input');
++    el('item-duration').disabled = false;   // simulate tampering
++    el('item-duration').value = '12';
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.duration_hours, null,
++      'a VI must always submit a null duration, got ' + w.body.duration_hours);
++    assert.equal(w.body.prestige_tier, 6);
++  });
++
++  // ══ V(24) legacy tier-change regression (PR #112 blocking bug) ════════
++  // A legacy Prestige V storing 24h, switched to VI. The VI lock shows 0 in
++  // the disabled duration input; the form must NOT read that 0 as the admin's
++  // explicit clear and send null.
++
++  // ── 11. legacy V(24) -> VI WITHOUT clearing must not send null ────────
++  await scenario('11. legacy V(24) -> VI without Clear keeps 24 (never null)', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(5);
++    assert.equal(el('item-duration').value, '24', 'V prefill shows the stored 24');
++    assert.equal(el('item-duration').disabled, false, 'V duration is editable');
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    // VI lock is on, but the form must not DISPLAY 0 for a stored 24
++    assert.equal(el('item-duration').disabled, true);
++    const shownBeforeSave = el('item-duration').value;
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.method, 'PUT');
++    assert.equal(w.url, '/api/shop/item/5');
++    assert.notEqual(w.body.duration_hours, null,
++      'THE BUG: V(24) -> VI silently sent null, an un-requested clear');
++    assert.equal(w.body.duration_hours, 24,
++      'the old positive duration must reach the API so its guard rejects it');
++    assert.deepEqual(
++      { tier: w.body.prestige_tier, price: w.body.price,
++        diamonds: w.body.price_diamonds, stock: w.body.max_stock,
++        level: w.body.required_level },
++      { tier: 6, price: 0, diamonds: null, stock: null, level: 0 });
++    assert.equal(w.body.current_stock, undefined, 'an edit never writes current_stock');
++    assert.equal(shownBeforeSave, '24',
++      'the locked field must keep showing the stored duration');
++    assert.notEqual(el('item-clear-legacy-duration').style.display, 'none',
++      'the Clear action must be offered so the admin CAN clear deliberately');
++  });
++
++  // ── 12. V(24) unrelated edit stays V and keeps 24 ─────────────────────
++  await scenario('12. legacy V(24) unrelated edit keeps 24 on a V', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(5);
++    el('item-price').value = '650';
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.prestige_tier, 5);
++    assert.equal(w.body.price, 650);
++    assert.equal(w.body.duration_hours, 24);
++  });
++
++  // ── 13. V(24) -> VI -> explicit Clear sends null, stays VI ────────────
++  await scenario('13. legacy V(24) -> VI then Clear sends null and stays VI', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(5);
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    ctx.clearLegacyViDuration();
++    assert.equal(el('item-duration').value, '0');
++    assert.equal(el('item-duration').disabled, true, 'VI lock stays on');
++    assert.equal(el('item-clear-legacy-duration').style.display, 'none',
++      'Clear retires itself once used');
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.duration_hours, null, 'explicit clear must send null');
++    assert.equal(w.body.prestige_tier, 6);
++    assert.equal(w.body.price, 0);
++    assert.equal(w.body.price_diamonds, null);
++    assert.equal(w.body.max_stock, null);
++    assert.equal(w.body.required_level, 0);
++  });
++
++  // ── 14. Clear while still V, THEN switch to VI ────────────────────────
++  await scenario('14. Clear on V(24) first, then V -> VI, sends null', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(5);
++    ctx.clearLegacyViDuration();
++    assert.equal(el('item-prestige-tier').value, '5', 'Clear does not change tier');
++    assert.equal(el('item-duration').disabled, false, 'still a V: editable');
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.duration_hours, null);
++    assert.equal(w.body.prestige_tier, 6);
++  });
++
++  // ── 15. V(24) -> VI -> back to V without clearing: 24, not 0/null ─────
++  await scenario('15. V(24) -> VI -> V without Clear still carries 24', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(5);
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    el('item-prestige-tier').value = '5';
++    ctx.toggleItemTypeFields();
++    assert.equal(el('item-duration').disabled, false);
++    assert.equal(el('item-duration').value, '24',
++      'a round trip through VI must not eat the stored duration');
++    assert.equal(el('item-price').value, '500', 'paid price restored');
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.prestige_tier, 5);
++    assert.equal(w.body.duration_hours, 24);
++    assert.equal(w.body.price, 500);
++  });
++
++  // ── 16. Clear then VI -> V (from a V(24) start) sends null ────────────
++  await scenario('16. V(24) -> VI -> Clear -> V sends null, not 24', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(5);
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    ctx.clearLegacyViDuration();
++    el('item-prestige-tier').value = '5';
++    ctx.toggleItemTypeFields();
++    el('item-price').value = '500';
++    await ctx.addItem();
++    const w = lastWrite();
++    assert.equal(w.body.prestige_tier, 5);
++    assert.equal(w.body.duration_hours, null);
++  });
++
++  // ── 17. no leakage of 24 between products / after Cancel ──────────────
++  await scenario('17. legacy V(24) leaks nothing into other products or Add', async () => {
++    // a) V(24) then a NORMAL V(0) -> VI: no 24 may follow
++    let t = fresh();
++    await t.ctx.editItem(5);
++    await t.ctx.editItem(2);
++    assert.equal(t.el('item-clear-legacy-duration').style.display, 'none');
++    t.el('item-prestige-tier').value = '6';
++    t.ctx.toggleItemTypeFields();
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().url, '/api/shop/item/2');
++    assert.equal(t.lastWrite().body.duration_hours, null,
++      'normal V(0) -> VI must stay a plain permanent VI');
++    // b) V(24) then a paid Color
++    t = fresh();
++    await t.ctx.editItem(5);
++    await t.ctx.editItem(3);
++    assert.equal(t.el('item-duration').value, '0');
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().url, '/api/shop/item/3');
++    assert.equal(t.lastWrite().body.duration_hours, null);
++    // c) V(24) -> Cancel -> brand-new VI
++    t = fresh();
++    await t.ctx.editItem(5);
++    t.el('item-prestige-tier').value = '6';
++    t.ctx.toggleItemTypeFields();
++    t.ctx.cancelShopEdit();
++    assert.equal(t.el('item-clear-legacy-duration').style.display, 'none');
++    assert.equal(t.el('item-duration').value, '0');
++    t.el('item-type').value = 'prestige';
++    t.el('item-prestige-tier').value = '6';
++    t.ctx.toggleItemTypeFields();
++    t.el('item-name').value = 'Fresh VI';
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().method, 'POST');
++    assert.equal(t.lastWrite().body.duration_hours, null);
++  });
++
++  // ── 18. legacy VI(48) still behaves; V(24) is not special-cased to VI ─
++  await scenario('18. VI(48) unrelated edit 48, Clear null, VI -> V rejected-path 48', async () => {
++    let t = fresh();
++    await t.ctx.editItem(1);
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().body.duration_hours, 48);
++    t = fresh();
++    await t.ctx.editItem(1);
++    t.ctx.clearLegacyViDuration();
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().body.duration_hours, null);
++    t = fresh();
++    await t.ctx.editItem(1);
++    t.el('item-prestige-tier').value = '5';
++    t.ctx.toggleItemTypeFields();
++    t.el('item-price').value = '500';
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().body.prestige_tier, 5);
++    assert.equal(t.lastWrite().body.duration_hours, 48,
++      'un-cleared VI(48) -> V must still reach the API as 48');
++  });
++
++  // ── 19. note wording follows the tier ─────────────────────────────────
++  await scenario('19. legacy note names the right rule for V and VI', async () => {
++    const { ctx, el } = fresh();
++    await ctx.editItem(5);
++    const note = () => el('item-legacy-duration-note').textContent;
++    assert.ok(/24-hour/.test(note()), note());
++    assert.ok(!/created before the permanence rule and still stores a 24-hour duration\. Saving keeps it\. Prestige VI/.test(note()));
++    assert.ok(/Clear/.test(note()), 'V note points at Clear: ' + note());
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    assert.ok(/cleared before the tier can change to VI/.test(note()), note());
++  });
++
++  // ── 20. the laundering path is not V-only: legacy II(12) -> VI ─────────
++  await scenario('20. legacy II(12) -> VI without Clear keeps 12 (never null)', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(6);
++    el('item-prestige-tier').value = '6';
++    ctx.toggleItemTypeFields();
++    await ctx.addItem();
++    assert.equal(lastWrite().body.prestige_tier, 6);
++    assert.equal(lastWrite().body.duration_hours, 12);
++  });
++
++  // ── 21-24. Max stock input: never silently becomes Unlimited ──────────
++  // Old code: parseInt(v) || 0  ->  "-5" / "abc" => 0 => max_stock null.
++  await scenario('21. Edit: negative, decimal, junk stock is rejected, nothing sent', async () => {
++    for (const bad of ['-5', '2.7', 'abc', '1e3', '5x', '+5', '--1']) {
++      const { ctx, el, requests, toasts } = fresh();
++      await ctx.editItem(3);                       // Color: max 20, current 7
++      el('item-stock').value = bad;
++      const before = requests.length;
++      await ctx.addItem();
++      assert.equal(requests.length, before,
++        'stock ' + JSON.stringify(bad) + ' must NOT produce a PUT');
++      const t = toasts.at(-1);
++      assert.ok(t && /Max stock must be a whole number/.test(t[0]) && t[1] === 'danger',
++        'clear message for ' + JSON.stringify(bad) + ': ' + JSON.stringify(t));
++    }
++  });
++
++  await scenario('22. Edit: positive whole stock is sent as that number', async () => {
++    for (const [input, want] of [['20', 20], ['35', 35], [' 7 ', 7], ['1', 1]]) {
++      const { ctx, el, lastWrite } = fresh();
++      await ctx.editItem(3);
++      el('item-stock').value = input;
++      await ctx.addItem();
++      const w = lastWrite();
++      assert.equal(w.method, 'PUT');
++      assert.equal(w.body.max_stock, want, 'stock ' + JSON.stringify(input));
++      assert.equal(w.body.current_stock, undefined, 'edit never writes current_stock');
++    }
++  });
++
++  await scenario('23. Edit: blank or 0 keeps the Unlimited meaning (null)', async () => {
++    for (const input of ['', '0', '   ']) {
++      const { ctx, el, lastWrite } = fresh();
++      await ctx.editItem(3);
++      el('item-stock').value = input;
++      await ctx.addItem();
++      assert.equal(lastWrite().body.max_stock, null, JSON.stringify(input));
++    }
++  });
++
++  await scenario('24. Add: valid stock creates at full stock; invalid stock is refused', async () => {
++    let t = fresh();
++    t.el('item-name').value = 'Stocked'; t.el('item-price').value = '100';
++    t.el('item-stock').value = '15';
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().method, 'POST');
++    assert.equal(t.lastWrite().body.max_stock, 15);
++    assert.equal(t.lastWrite().body.current_stock, 15, 'new listing starts full');
++    t = fresh();
++    t.el('item-name').value = 'Unl'; t.el('item-price').value = '100';
++    t.el('item-stock').value = '0';
++    await t.ctx.addItem();
++    assert.equal(t.lastWrite().body.max_stock, null);
++    assert.equal(t.lastWrite().body.current_stock, null);
++    for (const bad of ['-1', '3.5', 'abc']) {
++      t = fresh();
++      t.el('item-name').value = 'Bad'; t.el('item-price').value = '100';
++      t.el('item-stock').value = bad;
++      await t.ctx.addItem();
++      assert.equal(t.requests.length, 0, 'no POST for stock ' + bad);
++    }
++  });
++
++  await scenario('25. VI forms are unaffected by the stock check (locked 0 -> null)', async () => {
++    const { ctx, el, lastWrite } = fresh();
++    await ctx.editItem(1);
++    await ctx.addItem();
++    assert.equal(lastWrite().body.max_stock, null);
++    assert.equal(lastWrite().body.duration_hours, 48);
++  });
++
++  // ── report ────────────────────────────────────────────────────────────
++  let pass = 0, fail = 0;
++  for (const [ok, name, msg] of results) {
++    if (ok) { console.log('  PASS  ' + name); pass++; }
++    else { console.log('  FAIL  ' + name + '\n        -> ' + msg); fail++; }
++  }
++  console.log('\nVI LEGACY EDIT FORM: ' + pass + ' passed, ' + fail + ' failed');
++  if (fail) process.exitCode = 1;
++})().catch((e) => { console.error(e); process.exitCode = 1; });
+diff --git a/utils/shop_validation.py b/utils/shop_validation.py
+index 1c9bf74..ef9d15f 100644
+--- a/utils/shop_validation.py
++++ b/utils/shop_validation.py
+@@ -6,6 +6,16 @@ booleans, floats, containers and values outside SQLite's integer range do not.
+ import re
+ 
+ 
++# The five admin-facing product types (finalized): Item -> internal `custom`,
++# Color -> internal `color`, plus Potion, Title and Prestige. This is the
++# canonical "types the create form offers" list the template and tests refer to.
++# The validator STILL accepts the legacy `role`/`temp_role`/`xp_boost` values so
++# EXISTING products remain editable; new XP Boost creation is refused at the add
++# endpoint (dashboard/api/economy_shop.py), and role/temp_role are simply no
++# longer offered by the create UI. Stored `type` values are never renamed.
++PUBLIC_SHOP_TYPES = ("custom", "color", "potion", "title", "prestige")
++
++
+ class ShopValidationError(ValueError):
+     pass
+ 
+@@ -69,7 +79,16 @@ def shop_input(data):
+         None if option_parent in (None, "")
+         else integer(option_parent, "Option parent ID", minimum=1))
+     kind = text(data.get("type"), "Item type", required=True)
+-    if kind not in {"role", "temp_role", "xp_boost", "prestige", "potion", "title", "custom"}:
++    # `color` is the fifth admin-facing product type (Item/Color/Potion/Title/
++    # Prestige). It is NOT a new reward type: cogs/shop.py already resolves a
++    # Colour purchase to the existing role grant (permanent) or timed-role
++    # holding (positive duration) under CATEGORY_COLOR — so a Colour listing
++    # carries a role_id exactly like `role`/`temp_role` and needs no purchase
++    # -engine change. Legacy `role`/`temp_role`/`xp_boost` stay valid here so
++    # EXISTING products remain editable; new XP Boost creation is refused at
++    # the add endpoint (dashboard/api/economy_shop.py), not in this shared
++    # validator, so a legacy boost can still have its safe fields edited.
++    if kind not in {"role", "temp_role", "xp_boost", "prestige", "potion", "title", "custom", "color"}:
+         raise ShopValidationError("Invalid Shop item type.")
+     result["type"] = kind
+     vi = kind == "prestige" and integer(data.get("prestige_tier"), "Prestige tier", minimum=1, maximum=6) == 6
+@@ -77,7 +96,14 @@ def shop_input(data):
+     for field in ("description", "icon_url", "rarity"):
+         result[field] = text(data.get(field), field)
+     for field in ("max_stock", "price_diamonds", "role_id", "required_role_id", "duration_hours"):
+-        if vi and field in {"max_stock", "required_role_id", "duration_hours", "role_id"}:
++        # VI stays unmetered for stock/role/level knobs, but duration_hours is
++        # deliberately NOT force-nulled here: ALL Prestige tiers (and Title)
++        # must REJECT a positive duration, so VI's duration takes the normal
++        # path below (None/blank/0 -> None, positive -> kept) and a positive
++        # value is then refused by the shared permanence rule at the end.
++        # Valid VI requests (duration omitted, null or 0) still normalize to
++        # None exactly as before; no other VI rule changes.
++        if vi and field in {"max_stock", "required_role_id", "role_id"}:
+             result[field] = None
+             continue
+         value = data.get(field)
+@@ -119,8 +145,19 @@ def shop_input(data):
+             raise ShopValidationError("Effect multiplier must be greater than 1.")
+         if result["duration_hours"] is None:
+             raise ShopValidationError("Effect duration must be positive.")
+-    if kind in {"role", "temp_role"} and result["role_id"] is None:
++    if kind in {"role", "temp_role", "color"} and result["role_id"] is None:
+         raise ShopValidationError("A role item requires a role ID.")
+     if kind == "temp_role" and result["duration_hours"] is None:
+         raise ShopValidationError("A temporary role requires a positive duration.")
++    # Finalized type rules: Title and Prestige — ALL tiers, including VI — are
++    # permanent grants and may NOT carry a duration. A submitted positive
++    # duration is REJECTED (not silently zeroed) so the rule is explicit and
++    # an unfinished form can't smuggle a timed Title/Prestige through. A
++    # duration of 0 (or omitted) is normalized to None above and accepted as
++    # "permanent". Item (custom) and Color KEEP duration semantics (0/None =
++    # permanent, positive = timed holding / timed role) and Potion keeps its
++    # effect duration (validated above).
++    if kind in {"title", "prestige"} and result["duration_hours"] is not None:
++        raise ShopValidationError(
++            "Title and Prestige products are permanent and cannot have a duration.")
+     return result
