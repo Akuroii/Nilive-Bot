@@ -83,32 +83,52 @@ async def safe_transfer(guild_id: int, from_user: int, to_user: int,
 
 async def safe_deduct(guild_id: int, user_id: int, amount: int,
                        currency: str = "balance",
-                       reason: str = "Deduction", source: str = "system"):
+                       reason: str = "Deduction", source: str = "system",
+                       db: aiosqlite.Connection | None = None):
+    """Deduct from a wallet. An optional caller-owned transaction is not committed.
+
+    Existing callers keep the standalone connection/commit behavior. A passed
+    connection joins that transaction, including the ledger row, matching
+    safe_credit(..., db=) / log_transaction(..., db=). The Shop purchase path
+    needs the charge to commit or roll back with the stock reservation and the
+    purchase-operation flags, so it passes its own BEGIN IMMEDIATE connection.
+    """
     currency = _check_currency(currency)
     if amount <= 0:
         raise ValueError("amount must be positive")
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
+
+    async def apply(connection):
+        cursor = await connection.execute(
+            f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))
+        row = await cursor.fetchone()
+        balance = row[0] if row else 0
+        if balance < amount:
+            raise InsufficientBalance(f"Balance {balance} < {amount}")
+        await connection.execute(f"""
+            UPDATE economy SET {currency} = {currency} - ? WHERE guild_id=? AND user_id=?
+        """, (amount, guild_id, user_id))
+        return await (await connection.execute(
+            f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))).fetchone()
+
+    if db is not None:
+        # Caller owns the transaction: never commit or roll back here.
+        new_row = await apply(db)
+        await _log_ledger(guild_id, user_id, currency, -amount,
+                          new_row[0] if new_row else None,
+                          "deduct", reason, source, db=db)
+        return
+
+    async with aiosqlite.connect(DB_PATH) as connection:
+        await connection.execute("BEGIN IMMEDIATE")
         try:
-            cursor = await db.execute(
-                f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
-                (guild_id, user_id))
-            row = await cursor.fetchone()
-            balance = row[0] if row else 0
-            if balance < amount:
-                await db.execute("ROLLBACK")
-                raise InsufficientBalance(f"Balance {balance} < {amount}")
-            await db.execute(f"""
-                UPDATE economy SET {currency} = {currency} - ? WHERE guild_id=? AND user_id=?
-            """, (amount, guild_id, user_id))
-            new_row = await (await db.execute(
-                f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
-                (guild_id, user_id))).fetchone()
-            await db.commit()
+            new_row = await apply(connection)
+            await connection.commit()
         except InsufficientBalance:
             raise
         except Exception:
-            await db.execute("ROLLBACK")
+            await connection.execute("ROLLBACK")
             raise
 
     await _log_ledger(guild_id, user_id, currency, -amount,
@@ -199,29 +219,52 @@ async def get_balance(guild_id: int, user_id: int,
     return row[0] if row else 0
 
 
-async def safe_decrement_stock(item_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute(
-                "SELECT max_stock, current_stock FROM shop_items WHERE id=?",
+async def safe_decrement_stock(item_id: int,
+                               db: aiosqlite.Connection | None = None) -> bool:
+    """Reserve one unit of a finite listing's stock. True when stock is held.
+
+    An unlimited listing (max_stock NULL) has nothing to reserve and returns
+    True without touching the row, so the caller's attempt/stock_reserved
+    bookkeeping stays uniform across both kinds of listing.
+
+    Existing callers keep the standalone connection/commit behavior. A passed
+    connection joins that transaction and is NOT committed here, matching
+    safe_credit(..., db=) / log_transaction(..., db=): the purchase path in
+    cogs/shop.py opens one BEGIN IMMEDIATE and needs this decrement, the charge
+    and the stock_reserved flag to land or roll back together.
+    """
+    async def apply(connection):
+        cursor = await connection.execute(
+            "SELECT max_stock, current_stock FROM shop_items WHERE id=?",
+            (item_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return False
+        max_stock, curr_stock = row
+        if max_stock and curr_stock is not None and curr_stock <= 0:
+            return False
+        if max_stock:
+            await connection.execute(
+                "UPDATE shop_items SET current_stock = current_stock - 1 WHERE id=?",
                 (item_id,))
-            row = await cursor.fetchone()
-            if not row:
-                await db.execute("ROLLBACK")
+        return True
+
+    if db is not None:
+        # Caller owns the transaction: never roll back or commit here, or the
+        # purchase's BEGIN IMMEDIATE scope would be torn out from under it.
+        return await apply(db)
+
+    async with aiosqlite.connect(DB_PATH) as connection:
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            ok = await apply(connection)
+            if not ok:
+                await connection.execute("ROLLBACK")
                 return False
-            max_stock, curr_stock = row
-            if max_stock and curr_stock is not None and curr_stock <= 0:
-                await db.execute("ROLLBACK")
-                return False
-            if max_stock:
-                await db.execute(
-                    "UPDATE shop_items SET current_stock = current_stock - 1 WHERE id=?",
-                    (item_id,))
-            await db.commit()
+            await connection.commit()
             return True
         except Exception:
-            await db.execute("ROLLBACK")
+            await connection.execute("ROLLBACK")
             raise
 
 

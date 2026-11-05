@@ -39,7 +39,9 @@ async def give_reward(bot: discord.Client,
                        item_type: str = "custom",
                        item_metadata: dict = None,
                        defer_retry_seconds: float | None = None,
-                       idempotency_key: str | None = None) -> dict:
+                       idempotency_key: str | None = None,
+                       op_id: str | None = None,
+                       metadata_extra: dict | None = None) -> dict:
     """...
 
     ``idempotency_key`` marks a ONE-SHOT xp award - a mission, tag mission,
@@ -401,10 +403,17 @@ async def give_reward(bot: discord.Client,
         display_name = item_name or role.name
 
         from utils.inventory import set_quantity
+        # metadata_extra lets the Shop purchase path attach its own context
+        # (category, product_id) to the collectible row without changing the
+        # keys that equip_role() resolves role_id from. Callers that pass
+        # nothing keep the exact previous metadata.
+        role_meta = {"role_id": role_id, "expires_at": expires_at}
+        if metadata_extra:
+            role_meta.update(metadata_extra)
         await set_quantity(
             guild_id, user_id, display_name, 1,
             item_type=reward_type, source=source,
-            metadata={"role_id": role_id, "expires_at": expires_at})
+            metadata=role_meta)
 
         from utils.equip_engine import equip_role
         equip_result = await equip_role(
@@ -441,11 +450,20 @@ async def give_reward(bot: discord.Client,
             raise RewardError("item reward quantity must be positive")
 
         from utils.inventory import give_item
+        # `op_id` is the Shop purchase operation. Recording it as
+        # metadata["origin_op_id"] is the same durable marker
+        # grant_timed_holding(op_id=...) writes for timed holdings, so a
+        # delivered item can be traced back to the purchase that created it.
+        # Other callers pass nothing and keep identical metadata.
+        item_meta = dict(item_metadata) if item_metadata else None
+        if op_id:
+            item_meta = item_meta or {}
+            item_meta.setdefault("origin_op_id", str(op_id))
         try:
             new_qty = await give_item(
                 guild_id, user_id, item_name,
                 quantity=quantity, item_type=item_type,
-                metadata=item_metadata, source=source)
+                metadata=item_meta, source=source)
         except Exception as e:
             return {"success": False, "reward_type": "item",
                     "error": f"Inventory error: {e}"}

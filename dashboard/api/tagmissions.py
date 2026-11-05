@@ -57,6 +57,7 @@ def api_tagmissions_list():
 def api_tagmissions_save():
     guild_id = get_session_guild_id()
     data = request.json or {}
+    row_id = data.get("id")
 
     title = (data.get("title") or "").strip()
     if not title:
@@ -104,8 +105,6 @@ def api_tagmissions_save():
     if reward_type in ("coins", "diamonds", "xp") and not data.get("reward_amount"):
         return jsonify({"success": False,
                          "error": "This reward type requires an amount."}), 400
-
-    row_id = data.get("id")
 
     message_fields = {}
     for field in ("confirm_message", "not_wearing_message", "success_message",

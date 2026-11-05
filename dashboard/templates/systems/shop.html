@@ -23,7 +23,9 @@
 <!-- ITEMS TAB -->
 <div id="tab-content-items" class="tab-content">
     <div class="card">
-        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> Add Shop Item</div>
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg> <span id="shop-form-title">Add Shop Item</span></div>
+        <div id="shop-edit-banner"
+             style="display:none;margin:0 0 14px;padding:8px 12px;border:1px solid var(--accent);border-radius:8px;background:rgba(124,92,191,.10);font-size:13px;color:var(--text);"></div>
         <div style="display:grid;
                     grid-template-columns:1fr 1fr;gap:16px;">
             <div class="form-group">
@@ -45,14 +47,17 @@
             </div>
             <div class="form-group">
                 <label class="form-label">Type</label>
+                <!-- The five current product types. Item stores the internal
+                     value `custom`, Color stores `color`; the legacy
+                     role/temp_role/xp_boost types are no longer offered for
+                     NEW products (existing ones stay editable via a temporary
+                     option injected by editItem()). -->
                 <select class="form-input" id="item-type" onchange="toggleItemTypeFields()">
-                    <option value="role">Permanent Role</option>
-                    <option value="temp_role">Temporary Role</option>
-                    <option value="xp_boost">⚡ XP Boost</option>
-                    <option value="prestige">⭐ Prestige</option>
-                    <option value="potion">🧪 Potion (consumable)</option>
+                    <option value="custom">📦 Item</option>
+                    <option value="color">🎨 Color</option>
+                    <option value="potion">🧪 Potion</option>
                     <option value="title">🏷️ Title</option>
-                    <option value="custom">Custom</option>
+                    <option value="prestige">⭐ Prestige</option>
                 </select>
             </div>
             <div class="form-group" id="item-prestige-tier-field" style="display:none;">
@@ -76,6 +81,7 @@
                 <label class="form-label">Role ID</label>
                 <input class="form-input" id="item-role"
                        placeholder="Right click role → Copy ID">
+                <div class="form-hint">The role a Color product grants</div>
             </div>
             <div class="form-group" id="item-boost-mult-field" style="display:none;">
                 <label class="form-label" id="item-boost-mult-label">XP Multiplier</label>
@@ -83,13 +89,28 @@
                        type="number" min="1.1" step="0.1" placeholder="e.g. 2">
                 <div class="form-hint">e.g. 2 = double XP while active</div>
             </div>
-            <div class="form-group">
+            <div class="form-group" id="item-duration-field">
                 <label class="form-label" id="item-duration-label">
                     Duration hours (0 = permanent)
                 </label>
                 <input class="form-input" id="item-duration"
                        type="number" min="0" value="0">
                 <div class="form-hint" id="item-duration-hint"></div>
+                <!-- Edit-only escape hatch for a row created BEFORE the
+                     Title/Prestige permanence rule, which can legally hold a
+                     positive duration. VI disables the duration input, so
+                     without an explicit action an administrator could never
+                     clear that stored value while keeping the product at VI.
+                     Shown only for an existing Prestige VI whose STORED
+                     duration is positive; see refreshLegacyViDurationControls(). -->
+                <div class="form-hint" id="item-legacy-duration-note"
+                     style="display:none;margin-top:6px;"></div>
+                <button type="button" class="btn btn-sm btn-secondary"
+                        id="item-clear-legacy-duration"
+                        onclick="clearLegacyViDuration()"
+                        style="display:none;margin-top:6px;">
+                    Clear legacy duration
+                </button>
             </div>
             <div class="form-group">
                 <label class="form-label">
@@ -126,13 +147,27 @@
                 <input class="form-input" id="item-stock"
                        type="number" min="0" value="0">
             </div>
+            <!-- Edit-only: current stock is shown SEPARATELY from the maximum
+                 and is read-only — editing the maximum never restocks, and the
+                 maximum cannot be lowered below this. Hidden while adding (a
+                 new listing starts at current == max). -->
+            <div class="form-group" id="item-current-stock-field" style="display:none;">
+                <label class="form-label">Current stock (on hand)</label>
+                <input class="form-input" id="item-current-stock"
+                       type="text" readonly tabindex="-1"
+                       style="opacity:.72;cursor:not-allowed;">
+                <div class="form-hint">Read-only — editing the maximum does not restock</div>
+            </div>
         </div>
         <label class="form-check" style="margin-bottom:16px;">
             <input type="checkbox" id="item-featured">
             Featured item (shown first with ⭐)
         </label>
-        <button class="btn btn-primary"
+        <button class="btn btn-primary" id="shop-submit-btn"
                 onclick="addItem()">Add Item</button>
+        <button class="btn btn-secondary" id="shop-cancel-edit"
+                onclick="cancelShopEdit()"
+                style="display:none;margin-left:8px;">Cancel</button>
         <div id="shop-status"
              style="margin-top:10px;font-size:13px;"></div>
     </div>
@@ -151,6 +186,11 @@
                 <tbody hx-get="/api/shop/items"
                        hx-trigger="load"
                        hx-swap="innerHTML">
+                    {# Finalized type display names (fallback render only; the
+                       htmx partial in dashboard/api/economy_shop.py is the
+                       authoritative view). item[10] is prestige_tier. #}
+                    {% set TYPE_LABELS = {'custom': 'Item', 'color': 'Color', 'potion': 'Potion', 'title': 'Title', 'prestige': 'Prestige', 'role': 'Permanent Role', 'temp_role': 'Temporary Role', 'xp_boost': 'XP Boost'} %}
+                    {% set ROMAN = {1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI'} %}
                     {% for item in items %}
                     <tr>
                         <td>
@@ -170,7 +210,7 @@
                             {% endif %}
                         </td>
                         <td>
-                            {{ item[4] }}{% if item[4] == 'xp_boost' and item[10] %} ({{ item[10] }}x){% endif %}
+                            {{ TYPE_LABELS.get(item[4], item[4]) }}{% if item[4] == 'prestige' and item[10] %} {{ ROMAN.get(item[10], item[10]) }}{% endif %}
                         </td>
                         <td>
                             {% if item[0] in free_vi_ids %}
@@ -188,6 +228,11 @@
                             </span>
                         </td>
                         <td>
+                            <button class="btn btn-sm btn-secondary"
+                                onclick="editItem({{ item[0] }})"
+                                style="margin-right:6px;">
+                                Edit
+                            </button>
                             <button class="btn btn-sm btn-danger"
                                 hx-delete="/api/shop/item/{{ item[0] }}"
                                 hx-confirm="Delete {{ item[1] }}?"
@@ -281,6 +326,15 @@ __neroGlobal.isFreeVI = isFreeVI;
 __neroGlobal.applyFreeVIFields = applyFreeVIFields;
 __neroGlobal.toggleItemTypeFields = toggleItemTypeFields;
 __neroGlobal.addItem = addItem;
+__neroGlobal.editItem = editItem;
+__neroGlobal.cancelShopEdit = cancelShopEdit;
+__neroGlobal.clearLegacyViDuration = clearLegacyViDuration;
+
+// Non-null while the Add form is repurposed as an Edit form. addItem() reads
+// it to choose POST (create) vs PUT (update); editItem()/cancelShopEdit() set
+// and clear it. Declared with `var` so the wrapped page script stays
+// re-evaluation-safe (see test_dashboard_page_scripts.py).
+var editingId = null;
 
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(
@@ -305,17 +359,110 @@ function isFreeVI() {
     return document.getElementById('item-type').value === 'prestige' &&
            document.getElementById('item-prestige-tier').value === '6';
 }
+
+// Non-null ONLY while the form is editing an EXISTING Prestige row (any tier
+// I-VI) that was stored with a positive (legacy) duration — i.e. a row that
+// predates the permanence rule. (The name is historical; VI is where it bites,
+// but a V(24) switched to VI must be carried too.) It carries that stored value so the prefill can survive the
+// VI field lock and so an unrelated save can send it back unchanged instead of
+// silently clearing it. Cleared by editItem(), cancelShopEdit() and
+// clearLegacyViDuration(); never set for a NEW VI.
+var editingLegacyViDuration = null;
+
+// Every control the VI lock owns. applyFreeVIFields() caches a `paidValue` on
+// these while VI is active; clearViFieldCache() is the ONLY place that cache is
+// dropped, so no value can outlive the VI row it belonged to.
+var VI_LOCKED_FIELDS = ['item-price', 'item-price-diamonds', 'item-stock',
+                        'item-level', 'item-duration'];
+
+// Drop the cached paid values AND the VI lock in one place. Called whenever the
+// form leaves a VI context (loading another product, Cancel). Without this the
+// cache leaked: editing a legacy VI and then a paid product restored VI's "0"
+// over the paid price, dropped its stock limit and zeroed its level gate.
+function clearViFieldCache() {
+    for (const id of VI_LOCKED_FIELDS) {
+        const input = document.getElementById(id);
+        if (!input) continue;
+        delete input.dataset.paidValue;
+        input.disabled = false;
+    }
+    const label = document.getElementById('item-duration-label');
+    if (label) label.textContent = 'Duration hours (0 = permanent)';
+}
+
+// Show the legacy-duration note/action ONLY for an existing VI row whose stored
+// duration is still positive. `stored` is that value (or null).
+function refreshLegacyViDurationControls(stored) {
+    const note = document.getElementById('item-legacy-duration-note');
+    const btn = document.getElementById('item-clear-legacy-duration');
+    const show = typeof stored === 'number' && stored > 0;
+    const tierEl = document.getElementById('item-prestige-tier');
+    const isVI = !!tierEl && tierEl.value === '6';
+    if (note) {
+        note.textContent = show
+            ? 'This Prestige product was created before the permanence rule and '
+              + 'still stores a ' + stored + '-hour duration. Saving keeps it. '
+              + (isVI
+                  ? 'Prestige VI is permanent and unmetered, so a stored duration '
+                    + 'must be cleared before the tier can change to VI.'
+                  : 'Changing the tier requires clearing it first (Clear below).')
+            : '';
+        note.style.display = show ? 'block' : 'none';
+    }
+    if (btn) btn.style.display = show ? 'inline-block' : 'none';
+}
+
+// Explicit, deliberate clear of a grandfathered legacy duration (any Prestige
+// tier). Everything else stays as it was; in VI mode that means free,
+// unmetered, duration-disabled. The next PUT sends duration_hours: null and
+// the API stores NULL while keeping the tier.
+function clearLegacyViDuration() {
+    editingLegacyViDuration = null;
+    const dur = document.getElementById('item-duration');
+    delete dur.dataset.paidValue;   // no stale cached "48" to restore
+    dur.value = '0';
+    refreshLegacyViDurationControls(null);
+    applyFreeVIFields();            // keep VI free/unmetered/disabled
+}
+
 function applyFreeVIFields() {
     const free = isFreeVI();
-    for (const id of ['item-price', 'item-price-diamonds', 'item-stock', 'item-level', 'item-duration']) {
+    for (const id of VI_LOCKED_FIELDS) {
         const input = document.getElementById(id);
-        if (free && !input.disabled) {
-            input.dataset.paidValue = input.value;
-            input.value = '0';
-        } else if (!free && input.disabled) {
-            input.value = input.dataset.paidValue || '';
+        if (free) {
+            if (!input.disabled) {
+                // Cache the paid value only on the transition INTO the lock, and
+                // never cache the grandfathered legacy duration: it is carried
+                // by editingLegacyViDuration, and caching it here is what let a
+                // tier change launder 48 hours onto a different product.
+                if (id === 'item-duration') {
+                    if (editingLegacyViDuration === null) {
+                        input.dataset.paidValue = input.value;
+                    }
+                } else {
+                    input.dataset.paidValue = input.value;
+                }
+                input.value = '0';
+            }
+        } else if (input.disabled) {
+            // Leaving VI: put the remembered paid value back. The duration is
+            // the exception — while a legacy duration is in play the input
+            // already SHOWS the stored value (set below), so leaving VI must
+            // not re-impose it over an administrator's explicit clear. That is
+            // what keeps "Clear, then change tier" a real clear while an
+            // untouched VI->V change still carries the old value for the API to
+            // reject.
+            if (!(id === 'item-duration' && editingLegacyViDuration !== null)) {
+                input.value = input.dataset.paidValue || '';
+            }
         }
         input.disabled = free;
+    }
+    // The legacy duration is restored above, but VI must never SHOW it as an
+    // editable zero: keep the stored value visible while the lock is active.
+    if (free && editingLegacyViDuration !== null) {
+        document.getElementById('item-duration').value =
+            String(editingLegacyViDuration);
     }
     document.getElementById('item-price').min =
         document.getElementById('item-type').value === 'prestige' && !free ? '1' : '0';
@@ -357,7 +504,23 @@ function toggleItemTypeFields() {
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
         durHint.textContent = 'Titles are cosmetic and permanent — leave as 0.';
+    } else if (type === 'color') {
+        // Color is a buyable colour role: cogs/shop.py grants it as a permanent
+        // role at duration 0, or a timed role when positive. It needs a role ID.
+        roleField.style.display = 'block';
+        boostField.style.display = 'none';
+        prestigeField.style.display = 'none';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent = '0 = permanent colour role; positive = temporary (timed role).';
+    } else if (type === 'custom') {
+        // Item: an inventory product (no role). 0 = permanent, positive = timed.
+        roleField.style.display = 'none';
+        boostField.style.display = 'none';
+        prestigeField.style.display = 'none';
+        durLabel.textContent = 'Duration hours (0 = permanent)';
+        durHint.textContent = '0 = permanent inventory item; positive = timed holding.';
     } else {
+        // Legacy role / temp_role — still editable, no longer offered for new.
         roleField.style.display = 'block';
         boostField.style.display = 'none';
         prestigeField.style.display = 'none';
@@ -365,13 +528,25 @@ function toggleItemTypeFields() {
         durHint.textContent = '';
     }
     applyFreeVIFields();
+    // The legacy-duration note/action belongs to a VI context only; stepping off
+    // VI (or onto a non-Prestige type) retires it. (No-op while the flag is
+    // null, which is the case on a fresh Add form.)
+    refreshLegacyViDurationControls(editingLegacyViDuration);
 }
 toggleItemTypeFields();
 
 async function addItem() {
     const type = document.getElementById('item-type').value;
-    const stock = parseInt(
-        document.getElementById('item-stock').value) || 0;
+    // Max stock: blank or 0 = unlimited (0); plain digits = that limit; anything
+    // else (negative, decimal, junk) stays NaN and is REJECTED below. The old
+    // `parseInt(...) || 0` turned "-5" / "abc" into 0 (Unlimited) and "2.7"
+    // into 2, silently removing or rewriting a product's stock limit.
+    // The accepted value must also be a SAFE integer (checked below): a very
+    // long digit string parses to Infinity, which JSON.stringify sends as null
+    // (= unlimited), and a value past MAX_SAFE_INTEGER is silently rounded.
+    const stockRaw = (document.getElementById('item-stock').value || '').trim();
+    const stock = stockRaw === '' ? 0
+        : (/^\d+$/.test(stockRaw) ? parseInt(stockRaw, 10) : NaN);
     const priceDiamonds = parseInt(
         document.getElementById('item-price-diamonds').value) || 0;
     const boostMult = parseFloat(
@@ -385,20 +560,40 @@ async function addItem() {
     // (a Diamond price is set).
     const priceRaw = (document.getElementById('item-price').value || '').trim();
     const priceValue = /^\d+$/.test(priceRaw) ? parseInt(priceRaw, 10) : null;
+    // Duration: blank or 0 = permanent (null); digits = that many hours; any
+    // other entry stays NaN so it is rejected below. This keeps a legacy VI
+    // duration the form is PRESERVING (48) intact — the old
+    // `parseInt(...) || null` turned an unreadable value into a silent 0 and,
+    // because the VI lock disables the input, that silently cleared the stored
+    // duration on any unrelated edit.
+    // Same SAFE-integer discipline as max_stock below: a 400-digit string parses
+    // to Infinity and a value past MAX_SAFE_INTEGER is silently rounded, so both
+    // must be refused rather than sent (JSON.stringify would ship Infinity as
+    // null, i.e. "permanent", which is the opposite of what was typed).
+    const durationRaw = (document.getElementById('item-duration').value || '').trim();
+    const durationValue = (durationRaw === '' || durationRaw === '0')
+        ? null
+        : (/^\d+$/.test(durationRaw) ? parseInt(durationRaw, 10) : NaN);
+    // Role-granting types carry a role_id; everything else sends null. Color
+    // joins role/temp_role here (cogs/shop.py grants a Colour as a role), and
+    // Item (custom) correctly drops the role field it never actually used.
+    const needsRole = ['color', 'role', 'temp_role'].indexOf(type) !== -1;
     const payload = {
         name:          document.getElementById('item-name').value,
         price:         priceValue === null ? 0 : priceValue,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
         type:          type,
-        role_id:       ['xp_boost', 'prestige', 'potion', 'title'].indexOf(type) === -1
+        role_id:       needsRole
                        ? (document.getElementById('item-role').value || null)
                        : null,
         prestige_tier: type === 'prestige' && prestigeTier
                        ? parseInt(prestigeTier.value) : null,
         xp_boost_multiplier: (type === 'xp_boost' || type === 'potion') && boostMult > 1
                        ? boostMult : null,
-        duration_hours:parseInt(
-            document.getElementById('item-duration').value) || null,
+        // A blank or 0 field is "permanent" (null); a blank is never silently
+        // collapsed into 0. NaN must stay NaN so a non-numeric entry is
+        // rejected below instead of being rewritten as "permanent".
+        duration_hours:durationValue,
         required_level:parseInt(
             document.getElementById('item-level').value) || 0,
         description:   document.getElementById('item-desc').value,
@@ -407,16 +602,30 @@ async function addItem() {
         featured:      document.getElementById('item-featured')
                                .checked ? 1 : 0,
         max_stock:     stock > 0 ? stock : null,
-        current_stock: stock > 0 ? stock : null,
     };
+    // A NEW listing starts at full stock (current == max), the existing create
+    // behavior. An EDIT never sends current_stock, so the server preserves the
+    // stock on hand — editing the maximum does not restock.
+    if (!editingId) {
+        payload.current_stock = payload.max_stock;
+    }
     const freeVI = isFreeVI();
     if (freeVI) {
         payload.price = 0;
         payload.price_diamonds = null;
         payload.max_stock = null;
-        payload.current_stock = null;
+        if (!editingId) payload.current_stock = null;
         payload.required_level = 0;
-        payload.duration_hours = null;
+        // Legacy duration preservation. A VI row that predates the permanence
+        // rule still stores a positive duration, and VI disables the input, so
+        // parseInt above would read the locked 0 and silently clear it on ANY
+        // unrelated edit. editingLegacyViDuration is null for a NEW VI and is
+        // nulled by clearLegacyViDuration(), so:
+        //   untouched legacy VI edit -> resend the stored value (API preserves)
+        //   explicit Clear clicked   -> send null  (API stores NULL)
+        //   brand-new VI            -> send null  (unchanged behaviour)
+        payload.duration_hours = (editingLegacyViDuration === null
+                                  ? null : editingLegacyViDuration);
     }
     if (!payload.name) {
         showToast('Enter name and a coin or diamond price', 'danger');
@@ -430,6 +639,20 @@ async function addItem() {
     if (!freeVI && type !== 'prestige' && payload.price_diamonds === null
             && priceValue === null) {
         showToast('Enter name and a coin or diamond price', 'danger');
+        return;
+    }
+    if (!Number.isSafeInteger(stock)) {
+        showToast('Max stock must be a whole number (0 = unlimited)', 'danger');
+        return;
+    }
+    // Duration must be null (permanent) or a SAFE positive integer. NaN covers
+    // malformed input; the safe-integer test additionally rejects Infinity
+    // (400-digit entry) and values past 2^53-1 that parseInt would round.
+    if (payload.duration_hours !== null
+            && !(Number.isSafeInteger(payload.duration_hours)
+                 && payload.duration_hours > 0)) {
+        showToast('Duration must be a whole number of hours (0 = permanent)',
+                  'danger');
         return;
     }
     if (type === 'xp_boost' && (!payload.xp_boost_multiplier || !payload.duration_hours)) {
@@ -453,18 +676,162 @@ async function addItem() {
             return;
         }
     }
-    const res  = await fetch('/api/shop/item', {
-        method:  'POST',
+    // Create posts to the collection; edit PUTs to the item. The global fetch
+    // wrapper (dashboard.js) injects the X-CSRF-Token on both non-GET calls.
+    const url    = editingId ? '/api/shop/item/' + editingId : '/api/shop/item';
+    const method = editingId ? 'PUT' : 'POST';
+    const res  = await fetch(url, {
+        method:  method,
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(payload),
     });
     const data = await res.json();
     if (data.success) {
-        showToast('Item added!');
+        showToast(editingId ? 'Item updated!' : 'Item added!');
         setTimeout(() => location.reload(), 800);
     } else {
-        showToast('Error saving', 'danger');
+        showToast(data.error || 'Error saving', 'danger');
     }
+}
+
+// Add a temporary, non-selectable option so the LOCKED type <select> can show
+// a legacy product's type (role/temp_role/xp_boost) that the create dropdown no
+// longer lists. Never used for the five current types (they are already there).
+function ensureTypeOption(sel, type) {
+    if (!sel || !type) return;
+    const opts = sel.options || [];
+    for (let i = 0; i < opts.length; i++) {
+        if (opts[i].value === type) return;
+    }
+    const legacy = {
+        role: 'Permanent Role (legacy)',
+        temp_role: 'Temporary Role (legacy)',
+        xp_boost: 'XP Boost (legacy)',
+    };
+    const opt = document.createElement('option');
+    opt.value = type;
+    opt.textContent = legacy[type] || type;
+    opt.disabled = true;          // cannot be chosen for a new product
+    opt.setAttribute('data-temporary', '1');
+    sel.appendChild(opt);
+}
+
+// Load one product into the Add form and switch the form into edit mode. The
+// type is locked (immutable); current stock is shown read-only beside the
+// editable maximum; the submit button PUTs.
+async function editItem(id) {
+    let item = null;
+    try {
+        const res = await fetch('/api/shop/item/' + id);
+        const data = await res.json();
+        if (data && data.success) item = data.item;
+        else showToast((data && data.error) || 'Could not load this item', 'danger');
+    } catch (e) {
+        showToast('Could not load this item', 'danger');
+    }
+    if (!item) return;
+    editingId = item.id;
+
+    // Leave the PREVIOUS product's VI context completely before prefilling.
+    // clearViFieldCache() drops every cached `paidValue` and releases the VI
+    // lock, so nothing from the last row can be restored over this one.
+    clearViFieldCache();
+    editingLegacyViDuration = null;
+
+    document.getElementById('item-name').value = item.name || '';
+    document.getElementById('item-desc').value = item.description || '';
+    document.getElementById('item-price').value = item.price == null ? '' : item.price;
+    document.getElementById('item-price-diamonds').value =
+        item.price_diamonds == null ? '' : item.price_diamonds;
+    document.getElementById('item-role').value = item.role_id == null ? '' : item.role_id;
+    document.getElementById('item-boost-mult').value =
+        item.xp_boost_multiplier == null ? '' : item.xp_boost_multiplier;
+    document.getElementById('item-duration').value =
+        item.duration_hours == null ? '0' : item.duration_hours;
+    document.getElementById('item-level').value =
+        item.required_level == null ? '0' : item.required_level;
+    document.getElementById('item-icon').value = item.icon_url || '';
+    document.getElementById('item-rarity').value = item.rarity || 'common';
+    document.getElementById('item-featured').checked = !!item.featured;
+    document.getElementById('item-stock').value =
+        item.max_stock == null ? '0' : item.max_stock;
+    if (item.type === 'prestige' && item.prestige_tier != null) {
+        document.getElementById('item-prestige-tier').value = String(item.prestige_tier);
+    }
+
+    // Lock the (immutable) type, injecting a display option for legacy types.
+    // Remember a grandfathered legacy duration BEFORE the lock, because
+    // applyFreeVIFields() zeroes the duration input on the way into VI mode.
+    // ANY Prestige tier (I-VI) can carry a legacy positive duration, and a tier
+    // change to VI locks the input and shows 0. If only VI rows were remembered,
+    // a legacy V(24) switched to VI would read editingLegacyViDuration === null
+    // and silently send null (= an explicit clear the admin never made).
+    if (item.type === 'prestige'
+            && typeof item.duration_hours === 'number'
+            && item.duration_hours > 0) {
+        editingLegacyViDuration = item.duration_hours;
+    }
+    const typeSel = document.getElementById('item-type');
+    ensureTypeOption(typeSel, item.type);
+    typeSel.value = item.type;
+    typeSel.disabled = true;
+    toggleItemTypeFields();
+    refreshLegacyViDurationControls(editingLegacyViDuration);
+
+    // Show current stock separately from the maximum (read-only).
+    document.getElementById('item-current-stock-field').style.display = 'block';
+    document.getElementById('item-current-stock').value =
+        item.current_stock == null ? 'Unlimited' : item.current_stock;
+
+    document.getElementById('shop-form-title').textContent = 'Edit Shop Item';
+    document.getElementById('shop-submit-btn').textContent = 'Save Changes';
+    document.getElementById('shop-cancel-edit').style.display = 'inline-block';
+    const banner = document.getElementById('shop-edit-banner');
+    banner.textContent = 'Editing “' + (item.name || '') +
+        '” — the product type cannot be changed.';
+    banner.style.display = 'block';
+    if (banner.scrollIntoView) {
+        banner.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+}
+
+// Leave edit mode and reset the form back to a clean "add" state.
+function cancelShopEdit() {
+    editingId = null;
+    // Drop the grandfathered duration AND every cached VI paid value, otherwise
+    // the next Add would carry the previous product's numbers.
+    editingLegacyViDuration = null;
+    clearViFieldCache();
+    refreshLegacyViDurationControls(null);
+    const typeSel = document.getElementById('item-type');
+    typeSel.disabled = false;
+    const opts = typeSel.options ? Array.prototype.slice.call(typeSel.options) : [];
+    for (let i = 0; i < opts.length; i++) {
+        if (opts[i].getAttribute && opts[i].getAttribute('data-temporary') === '1') {
+            opts[i].remove();
+        }
+    }
+    typeSel.value = 'custom';
+    document.getElementById('item-name').value = '';
+    document.getElementById('item-desc').value = '';
+    document.getElementById('item-price').value = '';
+    document.getElementById('item-price-diamonds').value = '';
+    document.getElementById('item-role').value = '';
+    document.getElementById('item-boost-mult').value = '';
+    document.getElementById('item-duration').value = '0';
+    document.getElementById('item-level').value = '0';
+    document.getElementById('item-icon').value = '';
+    document.getElementById('item-rarity').value = 'common';
+    document.getElementById('item-featured').checked = false;
+    document.getElementById('item-stock').value = '0';
+    document.getElementById('item-prestige-tier').value = '1';
+    toggleItemTypeFields();   // re-enables any VI-locked fields, restores labels
+    document.getElementById('item-current-stock-field').style.display = 'none';
+    document.getElementById('item-current-stock').value = '';
+    document.getElementById('shop-form-title').textContent = 'Add Shop Item';
+    document.getElementById('shop-submit-btn').textContent = 'Add Item';
+    document.getElementById('shop-cancel-edit').style.display = 'none';
+    document.getElementById('shop-edit-banner').style.display = 'none';
 }
 
 })();
