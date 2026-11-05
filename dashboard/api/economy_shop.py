@@ -290,6 +290,23 @@ def save_exchange_rate_api():
     return jsonify({"success": True, "rate": rate})
 
 
+# Finalized product-type display names. The five admin-facing types map their
+# internal value to a label (Item->custom, Color->color, Potion, Title,
+# Prestige); the legacy internal types keep a clear label so EXISTING rows stay
+# readable in the admin table without being re-typed. Prestige is special-cased
+# with its tier below. Stored `type` values are never renamed.
+SHOP_TYPE_DISPLAY = {
+    "custom": "Item",
+    "color": "Color",
+    "potion": "Potion",
+    "title": "Title",
+    "prestige": "Prestige",
+    "role": "Permanent Role",
+    "temp_role": "Temporary Role",
+    "xp_boost": "XP Boost",
+}
+
+
 @api_bp.route("/shop/items")
 @require_api_permission(LEVEL_ADMIN)
 def shop_items_partial():
@@ -351,7 +368,9 @@ def shop_items_partial():
         # Prestige shop items carry a permanent tier (r[12]). The render
         # uses the tier label solely for display; the source of Prestige
         # state is levels.prestige + booster status, never the shop item.
-        type_display = _esc(r[4])
+        # Every other type shows its finalized display name (Item/Color/
+        # Potion/Title, and readable labels for legacy role/temp_role/xp_boost).
+        type_display = _esc(SHOP_TYPE_DISPLAY.get(r[4], r[4]))
         if (r[4] == "prestige" and r[12]):
             try:
                 from utils.prestige import tier_label
@@ -371,7 +390,14 @@ def shop_items_partial():
             f"<td>{type_display}</td>"
             f"<td>{dur}</td>"
             f"<td><span class='badge {status}'>{label}</span></td>"
-            f"<td><button class='btn btn-sm btn-danger' "
+            f"<td>"
+            # r[0] (item id) is an INTEGER from the DB, interpolated raw into
+            # the inline onclick exactly like the members partial's
+            # openEditModal('{user_id}', ...) — numeric, so not an injection
+            # vector. editItem() prefills the Add form in edit mode and PUTs.
+            f"<button class='btn btn-sm btn-secondary' "
+            f"onclick='editItem({r[0]})' style='margin-right:6px;'>Edit</button>"
+            f"<button class='btn btn-sm btn-danger' "
             f"hx-delete='/api/shop/item/{r[0]}' "
             f"hx-confirm='Delete this item?' "
             f"hx-target='closest tr' "
@@ -419,6 +445,17 @@ def add_shop_item():
     guild_id = get_session_guild_id()
     from utils.shop_validation import shop_input, ShopValidationError
     raw = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    # Finalized decision: no NEW XP Boost products. The XP Boost purchase path
+    # and every EXISTING boost listing stay untouched (cogs/shop.py is out of
+    # scope); this only closes the creation door, which the dashboard UI no
+    # longer offers either. Refused BEFORE validation so any create attempt gets
+    # one clear message regardless of the other fields, and so a malformed boost
+    # payload can't surface a confusing validation error instead of the block.
+    _raw_type = raw.get("type") if isinstance(raw, dict) else None
+    if isinstance(_raw_type, str) and _raw_type.strip().lower() == "xp_boost":
+        return jsonify({"success": False,
+                        "error": "XP Boost products can no longer be created. "
+                                 "Existing XP Boost items are unaffected."}), 400
     try:
         data = shop_input(raw)
     except ShopValidationError as exc:
@@ -509,6 +546,331 @@ def add_shop_item():
         return jsonify({"success": False,
                         "error": "Option parent must be a root product in this guild."}), 400
     log_action(guild_id, f"Added shop item: {data.get('name')}", "shop")
+    return jsonify({"success": True})
+
+
+# Columns the Edit form may prefill / the update may write. `type`,
+# `category_id` and `option_of_id` are read for prefill and validation but are
+# NEVER written by the update (type is immutable; category/option links are
+# owned by the Category API and the option-family triggers).
+_SHOP_ITEM_EDIT_KEYS = (
+    "name", "description", "price", "type", "role_id", "duration_hours",
+    "featured", "enabled", "required_level", "required_role_id", "max_stock",
+    "current_stock", "price_diamonds", "icon_url", "rarity", "prestige_tier",
+    "xp_boost_multiplier", "category_id", "option_of_id",
+)
+_SHOP_ITEM_EDIT_SELECT = (
+    "name, description, price, type, role_id, duration_hours, featured, "
+    "enabled, required_level, required_role_id, max_stock, current_stock, "
+    "price_diamonds, icon_url, rarity, prestige_tier, xp_boost_multiplier, "
+    "category_id, option_of_id"
+)
+
+
+@api_bp.route("/shop/item/<int:item_id>", methods=["GET"])
+@require_api_permission(LEVEL_ADMIN)
+def get_shop_item(item_id: int):
+    """Full row for the Edit form prefill.
+
+    Guild-scoped: an unknown id and an id belonging to another guild return the
+    SAME 404, so cross-guild existence is never disclosed (matching the
+    Category API's convention)."""
+    guild_id = get_session_guild_id()
+
+    async def fetch():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                f"SELECT id, {_SHOP_ITEM_EDIT_SELECT} "
+                "FROM shop_items WHERE id = ? AND guild_id = ?",
+                (item_id, guild_id))
+            row = await cursor.fetchone()
+            return dict(zip(("id",) + _SHOP_ITEM_EDIT_KEYS, row)) if row else None
+
+    item = run_async(fetch())
+    if item is None:
+        return jsonify({"success": False, "error": "Item not found."}), 404
+    return jsonify({"success": True, "item": item})
+
+
+@api_bp.route("/shop/item/<int:item_id>", methods=["PUT"])
+@require_api_permission(LEVEL_ADMIN)
+def update_shop_item(item_id: int):
+    """Update the editable fields of ONE product in the session guild.
+
+    True CRUD update, deliberately conservative:
+      * `type` is IMMUTABLE — the STORED type always wins over the body, so a
+        legacy role/temp_role/xp_boost product can have its safe fields edited
+        but can never be re-typed (and a new XP Boost can't be smuggled in by
+        editing something else into one).
+      * `category_id` and `option_of_id` are PRESERVED — never in the SET
+        clause, so the option-family integrity triggers (which fire only on
+        UPDATE OF id/option_of_id/guild_id) never run and the root-with-options
+        delete guard is untouched.
+      * Stock: `current_stock` is ALWAYS preserved — a `current_stock` key in
+        the body is deliberately IGNORED (stock quantities are not managed by
+        Product Management; the UI shows the value read-only). `max_stock` may
+        change but NEVER restocks, and the maximum may not be lowered below the
+        stock actually on hand.
+      * `icon_url`: an ABSENT key keeps the stored icon; a PRESENT-but-blank key
+        is an explicit clear (the same present/absent convention the currency
+        -config API in this file already uses).
+      * Every other field re-runs the SAME shop_input validator as creation,
+        against the STORED type, so an edit can't smuggle in values a create
+        would reject (and Title/Prestige permanence, Color's role requirement,
+        Prestige pricing etc. all still hold).
+    """
+    guild_id = get_session_guild_id()
+    raw = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    if not isinstance(raw, dict):
+        return jsonify({"success": False, "error": "A Shop item object is required."}), 400
+
+    from utils.shop_validation import shop_input, ShopValidationError
+
+    async def fetch_existing():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                f"SELECT {_SHOP_ITEM_EDIT_SELECT} "
+                "FROM shop_items WHERE id = ? AND guild_id = ?",
+                (item_id, guild_id))
+            return await cursor.fetchone()
+
+    existing_row = run_async(fetch_existing())
+    if existing_row is None:
+        return jsonify({"success": False, "error": "Item not found."}), 404
+    existing = dict(zip(_SHOP_ITEM_EDIT_KEYS, existing_row))
+
+    # Merge: stored values, overridden ONLY by keys present in the body. This
+    # gives PATCH-style partial updates while still running the full validator.
+    merged = dict(existing)
+    for key in ("name", "description", "price", "role_id", "duration_hours",
+                "featured", "required_level", "required_role_id", "max_stock",
+                "price_diamonds", "rarity", "prestige_tier",
+                "xp_boost_multiplier"):
+        if key in raw:
+            merged[key] = raw[key]
+    merged["type"] = existing["type"]                  # immutable
+    merged["option_of_id"] = existing["option_of_id"]  # preserved
+    # icon_url: present -> take the body value (blank == explicit clear);
+    # absent -> keep the stored icon.
+    if "icon_url" in raw:
+        merged["icon_url"] = raw["icon_url"]
+
+    # Legacy compatibility (grandfather clause): Title/Prestige rows created
+    # before the permanence rule could legally store a positive duration, and
+    # the Edit form resubmits the stored value as-is. Such a row must stay
+    # safe-field-editable WITHOUT silently rewriting its duration. When the
+    # body OMITS duration_hours, or resubmits the UNCHANGED stored value
+    # (int or form-string), we validate the merged record as permanent — the
+    # representation the rule expects — but write the ORIGINAL stored value
+    # back untouched. Setting a DIFFERENT positive duration still fails the
+    # permanence rule, an explicit 0/blank/null is still the supported
+    # permanent clear, and POST creation validation is unaffected. The clause
+    # cannot apply to any other type and never fires for rows without a
+    # stored positive duration.
+    def _tier_of(value):
+        """Normalize a stored/submitted Prestige tier for COMPARISON only.
+
+        The Edit form sends the <select>'s string value, so `5` and `"5"` are
+        the same tier and must not read as a change. Blank/missing/null is
+        None. The persisted value still comes from the validator below.
+        """
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        return None
+
+    legacy_duration_keep = None
+    if existing["type"] in ("title", "prestige") and existing["duration_hours"]:
+        # TIER GUARD (Prestige only). The grandfather clause exists to keep an
+        # OLD duration editable on the row that already stored it; it must NOT
+        # carry that duration across a TIER CHANGE. Without this guard a legacy
+        # VI(48) edited into a V became a timed Prestige V, and a legacy V(24)
+        # edited into a VI became a timed product that claims to be permanent
+        # and unmetered. When the tier actually changes the clause steps aside,
+        # so the merged duration goes through the normal permanence rule: an
+        # omitted or resubmitted positive value is REJECTED (nothing written),
+        # while an explicit clear still passes and stores NULL.
+        # Title is deliberately tier-blind: a Title carries no tier, and its
+        # safe-field edits must keep behaving exactly as before.
+        tier_unchanged = (
+            existing["type"] != "prestige"
+            or _tier_of(merged.get("prestige_tier"))
+            == _tier_of(existing["prestige_tier"]))
+        if "duration_hours" not in raw:
+            unchanged = True
+        else:
+            submitted = raw["duration_hours"]
+            unchanged = (
+                submitted == existing["duration_hours"]
+                or (isinstance(submitted, str) and submitted.strip().isdigit()
+                    and int(submitted.strip()) == existing["duration_hours"]))
+        if unchanged and tier_unchanged:
+            legacy_duration_keep = existing["duration_hours"]
+            merged["duration_hours"] = 0   # validation representation only
+
+    # Prestige VI strictness is about what the CALLER SUBMITS, not about what an
+    # old row happens to still carry. A listing created while VI still had
+    # stock/role/level columns can be switched to VI with those columns simply
+    # left alone: the VI rules NULL them on write anyway, and the Edit form does
+    # not even render them for Prestige. Rejecting a CARRIED value here would
+    # make such a row impossible to turn into a VI at all. So any VI-forbidden
+    # field the body does not mention is dropped from the merged record (the
+    # validator then sees "not set" and the write stores NULL); a value the body
+    # actually submits still hits the validator's rejection below.
+    if existing["type"] == "prestige" and _tier_of(merged.get("prestige_tier")) == 6:
+        for _vi_field in ("max_stock", "role_id", "required_role_id",
+                          "required_level"):
+            if _vi_field not in raw:
+                merged[_vi_field] = None
+
+    # `enabled` is a safe field the validator doesn't model; normalize it here.
+    enabled_val = existing["enabled"]
+    if "enabled" in raw:
+        _e = raw["enabled"]
+        if isinstance(_e, bool):
+            enabled_val = 1 if _e else 0
+        elif isinstance(_e, int) and _e in (0, 1):
+            enabled_val = _e
+        elif isinstance(_e, str) and _e.strip() in ("0", "1"):
+            enabled_val = int(_e.strip())
+        else:
+            return jsonify({"success": False, "error": "Enabled must be 0 or 1."}), 400
+
+    try:
+        data = shop_input(merged)
+    except ShopValidationError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    # Stock reconciliation. `current_stock` is ALWAYS preserved: editing product
+    # data never restocks or drains, and a `current_stock` key in the body is
+    # deliberately IGNORED — stock quantities are outside Product Management,
+    # and the UI's current-stock field is read-only to match. Two rules:
+    #   1. A finite maximum requires stock on hand. An unlimited product stores
+    #      current_stock = NULL, and editing never initializes stock, so an
+    #      unlimited -> finite transition would leave (max_stock=N,
+    #      current_stock=NULL) — a row safe_decrement_stock() can never
+    #      decrement (NULL - 1 stays NULL) or exhaust: it would sell forever
+    #      while looking finite. There is no admin stock-provisioning
+    #      mechanism (stock is set once at creation, then only purchase/
+    #      refund/expiry move it), so this transition is REJECTED rather than
+    #      silently provisioning stock.
+    #   2. The maximum may never drop below the stock actually on hand.
+    new_max = data["max_stock"]              # normalized: None == unlimited
+    current = existing["current_stock"]      # always preserved, never written
+    if new_max is not None and current is None:
+        return jsonify({"success": False,
+                        "error": "This product has unlimited stock. A stock limit "
+                                 "cannot be added by editing — create a new "
+                                 "product with a stock limit instead."}), 400
+    if new_max is not None and current is not None and current > new_max:
+        return jsonify({"success": False,
+                        "error": "Maximum stock cannot be lower than the current "
+                                 f"stock ({current})."}), 400
+
+    # Persisted duration: the grandfathered legacy value wins (written back
+    # byte-for-byte); otherwise the validated/normalized value as usual.
+    duration_val = (legacy_duration_keep if legacy_duration_keep is not None
+                    else (data.get("duration_hours") or None))
+
+    icon_url_val = data["icon_url"] or None     # "" / None -> NULL (explicit clear)
+    price_val = data["price"]
+    price_diamonds_val = data["price_diamonds"]
+    new_name = data["name"]
+    from utils.item_catalog import is_valid_rarity, upsert_catalog_entry
+    rarity = (data.get("rarity") or "common").strip().lower()
+    if not is_valid_rarity(rarity):
+        rarity = "common"
+
+    async def write():
+        async with aiosqlite.connect(DB_PATH) as db:
+            # ATOMIC stock guard. The checks above read `existing`, which was
+            # loaded before this connection existed; a purchase or refund that
+            # commits in between could leave current_stock ABOVE the max_stock we
+            # are about to write. Re-check inside the same transaction, against
+            # the value actually on disk, and write the limit in ONE statement so
+            # no window remains between the check and the UPDATE. current_stock
+            # is still never written here: editing must not restock.
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT current_stock FROM shop_items WHERE id=? AND guild_id=?",
+                    (item_id, guild_id))
+                fresh = await cursor.fetchone()
+                if fresh is None:
+                    await db.execute("ROLLBACK")
+                    return "missing"
+                fresh_current = fresh[0]
+                if new_max is not None and fresh_current is None:
+                    await db.execute("ROLLBACK")
+                    return "unlimited"
+                if (new_max is not None and fresh_current is not None
+                        and fresh_current > new_max):
+                    await db.execute("ROLLBACK")
+                    return "below_current"
+                sets = [
+                    "name = ?", "description = ?", "price = ?", "role_id = ?",
+                    "duration_hours = ?", "featured = ?", "required_level = ?",
+                    "required_role_id = ?", "max_stock = ?", "enabled = ?",
+                    "price_diamonds = ?", "icon_url = ?", "rarity = ?",
+                    "prestige_tier = ?", "xp_boost_multiplier = ?",
+                ]
+                params = [
+                    new_name, data.get("description"), price_val,
+                    data.get("role_id") or None, duration_val,
+                    int(data.get("featured", 0)), int(data.get("required_level", 0)),
+                    data.get("required_role_id") or None, new_max, enabled_val,
+                    price_diamonds_val, icon_url_val, rarity,
+                    data.get("prestige_tier"), data.get("xp_boost_multiplier"),
+                ]
+                # current_stock is intentionally NOT in the SET clause — always
+                # preserved (see the stock note above).
+                params.extend([item_id, guild_id])
+                await db.execute(
+                    f"UPDATE shop_items SET {', '.join(sets)} "
+                    "WHERE id = ? AND guild_id = ?", params)
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+        return None
+
+    _stock_outcome = None
+    try:
+        _stock_outcome = run_async(write())
+    except aiosqlite.IntegrityError:
+        # The option-family triggers are authoritative. This update never
+        # changes id/guild_id/option_of_id, so reaching here is unexpected;
+        # fail closed rather than half-write.
+        return jsonify({"success": False,
+                        "error": "This product could not be updated."}), 409
+    if _stock_outcome == "missing":
+        # Deleted between the read and the write.
+        return jsonify({"success": False, "error": "Item not found."}), 404
+    if _stock_outcome == "unlimited":
+        return jsonify({"success": False,
+                        "error": "This product has unlimited stock. A stock limit "
+                                 "cannot be added by editing — create a new "
+                                 "product with a stock limit instead."}), 400
+    if _stock_outcome == "below_current":
+        return jsonify({"success": False,
+                        "error": "Maximum stock cannot be lower than the current "
+                                 "stock."}), 400
+
+    # Keep the rank-card catalog in step with the edited listing, exactly as
+    # the add path does. COALESCE inside upsert_catalog_entry means a
+    # blanked icon_url (None) PRESERVES the catalog's cached icon rather
+    # than wiping it — see the report's "COALESCE impact" note.
+    # Only runs once the row was actually written.
+    value_currency = "diamonds" if price_diamonds_val else ("balance" if price_val else None)
+    value_amount = price_diamonds_val if price_diamonds_val else (price_val or None)
+    run_async(upsert_catalog_entry(
+        guild_id, new_name, icon_url=icon_url_val, rarity=rarity,
+        value_currency=value_currency, value_amount=value_amount))
+
+    log_action(guild_id, f"Edited shop item: {new_name}", "shop")
     return jsonify({"success": True})
 
 
