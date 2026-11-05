@@ -605,36 +605,44 @@ async def sync_prestige_roles(bot, guild, member, effective_tier=None) -> None:
     """
     if bot is None or guild is None or member is None:
         return
-    if effective_tier is None:
-        effective_tier = await get_effective_prestige(
-            guild.id, member.id, member=member)
+    from utils.equip_engine import slot_lock
+    async with slot_lock(guild.id, member.id):
+        if effective_tier is None:
+            effective_tier = await get_effective_prestige(
+                guild.id, member.id, member=member)
 
-    roles = await get_prestige_roles(guild.id)
-    role_by_tier = {r["tier"]: r["role_id"] for r in roles}
-    desired_role_id = role_by_tier.get(int(effective_tier))
+        roles = await get_prestige_roles(guild.id)
+        role_by_tier = {r["tier"]: r["role_id"] for r in roles}
+        desired_role_id = role_by_tier.get(int(effective_tier))
 
-    from utils.permissions import check_bot_role_position
+        from utils.permissions import check_bot_role_position
 
-    # Remove any configured prestige role that no longer matches.
-    for tier, role_id in role_by_tier.items():
-        role = guild.get_role(int(role_id))
-        if not role or role not in member.roles:
-            continue
-        if int(tier) != int(effective_tier):
-            try:
-                await member.remove_roles(role, reason="Prestige tier changed")
-            except Exception as e:
-                print(f"[PRESTIGE] Failed to remove tier {tier} role: {e}")
-
-    # Grant the desired role if missing and allowed.
-    if desired_role_id:
-        role = guild.get_role(int(desired_role_id))
-        if role and role not in member.roles:
-            can_assign, warning = check_bot_role_position(guild, role)
-            if can_assign:
+        # Remove any configured prestige role that no longer matches.
+        for tier, role_id in role_by_tier.items():
+            role = guild.get_role(int(role_id))
+            if not role or role not in member.roles:
+                continue
+            if int(tier) != int(effective_tier):
+                from utils.timed_ownership import role_removal_blocked
+                kept = await role_removal_blocked(guild.id, member.id, int(role_id),
+                                                  retiring=f"prestige:{tier}", bot=bot, member=member)
+                if kept:
+                    print(f"[PRESTIGE] Keeping tier {tier} role {role_id}: {kept}")
+                    continue
                 try:
-                    await member.add_roles(role, reason="Prestige tier")
+                    await member.remove_roles(role, reason="Prestige tier changed")
                 except Exception as e:
-                    print(f"[PRESTIGE] Failed to add tier role: {e}")
-            else:
-                print(f"[PRESTIGE ROLE WARNING] {warning}")
+                    print(f"[PRESTIGE] Failed to remove tier {tier} role: {e}")
+
+        # Grant the desired role if missing and allowed.
+        if desired_role_id:
+            role = guild.get_role(int(desired_role_id))
+            if role and role not in member.roles:
+                can_assign, warning = check_bot_role_position(guild, role)
+                if can_assign:
+                    try:
+                        await member.add_roles(role, reason="Prestige tier")
+                    except Exception as e:
+                        print(f"[PRESTIGE] Failed to add tier role: {e}")
+                else:
+                    print(f"[PRESTIGE ROLE WARNING] {warning}")

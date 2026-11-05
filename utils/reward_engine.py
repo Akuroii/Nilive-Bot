@@ -357,90 +357,185 @@ async def give_reward(bot: discord.Client,
                 "new_level": new_level, "leveled_up": leveled_up}
 
     elif reward_type in ("role", "temp_role"):
-        if role_id is None:
-            raise RewardError(f"{reward_type} reward requires 'role_id'")
-        role_id = int(role_id)
+        from utils.equip_engine import slot_lock
+        async with slot_lock(guild_id, user_id):
+            if role_id is None:
+                raise RewardError(f"{reward_type} reward requires 'role_id'")
+            role_id = int(role_id)
 
-        guild = bot.get_guild(guild_id)
-        if not guild:
-            return {"success": False, "reward_type": reward_type,
-                    "error": "Bot is not in that guild"}
-        member = guild.get_member(user_id)
-        if not member:
-            return {"success": False, "reward_type": reward_type,
-                    "error": "Member not found in guild"}
-        role = guild.get_role(role_id)
-        if not role:
-            return {"success": False, "reward_type": reward_type,
-                    "error": "Role not found"}
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                return {"success": False, "reward_type": reward_type,
+                        "error": "Bot is not in that guild"}
+            member = guild.get_member(user_id)
+            if not member:
+                return {"success": False, "reward_type": reward_type,
+                        "error": "Member not found in guild"}
+            role = guild.get_role(role_id)
+            if not role:
+                return {"success": False, "reward_type": reward_type,
+                        "error": "Role not found"}
 
-        can_assign, warning = check_bot_role_position(guild, role)
-        if not can_assign:
-            return {"success": False, "reward_type": reward_type,
-                    "error": warning}
+            can_assign, warning = check_bot_role_position(guild, role)
+            if not can_assign:
+                return {"success": False, "reward_type": reward_type,
+                        "error": warning}
 
-        expires_at = None
-        if reward_type == "temp_role" and duration_hours:
-            expires_at = (
-                datetime.now(timezone.utc) +
-                timedelta(hours=duration_hours)
-            ).isoformat()
+            expires_at = None
+            if reward_type == "temp_role" and duration_hours:
+                expires_at = (
+                    datetime.now(timezone.utc) +
+                    timedelta(hours=duration_hours)
+                ).isoformat()
 
-        # Rank Card foundation / Equip system (locked with Dark): a
-        # role/temp_role reward is a cosmetic collectible now, not
-        # just a Discord permission grant — it lands in inventory_items
-        # (quantity fixed at 1, roles don't stack) and, since the
-        # Discord role has always been granted immediately on this
-        # reward path, it also auto-equips (swapping out whatever was
-        # previously equipped) via the same equip_role() swap the
-        # manual /inventory picker uses. The inventory row is written
-        # FIRST so equip_role() — which reads role_id back out of
-        # inventory metadata rather than taking it as a raw param —
-        # has something to resolve. display_name falls back to the
-        # Discord role's own name only when the caller doesn't supply
-        # a nicer one (cogs/shop.py passes the shop item's configured
-        # name; other callers currently don't have one to offer).
-        display_name = item_name or role.name
+            # Rank Card foundation / Equip system (locked with Dark): a
+            # role/temp_role reward is a cosmetic collectible now, not
+            # just a Discord permission grant — it lands in inventory_items
+            # (quantity fixed at 1, roles don't stack) and, since the
+            # Discord role has always been granted immediately on this
+            # reward path, it also auto-equips (swapping out whatever was
+            # previously equipped) via the same equip_role() swap the
+            # manual /inventory picker uses. The inventory row is written
+            # FIRST so equip_role() — which reads role_id back out of
+            # inventory metadata rather than taking it as a raw param —
+            # has something to resolve. display_name falls back to the
+            # Discord role's own name only when the caller doesn't supply
+            # a nicer one (cogs/shop.py passes the shop item's configured
+            # name; other callers currently don't have one to offer).
+            display_name = item_name or role.name
 
-        from utils.inventory import set_quantity
-        # metadata_extra lets the Shop purchase path attach its own context
-        # (category, product_id) to the collectible row without changing the
-        # keys that equip_role() resolves role_id from. Callers that pass
-        # nothing keep the exact previous metadata.
-        role_meta = {"role_id": role_id, "expires_at": expires_at}
-        if metadata_extra:
-            role_meta.update(metadata_extra)
-        await set_quantity(
-            guild_id, user_id, display_name, 1,
-            item_type=reward_type, source=source,
-            metadata=role_meta)
+            # Color identity travels with the ownership record, so a Colour stays
+            # identifiable after the listing is renamed or deleted, and after it is
+            # granted by an Event/Mission/Minigame instead of a purchase.
+            #
+            # Resolution is deliberately conservative: `role_id` -> exactly one
+            # enabled Colors listing in this guild. A role no listing claims (or one
+            # claimed by several with no product id passed in) must NOT become a
+            # Colour, so an ordinary role reward is unaffected. The expiry meaning
+            # is never taken from the listing here — this branch applies exactly the
+            # duration the caller asked for.
+            from utils.timed_ownership import color_metadata
+            role_metadata = {"role_id": role_id, "expires_at": expires_at}
+            if metadata_extra:
+                role_metadata.update(metadata_extra)
+            if op_id:
+                role_metadata["origin_op_id"] = str(op_id)
+            role_metadata = await color_metadata(guild_id, role_id, role_metadata)
 
-        from utils.equip_engine import equip_role
-        equip_result = await equip_role(
-            bot, guild_id, user_id, display_name, reason=reason)
-        if not equip_result.get("success"):
-            return {"success": False, "reward_type": reward_type,
-                    "error": equip_result.get("error", "Failed to equip role")}
+            role_was_present = role in member.roles
+            prior_inv = None
+            delivered_inv = None
+            inv_id = None
+            async def _restore_prior_inventory() -> bool:
+                return await rollback_role_inventory_grant(
+                    guild_id, user_id, display_name,
+                    prior_inv=prior_inv, delivered_inv=delivered_inv)
 
-        result = {"success": True, "reward_type": reward_type,
-                  "role_id": role_id, "item_name": display_name}
-
-        if reward_type == "temp_role":
-            if not duration_hours:
-                result["warning"] = ("No duration_hours given; role "
-                                      "was granted but NOT scheduled "
-                                      "to expire.")
-            else:
+            from utils.inventory import set_quantity
+            snapshot_sql = ("SELECT id, quantity, item_type, source, metadata, "
+                            "created_at, updated_at FROM inventory_items "
+                            "WHERE guild_id=? AND user_id=? AND item_name=?")
+            try:
                 async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("""
-                        INSERT INTO temp_roles
-                            (guild_id, user_id, role_id, expires_at, source)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (guild_id, user_id, role_id, expires_at, source))
-                    await db.commit()
-                result["expires_at"] = expires_at
+                    await db.execute("BEGIN IMMEDIATE")
+                    try:
+                        cursor = await db.execute(snapshot_sql, (guild_id, user_id, display_name))
+                        prior_inv = await cursor.fetchone()
+                        if prior_inv and int(prior_inv[1] or 0) > 0:
+                            import json
+                            try:
+                                previous_metadata = json.loads(prior_inv[4] or "{}")
+                                previous_role = int(previous_metadata.get("role_id"))
+                            except (TypeError, ValueError, AttributeError):
+                                raise RewardError("Existing ownership has no verifiable role identity")
+                            if prior_inv[2] != reward_type or previous_role != int(role_id):
+                                raise RewardError("An unrelated item already uses this name")
+                            if op_id:
+                                raise RewardError("You already own this permanent role item")
+                            # Do not shrink or overwrite an independent existing grant.
+                            delivered_inv = prior_inv
+                        else:
+                            await set_quantity(
+                                guild_id, user_id, display_name, 1,
+                                item_type=reward_type, source=source,
+                                metadata=role_metadata, db=db)
+                            cursor = await db.execute(snapshot_sql, (guild_id, user_id, display_name))
+                            delivered_inv = await cursor.fetchone()
+                            from utils.inventory_activity import record_activity
+                            await record_activity(db, guild_id=guild_id, user_id=user_id,
+                                                  event_type="acquired", item_name=display_name,
+                                                  item_type=reward_type, quantity=1, source=source)
+                        inv_id = int(delivered_inv[0])
+                        await db.commit()
+                    except BaseException:
+                        await db.rollback()
+                        raise
+            except Exception as exc:
+                return {"success": False, "reward_type": reward_type,
+                        "error": f"Inventory error: {exc}", "uncertain": False}
 
-        return result
+            entry_key = f"i:{inv_id}" if inv_id is not None else None
+            from utils.equip_engine import equip_role
+            try:
+                equip_result = await equip_role.__wrapped__(
+                    bot, guild_id, user_id, display_name,
+                    reason=reason, entry_key=entry_key)
+            except Exception as exc:
+                from utils.timed_ownership import is_ambiguous_discord_role_error
+                role_added = (not role_was_present) and (role in member.roles)
+                ambiguous = is_ambiguous_discord_role_error(
+                    exc, member=member, role=role)
+                inv_restored = False
+                if not role_added and not ambiguous:
+                    inv_restored = await _restore_prior_inventory()
+                return {"success": False, "reward_type": reward_type,
+                        "error": f"Failed to equip role: {exc}",
+                        "uncertain": bool(role_added or ambiguous or not inv_restored)}
+
+            if not equip_result.get("success"):
+                role_added = (bool(equip_result.get("role_added"))
+                              or ((not role_was_present) and (role in member.roles)))
+                equip_uncertain = bool(equip_result.get("uncertain"))
+                inv_restored = False
+                if not role_added and not equip_uncertain:
+                    inv_restored = await _restore_prior_inventory()
+                return {"success": False, "reward_type": reward_type,
+                        "error": equip_result.get("error", "Failed to equip role"),
+                        "uncertain": bool(
+                            role_added or equip_uncertain or not inv_restored
+                        )}
+
+            role_added = (bool(equip_result.get("role_added"))
+                          or ((not role_was_present) and (role in member.roles)))
+            result = {"success": True, "reward_type": reward_type,
+                      "role_id": role_id, "item_name": display_name,
+                      "entry_key": equip_result.get("entry_key") or entry_key,
+                      "role_added": role_added,
+                      "prior_inventory": prior_inv,
+                      "delivered_inventory": delivered_inv,
+                      "uncertain": False}
+
+            if reward_type == "temp_role":
+                if not duration_hours:
+                    result["warning"] = ("No duration_hours given; role "
+                                          "was granted but NOT scheduled "
+                                          "to expire.")
+                else:
+                    try:
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("""
+                                INSERT INTO temp_roles
+                                    (guild_id, user_id, role_id, expires_at, source)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (guild_id, user_id, role_id, expires_at, source))
+                            await db.commit()
+                    except Exception as exc:
+                        return {"success": False, "reward_type": reward_type,
+                                "error": f"Could not record temporary role expiry: {exc}",
+                                "uncertain": True}
+                    result["expires_at"] = expires_at
+
+            return result
 
     elif reward_type == "item":
         if not item_name:
@@ -449,28 +544,220 @@ async def give_reward(bot: discord.Client,
         if quantity <= 0:
             raise RewardError("item reward quantity must be positive")
 
+        prior_inv = None
+        delivered_inv = None
+        grant_id = None
         from utils.inventory import give_item
-        # `op_id` is the Shop purchase operation. Recording it as
-        # metadata["origin_op_id"] is the same durable marker
-        # grant_timed_holding(op_id=...) writes for timed holdings, so a
-        # delivered item can be traced back to the purchase that created it.
-        # Other callers pass nothing and keep identical metadata.
         item_meta = dict(item_metadata) if item_metadata else None
         if op_id:
             item_meta = item_meta or {}
             item_meta.setdefault("origin_op_id", str(op_id))
+        _snapshot_sql = (
+            "SELECT id, quantity, item_type, source, metadata, "
+            "created_at, updated_at FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_name=?")
+        # One write transaction for: the pre-grant read, the increment, the
+        # purchase grant (Shop only) and the post-grant read. Before this the
+        # two reads and the write used three connections, so the "delivered"
+        # snapshot could include a concurrent writer's units - and for a Shop
+        # purchase there was no grant at all. The grant and the increment now
+        # commit together or not at all: no delivered unit without its grant,
+        # no grant without its unit.
         try:
-            new_qty = await give_item(
-                guild_id, user_id, item_name,
-                quantity=quantity, item_type=item_type,
-                metadata=item_meta, source=source)
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                try:
+                    cursor = await db.execute(
+                        _snapshot_sql, (guild_id, user_id, item_name))
+                    prior_inv = await cursor.fetchone()
+                    new_qty = await give_item(
+                        guild_id, user_id, item_name,
+                        quantity=quantity, item_type=item_type,
+                        metadata=item_meta, source=source, db=db)
+                    if op_id is not None and str(op_id).strip():
+                        from utils.level_ops import record_purchase_grant
+                        grant_id = await record_purchase_grant(
+                            db, guild_id=guild_id, user_id=user_id,
+                            operation_id=str(op_id), item_name=item_name,
+                            quantity=quantity)
+                    cursor = await db.execute(
+                        _snapshot_sql, (guild_id, user_id, item_name))
+                    delivered_inv = await cursor.fetchone()
+                    await db.commit()
+                except BaseException:
+                    await db.rollback()
+                    raise
         except Exception as e:
             return {"success": False, "reward_type": "item",
-                    "error": f"Inventory error: {e}"}
+                    "error": f"Inventory error: {e}", "uncertain": False}
 
         return {"success": True, "reward_type": "item",
                 "item_name": item_name, "quantity": quantity,
-                "new_quantity": new_qty}
+                "new_quantity": new_qty, "prior_inventory": prior_inv,
+                "delivered_inventory": delivered_inv,
+                "grant_id": grant_id, "uncertain": False}
 
     else:
         raise RewardError(f"Unknown reward_type: {reward_type!r}")
+
+async def rollback_role_inventory_grant(
+    guild_id: int,
+    user_id: int,
+    item_name: str,
+    *,
+    prior_inv: tuple | None = None,
+    delivered_inv: tuple | None = None,
+    db: aiosqlite.Connection | None = None,
+    tx_guard=None,
+) -> bool:
+    """Conditionally roll back a permanent-role inventory write (`set_quantity(..., 1)`).
+
+    Never deletes or overwrites an `inventory_items` row unconditionally:
+    - If the row still matches the state written by this delivery (`delivered_inv`),
+      restores `prior_inv` (when one existed) or deletes the row (when none existed).
+    - If a concurrent operation incremented `quantity` above the delivered quantity
+      when no active prior stack existed, decrements only the 1 unit attributable
+      to this purchase while preserving any units protected by `reward_grants`.
+    - If a concurrent independent grant replaced the row (`cur_row != delivered_inv`
+      with `quantity <= delivered_qty`), leaves the row untouched so the concurrent
+      grant is never lost.
+    - When `db` is provided, joins the caller's open transaction without committing;
+      when `tx_guard` is provided, runs pre/post journal checks inside the same
+      `BEGIN IMMEDIATE` transaction so the inventory rollback and purchase-journal
+      progress update commit or roll back atomically.
+    """
+    async def _apply(conn: aiosqlite.Connection) -> bool:
+        cursor = await conn.execute(
+            "SELECT id, quantity, item_type, source, metadata, "
+            "created_at, updated_at FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild_id, user_id, item_name),
+        )
+        cur_row = await cursor.fetchone()
+        if cur_row is None:
+            return True
+
+        cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_cat, cur_uat = cur_row
+        cur_qty_int = int(cur_qty or 0)
+        protected_qty = 0
+        try:
+            prov_cur = await conn.execute(
+                "SELECT COALESCE(SUM(remaining_quantity), 0) "
+                "FROM reward_grants "
+                "WHERE guild_id=? AND user_id=? AND item_name=? "
+                "AND remaining_quantity > 0 AND COALESCE(unattributed, 0) = 0",
+                (guild_id, user_id, item_name),
+            )
+            prov_row = await prov_cur.fetchone()
+            if prov_row and prov_row[0] is not None:
+                protected_qty = int(prov_row[0] or 0)
+        except Exception as exc:
+            if "no such table" not in str(exc).lower():
+                raise
+            protected_qty = 0
+
+        if delivered_inv is not None:
+            matches_delivered = tuple(cur_row) == tuple(delivered_inv)
+        else:
+            matches_delivered = cur_qty_int == 1
+
+        if matches_delivered:
+            if prior_inv is None:
+                if protected_qty <= 0:
+                    await conn.execute(
+                        "DELETE FROM inventory_items "
+                        "WHERE id=? AND quantity IS ? AND item_type IS ? "
+                        "AND source IS ? AND metadata IS ? AND updated_at IS ?",
+                        (cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_uat),
+                    )
+            else:
+                p_id, p_qty, p_type, p_src, p_meta, p_cat, p_uat = prior_inv
+                target_qty = max(int(p_qty or 0), protected_qty)
+                await conn.execute(
+                    "UPDATE inventory_items "
+                    "SET quantity=?, item_type=?, source=?, metadata=?, "
+                    "created_at=?, updated_at=? "
+                    "WHERE id=? AND quantity IS ? AND item_type IS ? "
+                    "AND source IS ? AND metadata IS ? AND updated_at IS ?",
+                    (
+                        target_qty, p_type, p_src, p_meta, p_cat, p_uat,
+                        cur_id, cur_qty, cur_type, cur_src, cur_meta, cur_uat,
+                    ),
+                )
+        else:
+            delivered_qty = int(
+                (delivered_inv[1] if delivered_inv is not None else 1) or 1
+            )
+            prior_qty = int((prior_inv[1] if prior_inv is not None else 0) or 0)
+            if cur_qty_int > delivered_qty and prior_qty <= 0 and (cur_qty_int - protected_qty) > 0:
+                await conn.execute(
+                    "UPDATE inventory_items "
+                    "SET quantity = quantity - 1, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id=? AND quantity = ?",
+                    (cur_id, cur_qty_int),
+                )
+        cursor = await conn.execute(
+            "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild_id, user_id, item_name))
+        after = await cursor.fetchone()
+        removed = max(0, cur_qty_int - int(after[0] or 0)) if after else cur_qty_int
+        if removed:
+            from utils.inventory_activity import record_activity
+            await record_activity(conn, guild_id=guild_id, user_id=user_id,
+                                  event_type="ownership_reversed", item_name=item_name,
+                                  item_type=cur_type, quantity=removed,
+                                  source="role_compensation")
+        return True
+
+    if db is not None:
+        return await _apply(db)
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as conn:
+            in_tx = False
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                in_tx = True
+                if tx_guard is not None:
+                    pre_state = await tx_guard("pre", conn)
+                    if pre_state == "already_done":
+                        await conn.execute("ROLLBACK")
+                        in_tx = False
+                        return True
+                    if pre_state != "proceed":
+                        await conn.execute("ROLLBACK")
+                        in_tx = False
+                        return False
+                ok = await _apply(conn)
+                if not ok:
+                    await conn.execute("ROLLBACK")
+                    in_tx = False
+                    return False
+                if tx_guard is not None:
+                    post_ok = await tx_guard("post", conn)
+                    if not post_ok:
+                        await conn.execute("ROLLBACK")
+                        in_tx = False
+                        return False
+                await conn.commit()
+                in_tx = False
+                return ok
+            except Exception:
+                if in_tx:
+                    try:
+                        await conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                raise
+    except Exception as exc:
+        print(f"[REWARD] Failed to roll back role inventory for {item_name!r}: {exc}")
+        return False
+
+
+# NOTE (G fix, 2026-10-30): `rollback_item_inventory_grant` used to live here. It
+# decided how many units to take back by comparing the live stack with the
+# `delivered_inventory` snapshot, which cannot distinguish the purchase's own
+# unit from units granted later (incl. same-second ABA). Stackable
+# compensation now reverses the purchase's own `reward_grants` row via
+# `utils.level_ops.reverse_purchase_grant`; purchases with no such row are
+# refused and stay pending for an operator (`legacy_no_provenance`).

@@ -631,7 +631,7 @@ async def main():
     check("only this member's level-reward state changed",
           set(changed) <= {"levels", "level_reward_claims", "leveling_active_boosts",
                            "temp_roles", "economy", "transaction_ledger",
-                           "inventory_items", "reward_grants"}
+                           "inventory_items", "reward_grants", "inventory_activity"}
           | set(PROVENANCE_TABLES),
           f"changed={changed}")
     check("no other member, guild or reward definition moved",

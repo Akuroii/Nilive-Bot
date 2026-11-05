@@ -45,7 +45,6 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     None and is_booster is treated as False (permanent prestige only).
     """
     from utils.xp_calculator import xp_progress
-    from utils.inventory import get_inventory
     from utils.economy_safe import get_balance
     from utils.equip_engine import get_equipped
     from utils.item_catalog import get_catalog_entry, item_sort_key
@@ -123,11 +122,21 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     from utils.title_engine import get_equipped_title
     equipped_title = await get_equipped_title(guild_id, user_id)
 
-    items = await get_inventory(guild_id, user_id, include_empty=False)
-    grid_candidates = []
+    # Use the opt-in unified reader: unrelated name-based consumers of
+    # get_inventory retain their permanent-stack-only contract.
+    from utils.inventory import get_inventory_entries
+    items = await get_inventory_entries(guild_id, user_id)
+    grouped = {}
     for it in items:
         if it["item_type"] in ("role", "temp_role"):
             continue
+        name = it["item_name"]
+        if name not in grouped:
+            grouped[name] = {**it, "quantity": int(it.get("quantity") or 0)}
+        else:
+            grouped[name]["quantity"] += int(it.get("quantity") or 0)
+    grid_candidates = []
+    for it in grouped.values():
         catalog = await get_catalog_entry(guild_id, it["item_name"])
         grid_candidates.append({
             **it,

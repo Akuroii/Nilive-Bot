@@ -44,38 +44,53 @@ async def get_equipped_title(guild_id: int, user_id: int) -> dict | None:
     return {"item_name": row[0], "equipped_at": row[1]}
 
 
-async def equip_title(guild_id: int, user_id: int, item_name: str) -> dict:
-    """
-    Equips an owned title. Never raises for user-facing failures; every
-    rejection returns {"success": False, "error": "..."} so callers can
-    surface the message straight to Discord.
-    """
-    from utils.inventory import get_inventory
+_TITLE_UNSPECIFIED = object()
 
-    items = await get_inventory(guild_id, user_id, include_empty=False)
-    owned = next((it for it in items if it["item_name"] == item_name), None)
-    if not owned:
-        return {"success": False, "error": f"You don't own **{item_name}**."}
-    if owned["item_type"] != TITLE_ITEM_TYPE:
-        return {"success": False,
-                "error": f"**{item_name}** isn't a title."}
 
+async def equip_title(guild_id: int, user_id: int, item_name: str, *,
+                      entry_key: str | None = None,
+                      expected_title=_TITLE_UNSPECIFIED) -> dict:
+    """Validate the permanent title and equip it in one write transaction."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO equipped_titles
-                (guild_id, user_id, item_name, equipped_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                item_name   = excluded.item_name,
-                equipped_at = CURRENT_TIMESTAMP
-        """, (guild_id, user_id, item_name))
-        await db.commit()
-
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT item_name FROM equipped_titles WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))
+            current = await cursor.fetchone()
+            if expected_title is not _TITLE_UNSPECIFIED and (current[0] if current else None) != expected_title:
+                await db.rollback()
+                return {"success": False, "error": "The equipped title changed. Open the item again."}
+            cursor = await db.execute(
+                "SELECT id, item_type, quantity FROM inventory_items "
+                "WHERE guild_id=? AND user_id=? AND item_name=?",
+                (guild_id, user_id, item_name))
+            owned = await cursor.fetchone()
+            if (not owned or int(owned[2]) <= 0 or owned[1] != TITLE_ITEM_TYPE
+                    or (entry_key is not None and entry_key != f"i:{owned[0]}")):
+                await db.rollback()
+                return {"success": False, "error": "That title is no longer owned."}
+            await db.execute("""
+                INSERT INTO equipped_titles (guild_id, user_id, item_name, equipped_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                    item_name=excluded.item_name, equipped_at=CURRENT_TIMESTAMP
+            """, (guild_id, user_id, item_name))
+            if not current or current[0] != item_name:
+                from utils.inventory_activity import record_activity
+                await record_activity(db, guild_id=guild_id, user_id=user_id,
+                                      event_type="equipped", item_name=item_name,
+                                      item_type=TITLE_ITEM_TYPE, quantity=1, source="equipment")
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
     return {"success": True, "item_name": item_name}
 
 
 async def unequip_title(guild_id: int, user_id: int,
-                        item_name: str | None = None) -> dict:
+                        item_name: str | None = None, *,
+                        entry_key: str | None = None) -> dict:
     """
     Clears the member's equipped title. When item_name is given the
     delete is scoped to it, so a stale button on an old ephemeral view
@@ -83,6 +98,20 @@ async def unequip_title(guild_id: int, user_id: int,
     member equipped in the meantime.
     """
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT item_name FROM equipped_titles WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id))
+        prior = await cursor.fetchone()
+        if entry_key is not None:
+            cursor = await db.execute(
+                "SELECT id FROM inventory_items WHERE guild_id=? AND user_id=? "
+                "AND item_name=? AND item_type='title' AND quantity>0",
+                (guild_id, user_id, item_name))
+            row = await cursor.fetchone()
+            if not row or entry_key != f"i:{row[0]}":
+                await db.rollback()
+                return {"success": False, "error": "That title is no longer owned."}
         if item_name is None:
             cursor = await db.execute(
                 "DELETE FROM equipped_titles WHERE guild_id=? AND user_id=?",
@@ -92,8 +121,13 @@ async def unequip_title(guild_id: int, user_id: int,
                 "DELETE FROM equipped_titles "
                 "WHERE guild_id=? AND user_id=? AND item_name=?",
                 (guild_id, user_id, item_name))
-        await db.commit()
         removed = cursor.rowcount
+        if removed and prior:
+            from utils.inventory_activity import record_activity
+            await record_activity(db, guild_id=guild_id, user_id=user_id,
+                                  event_type="unequipped", item_name=prior[0],
+                                  item_type=TITLE_ITEM_TYPE, quantity=1, source="equipment")
+        await db.commit()
 
     if not removed:
         return {"success": False, "error": "That title isn't equipped."}

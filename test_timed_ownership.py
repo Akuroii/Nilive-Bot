@@ -31,7 +31,7 @@ from phase1_support import (
 
 from utils import timed_ownership as TO
 from utils import equip_engine as EE
-from utils.inventory import get_inventory, find_entry, set_quantity
+from utils.inventory import get_inventory_entries as get_inventory, find_entry, set_quantity
 from utils.equip_engine import get_equipped, equip_role
 from utils.reward_engine import give_reward
 from utils.shop_validation import shop_input, ShopValidationError
@@ -884,7 +884,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
     # ── Fix C: Timed Color equip swap on Discord ──
 
     async def test_fix_c_timed_color_grant_swaps_out_previous_equipped_role(self):
-        from utils.inventory import give_item, get_inventory
+        from utils.inventory import give_item, get_inventory_entries as get_inventory
         old_role = role_stub(970, "OldCrimson")
         new_role = role_stub(971, "NewAzure")
         _, person, bot, guild = purchase_ctx(granted_role=new_role)
@@ -1035,7 +1035,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(987, managed_b2)
 
     async def test_fix_e_repoint_equipped_entry_key_when_expired_holding_retained_by_permanent(self):
-        from utils.inventory import give_item, get_inventory
+        from utils.inventory import give_item, get_inventory_entries as get_inventory
         role_obj = role_stub(988, "SharedColor")
         _, person, bot, _ = purchase_ctx(granted_role=role_obj)
         await give_item(GUILD, USER, "SharedColor", 1, item_type="role",
@@ -1064,7 +1064,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
     # ── Fix F: Permanent role partial delivery & pre-existing item safety ──
 
     async def test_fix_f_permanent_role_failure_restores_prior_inventory_and_marks_uncertain_when_role_added(self):
-        from utils.inventory import give_item, get_inventory
+        from utils.inventory import give_item, get_inventory_entries as get_inventory
         role_obj = role_stub(989, "PermShade")
         listing = shop_item("color", price=600, name="PermShade",
                             role_id=989, duration_hours=None, stock=2)
@@ -3370,7 +3370,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         """
         import cogs.shop as shop_mod
         from cogs.shop import process_purchase
-        from utils.inventory import get_inventory
+        from utils.inventory import get_inventory_entries as get_inventory
 
         r_timed = role_stub(721, "StaleItxTimedColor")
         r_perm = role_stub(722, "StaleItxPermColor")
@@ -3516,7 +3516,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         import cogs.shop as shop_mod
         import utils.reward_engine as re_mod
         from cogs.shop import process_purchase
-        from utils.inventory import get_inventory, give_item, set_quantity
+        from utils.inventory import get_inventory_entries as get_inventory, give_item, set_quantity
 
         # Part A: Direct unit tests of `rollback_role_inventory_grant` transaction errors
         await set_quantity(GUILD, USER, "TxFailureRole", 1, item_type="role",
@@ -3755,7 +3755,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         import cogs.shop as shop_mod
         from cogs.shop import process_purchase
         from utils.equip_engine import equip_role, get_equipped
-        from utils.inventory import get_inventory, set_quantity
+        from utils.inventory import get_inventory_entries as get_inventory, set_quantity
 
         r_solar = role_stub(712, "SolarCrownRole")
         itx, person, bot, guild = purchase_ctx(granted_role=r_solar)
@@ -3850,7 +3850,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         import cogs.shop as shop_mod
         from cogs.shop import process_purchase
         from utils.equip_engine import equip_role, get_equipped
-        from utils.inventory import get_inventory, set_quantity
+        from utils.inventory import get_inventory_entries as get_inventory, set_quantity
 
         def _make_not_found():
             resp = SimpleNamespace(status=404, reason="Not Found")
@@ -4080,7 +4080,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         import cogs.shop as shop_mod
         import utils.reward_engine as re_mod
         from cogs.shop import process_purchase
-        from utils.inventory import get_inventory
+        from utils.inventory import get_inventory_entries as get_inventory
 
         r_n2_fail = role_stub(751, "N2PersistFailColor")
         r_n2_ok = role_stub(752, "N2DurableRestartColor")
@@ -4236,7 +4236,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         after in-memory state is cleared and `reconcile_purchases()` runs."""
         import cogs.shop as shop_mod
         from cogs.shop import process_purchase
-        from utils.inventory import give_item, get_inventory
+        from utils.inventory import give_item, get_inventory_entries as get_inventory
 
         item_p1 = shop_item(
             "title", price=250, name="P1Title",
@@ -8685,8 +8685,9 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_timed_grant_keeps_the_role_it_equipped(self):
         person, guild, bot, roles = self._world([9641], worn=[9641])
+        _, owner_key = await self._holding(9641, "SlotOwner")
         await EE.record_equipped(GUILD, USER, "SlotOwner", role_id=9641,
-                              entry_key="h:owner")
+                              entry_key=owner_key)
         seen = {}
 
         async def gate(kind, target):
@@ -8699,7 +8700,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
         self._faithful_roles(person, gate)
         result = await EE.unequip_role(bot, GUILD, USER, "SlotOwner",
-                                    entry_key="h:owner")
+                                    entry_key=owner_key)
         granted = await seen["grant"]
 
         slot = self._slot()
@@ -8992,9 +8993,11 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             EE.unequip_role(bot, GUILD, USER, "CancelledRole",
                             entry_key=f"h:{holding_id}"),
             timeout=5)
-        # The gate is free (the timeout above would have raised otherwise) AND
-        # the interrupted expiry left the slot for this call to clear.
-        self.assertTrue(freed["success"], freed)
+        # The stale expired entry cannot be manually unequipped; the expiry
+        # retry owns its cleanup, and the timeout verifies the lock was freed.
+        self.assertFalse(freed["success"], freed)
+        retried = await asyncio.wait_for(TO.expire_one(bot, holding), timeout=5)
+        self.assertEqual(retried["status"], "removed")
         self.assertIsNone(await get_equipped(GUILD, USER))
 
     async def test_one_members_slot_work_does_not_block_another(self):
@@ -10930,11 +10933,15 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
         _, person, bot, guild = purchase_ctx(granted_role=old_role)
         guild.get_role = lambda rid: roles.get(int(rid))
         person.roles = [old_role]
+        old_id = await TO.grant_timed_holding(
+            GUILD, USER, "RaceOldRole", expires_at=iso_in(2),
+            item_type="temp_role", metadata={"role_id": 9611}, role_id=9611)
+        old_key = f"h:{old_id}"
         await record_equipped(GUILD, USER, "RaceOldRole", role_id=9611,
-                             entry_key="h:old")
+                             entry_key=old_key)
         self.assertEqual(
             rows("SELECT item_name, entry_key FROM equipped_roles"),
-            [("RaceOldRole", "h:old")])
+            [("RaceOldRole", old_key)])
 
         async def _racing_remove(role, reason=None):
             # A concurrent, entirely legitimate equip lands while this call is
@@ -10946,7 +10953,7 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
         person.remove_roles = AsyncMock(side_effect=_racing_remove)
 
         result = await unequip_role(bot, GUILD, USER, "RaceOldRole",
-                                    entry_key="h:old")
+                                    entry_key=old_key)
 
         self.assertEqual(
             rows("SELECT item_name, entry_key, role_id FROM equipped_roles"),

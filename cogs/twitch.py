@@ -313,12 +313,22 @@ class Twitch(commands.Cog):
         if give_role_id and discord_user_id:
             role = guild.get_role(int(give_role_id))
             member = guild.get_member(int(discord_user_id))
-            if role and member and role in member.roles:
-                try:
-                    await member.remove_roles(role, reason="Stream ended")
-                except Exception as e:
-                    print(f"[TWITCH] Failed to remove live role from "
-                          f"{discord_user_id} in {guild_id}: {e}")
+            if role and member:
+                from utils.equip_engine import slot_lock
+                from utils.timed_ownership import role_removal_blocked
+                async with slot_lock(guild_id, int(discord_user_id)):
+                    if role in member.roles:
+                        kept = await role_removal_blocked(
+                            guild_id, int(discord_user_id), int(give_role_id),
+                            retiring="twitch", member=member, bot=self.bot)
+                        if kept:
+                            print(f"[TWITCH] Keeping Twitch live role {give_role_id}: {kept}")
+                        else:
+                            try:
+                                await member.remove_roles(role, reason="Stream ended")
+                            except Exception as e:
+                                print(f"[TWITCH] Failed to remove live role from "
+                                      f"{discord_user_id} in {guild_id}: {e}")
 
     @check_streams.before_loop
     async def before_check(self):

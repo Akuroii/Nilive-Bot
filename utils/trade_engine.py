@@ -127,6 +127,20 @@ async def _move_currency(db, guild_id: int, frm: int, to: int,
 
 async def _move_items(db, guild_id: int, frm: int, to: int, items: dict[str, int]):
     for name, qty in items.items():
+        cursor = await db.execute(
+            "SELECT item_type, metadata FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_name=?", (guild_id, frm, name))
+        item_type, metadata = await cursor.fetchone()
+        if metadata:
+            try:
+                payload = json.loads(metadata)
+                if isinstance(payload, dict):
+                    payload.pop("origin_op_id", None)
+                    metadata = json.dumps(payload) if payload else None
+            except (TypeError, ValueError):
+                # Opaque legacy metadata remains intact; incompatible stacks
+                # are refused by the preflight check.
+                pass
         await db.execute("""
             UPDATE inventory_items SET quantity = quantity - ?, updated_at = CURRENT_TIMESTAMP
             WHERE guild_id=? AND user_id=? AND item_name=?
@@ -139,17 +153,75 @@ async def _move_items(db, guild_id: int, frm: int, to: int, items: dict[str, int
         await _consume_provenance(db, guild_id, frm, name, qty)
         await db.execute("""
             INSERT INTO inventory_items
-                (guild_id, user_id, item_name, item_type, quantity, source, updated_at)
-            VALUES (?, ?, ?, 'trade', ?, 'trade', CURRENT_TIMESTAMP)
+                (guild_id, user_id, item_name, item_type, quantity, metadata, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'trade', CURRENT_TIMESTAMP)
             ON CONFLICT(guild_id, user_id, item_name) DO UPDATE SET
+                item_type  = CASE WHEN quantity > 0 THEN item_type ELSE excluded.item_type END,
+                metadata   = CASE WHEN quantity > 0 THEN metadata ELSE excluded.metadata END,
                 quantity   = quantity + ?,
                 updated_at = CURRENT_TIMESTAMP
-        """, (guild_id, to, name, qty, qty))
+        """, (guild_id, to, name, item_type, qty, metadata, qty))
+
+
+async def _trade_item_conflict(db, guild_id: int, sender: int, receiver: int,
+                               items: dict[str, int]) -> str | None:
+    """Reject timed, equipped, or incompatible same-name inventory stacks."""
+    for name in items:
+        cursor = await db.execute(
+            "SELECT id,item_type,metadata,quantity FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild_id, sender, name))
+        origin = await cursor.fetchone()
+        if not origin:
+            return f"{name} is no longer available."
+        if origin[1] == "temp_role":
+            return f"Timed ownership ({name}) cannot be traded."
+        cursor = await db.execute(
+            "SELECT 1 FROM equipped_roles WHERE guild_id=? AND user_id=? "
+            "AND item_name=? AND (entry_key IS NULL OR entry_key='' OR entry_key=?) "
+            "UNION ALL SELECT 1 FROM equipped_titles WHERE guild_id=? AND user_id=? "
+            "AND item_name=? LIMIT 1",
+            (guild_id, sender, name, f"i:{origin[0]}", guild_id, sender, name))
+        if await cursor.fetchone():
+            return f"Unequip {name} before trading it."
+        cursor = await db.execute(
+            "SELECT item_type,metadata,quantity FROM inventory_items "
+            "WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild_id, receiver, name))
+        target = await cursor.fetchone()
+        if target and int(target[2] or 0) > 0:
+            try:
+                first = json.loads(origin[2]) if origin[2] else {}
+                second = json.loads(target[1]) if target[1] else {}
+            except (TypeError, ValueError):
+                return f"Cannot verify whether {name} stacks are compatible."
+            # A Shop op marker describes the last write, not an item property.
+            if isinstance(first, dict):
+                first.pop("origin_op_id", None)
+            if isinstance(second, dict):
+                second.pop("origin_op_id", None)
+            if origin[1] != target[0] or first != second:
+                return f"{name} conflicts with the recipient's existing item."
+    return None
 
 
 async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
                          user_b: int, offer_b: dict,
                          reason: str = "Player trade") -> dict:
+    if user_a == user_b:
+        raise TradeError("Cannot trade with yourself.")
+    # Always acquire the two member locks in ID order, before SQLite.
+    from utils.equip_engine import slot_lock
+    first, second = sorted((int(user_a), int(user_b)))
+    async with slot_lock(guild_id, first):
+        async with slot_lock(guild_id, second):
+            return await _execute_trade_locked(guild_id, user_a, offer_a,
+                                               user_b, offer_b, reason)
+
+
+async def _execute_trade_locked(guild_id: int, user_a: int, offer_a: dict,
+                                 user_b: int, offer_b: dict,
+                                 reason: str = "Player trade") -> dict:
     """
     offer_a / offer_b: {"coins": int, "diamonds": int, "items": {name: qty}}
     Everything in offer_a moves from user_a to user_b, and vice versa
@@ -202,6 +274,14 @@ async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
                     await db.execute("ROLLBACK")
                     return {"success": False, "error": f"<@{user_b}> no longer has {qty}x {name}."}
 
+            for sender, receiver, offer in ((user_a, user_b, offer_a),
+                                             (user_b, user_a, offer_b)):
+                conflict = await _trade_item_conflict(
+                    db, guild_id, sender, receiver, offer.get("items", {}))
+                if conflict:
+                    await db.rollback()
+                    return {"success": False, "error": conflict}
+
             await _move_currency(db, guild_id, user_a, user_b,
                                   offer_a.get("coins", 0), offer_a.get("diamonds", 0))
             await _move_currency(db, guild_id, user_b, user_a,
@@ -217,6 +297,17 @@ async def execute_trade(guild_id: int, user_a: int, offer_a: dict,
             """, (guild_id, user_a, user_b,
                   json.dumps(offer_a), json.dumps(offer_b), now))
             trade_id = cursor.lastrowid
+            from utils.inventory_activity import record_activity
+            for sender, receiver, offer in ((user_a, user_b, offer_a),
+                                             (user_b, user_a, offer_b)):
+                for name, qty in offer.get("items", {}).items():
+                    for member, other, kind in ((sender, receiver, "trade_sent"),
+                                                (receiver, sender, "trade_received")):
+                        await record_activity(
+                            db, guild_id=guild_id, user_id=member,
+                            event_type=kind, item_name=name, quantity=qty,
+                            source="trade", related_user_id=other,
+                            event_key=f"trade:{trade_id}:{member}:{kind}:{name}")
 
             # Post-move balances, read in the same transaction so the
             # ledger's balance_after is exact, not a racy second read

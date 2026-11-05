@@ -49,6 +49,10 @@ class FakeMember:
 
     def __init__(self, guild, roles=()):
         self.guild = guild
+        self.id = USER
+        guild.get_member = lambda uid: self if uid == USER else None
+        # Discord exposes this attribute; None establishes no active boost.
+        self.premium_since = None
         self.roles = list(roles)
         self.added, self.removed = [], []
         self.fail_add = None
@@ -110,6 +114,11 @@ async def cross(old_xp, new_xp):
         created = await record_crossing(db, GUILD, USER, old_xp, new_xp,
                                         {"balance": 1.0, "diamonds": 1.0},
                                         source="test")
+        # Production updates XP in the same transaction as the crossing. The
+        # retention reconciliation deliberately ignores claims above current XP.
+        await db.execute("INSERT INTO levels (guild_id,user_id,xp) VALUES (?,?,?) "
+                         "ON CONFLICT(guild_id,user_id) DO UPDATE SET xp=excluded.xp",
+                         (GUILD, USER, new_xp))
         await db.commit()
     return created
 

@@ -183,12 +183,20 @@ class MVP(commands.Cog):
                         # Remove from all current holders
                         for m in guild.members:
                             if mvp_role in m.roles and m.id != mvp_user_id:
-                                try:
-                                    await m.remove_roles(
-                                        mvp_role,
-                                        reason="MVP cycle reset")
-                                except Exception:
-                                    pass
+                                from utils.equip_engine import slot_lock
+                                from utils.timed_ownership import role_removal_blocked
+                                async with slot_lock(guild.id, m.id):
+                                    if mvp_role in m.roles:
+                                        kept = await role_removal_blocked(
+                                            guild.id, m.id, int(mvp_role_id),
+                                            retiring="mvp", bot=self.bot, member=m)
+                                        if kept:
+                                            print(f"[MVP] Keeping MVP role {mvp_role_id} for {m.id}: {kept}")
+                                        else:
+                                            try:
+                                                await m.remove_roles(mvp_role, reason="MVP cycle reset")
+                                            except Exception:
+                                                pass
                         # Give to new MVP
                         try:
                             await mvp_member.add_roles(
