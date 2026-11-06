@@ -141,6 +141,11 @@ async def get_rank_card_data(guild_id: int, user_id: int,
         grid_candidates.append({
             **it,
             "icon_url": (catalog["icon_url"] or "").strip(),
+            # The exact current Shop listing URL, kept SEPARATE from the
+            # catalog URL on purpose: both are valid raw-image fallbacks
+            # and the renderer needs to try them in a defined order. It is
+            # filled in below, read-only, and never written back.
+            "listing_icon_url": "",
             "rarity": catalog["rarity"],
             "value_currency": catalog["value_currency"],
             "value_amount": catalog["value_amount"],
@@ -160,15 +165,48 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     # prepared alias against (never guessed, never written).
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            missing = [it for it in grid_candidates if not it["icon_url"]]
-            if missing:
-                from utils.shop_emoji import find_listing_icon_urls
-                found = await find_listing_icon_urls(
-                    db, guild_id, [it["item_name"] for it in missing])
-                for it in missing:
-                    it["icon_url"] = found.get(it["item_name"], "")
-            from utils.shop_emoji import attach_prepared_emojis
+            from utils.shop_emoji import attach_prepared_emojis, find_listing_icon_urls
+            # Pass 1: the catalog row's own icon_url — the URL Shop
+            # preparation aliased — when that row exists and is current.
             await attach_prepared_emojis(db, guild_id, grid_candidates)
+            # Pass 2: a NON-EMPTY but stale catalog icon_url must not hide a
+            # prepared emoji that was aliased against the listing's current
+            # URL. `item_catalog` is written when a Shop item is SAVED, so a
+            # listing saved before that write path (or re-imaged afterwards)
+            # carries an old URL while the emoji is prepared against the new
+            # one. Anything still unresolved is retried against its exact,
+            # unique, guild-scoped listing icon_url — never guessed, never
+            # written back into item_catalog.
+            #
+            # The listing URL is ALSO kept on the item -- in its own field,
+            # `listing_icon_url` -- as a raw image fallback, restoring the
+            # pre-repair behaviour where the renderer could still draw an
+            # icon with nothing prepared. It deliberately does NOT overwrite
+            # `icon_url`: the catalog URL stays intact as the third source,
+            # because either URL can be the live one (a listing can rot
+            # while the catalog row is still good, and vice versa). Order at
+            # draw time, in _fetch_item_icon():
+            #
+            #   prepared Discord CDN -> current listing URL -> catalog URL
+            #   -> placeholder
+            #
+            # It is resolved for EVERY grid item, not only the unresolved
+            # ones, so an item whose emoji already came from the catalog
+            # alias still has its listing URL when the CDN asset fails.
+            # Ambiguous listings are absent from `found` by construction
+            # (find_listing_icon_urls only returns a single exact
+            # guild-scoped match), so nothing is ever guessed here.
+            found = await find_listing_icon_urls(
+                db, guild_id, [it["item_name"] for it in grid_candidates])
+            for it in grid_candidates:
+                it["listing_icon_url"] = found.get(it["item_name"], "")
+            unresolved = [it for it in grid_candidates if not it.get("app_emoji")]
+            if unresolved:
+                listing_candidates = [
+                    {"icon_url": it["listing_icon_url"]} for it in unresolved]
+                await attach_prepared_emojis(db, guild_id, listing_candidates)
+                for it, candidate in zip(unresolved, listing_candidates):
+                    it["app_emoji"] = candidate.get("app_emoji") or ""
     except Exception:
         # A missing/unreadable emoji mapping is an ordinary state, never a
         # reason to fail the whole card. Icons degrade to the placeholder.

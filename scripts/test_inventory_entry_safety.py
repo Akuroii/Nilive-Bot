@@ -109,7 +109,10 @@ class InventorySafetyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(get_page.await_args.kwargs['offset'], 15)
             embed = response.edit_message.await_args.kwargs['embed']
             self.assertIn('Sword', embed.description)
-            self.assertIn('Partial coverage', embed.footer.text)
+            # The coverage statement is a description footnote; the footer
+            # is the agreed branded line alone (no page counter, no note).
+            self.assertIn('Partial coverage', embed.description)
+            self.assertEqual(wallet.INVENTORY_FOOTER_TEXT, embed.footer.text)
             view = response.edit_message.await_args.kwargs['view']
             self.assertIn('Previous', [child.label for child in view.children])
             self.assertNotIn('Next', [child.label for child in view.children])

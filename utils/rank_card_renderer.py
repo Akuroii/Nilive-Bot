@@ -1253,27 +1253,38 @@ async def _fetch_item_icon(session: aiohttp.ClientSession, item: dict) -> Image.
          actually published) served from Discord's CDN -- the agreed icon
          source, and the only one that survives the stored source URL
          rotting, moving, or hiding behind auth.
-      2. The raw http(s) icon_url from the catalog / exact listing match,
-         as a fallback when nothing usable was prepared or the CDN asset
-         is unreachable.
-      3. An icon_url that is itself a custom emoji token (an admin pasted
+      2. `listing_icon_url` -- the EXACT current Shop listing URL, when the
+         guild has exactly one listing under that name. It is tried before
+         the catalog URL because the listing is the storefront's live
+         source: the catalog row is often the stale copy.
+      3. `icon_url` -- the catalog URL, still tried afterwards. Either of
+         the two raw URLs can be the live one, so neither is discarded
+         when the other is present.
+      4. A URL field that is itself a custom emoji token (an admin pasted
          `<:name:id>` instead of a URL) -- parsed and fetched from the CDN.
 
-    Nothing is fabricated: when none of the three yields an image the
-    caller draws the neutral placeholder tile.
+    Nothing is fabricated: when none of them yields an image the caller
+    draws the neutral placeholder tile.
     """
     prepared = (item.get("app_emoji") or "").strip()
     parsed = parse_emoji_input(prepared) if prepared else None
     candidates = []
     if parsed:
         candidates.append(emoji_cdn_url(parsed[0], animated=parsed[2]))
-    raw = (item.get("icon_url") or "").strip()
-    if raw.lower().startswith(("http://", "https://")):
-        candidates.append(raw)
-    else:
-        raw_token = parse_emoji_input(raw) if raw else None
-        if raw_token:
-            candidates.append(emoji_cdn_url(raw_token[0], animated=raw_token[2]))
+    # The current listing first, then the catalog URL. A field that is not
+    # http(s) is treated as a pasted emoji token (legacy admin input).
+    for key in ("listing_icon_url", "icon_url"):
+        raw = (item.get(key) or "").strip()
+        if not raw:
+            continue
+        if raw.lower().startswith(("http://", "https://")):
+            candidates.append(raw)
+        else:
+            raw_token = parse_emoji_input(raw)
+            if raw_token:
+                candidates.append(emoji_cdn_url(raw_token[0], animated=raw_token[2]))
+    # Both fields can hold the same URL; never request it twice.
+    candidates = list(dict.fromkeys(candidates))
     for url in candidates:
         im = await _fetch_image(session, url)
         if im is None:
