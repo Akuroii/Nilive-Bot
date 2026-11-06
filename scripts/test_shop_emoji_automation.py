@@ -944,7 +944,308 @@ class DiscordFailureTests(AutomationTestBase):
         self.assertEqual(self.fake.creates, 0)
 
 
-# ── 4b. the real production uncertain-create case (#7) ─────────────────────
+# ── 4a2. audit: a stale download must never CREATE (external side effect) ──
+class StaleCreationTests(AutomationTestBase):
+    """An obsolete worker must not POST an emoji for an image that is no longer
+    the product's current image.
+
+    Queue fencing alone only protects the ROW. The emoji is an external, durable
+    side effect that is never deleted and keeps consuming quota, so the fence
+    has to reach the point immediately before the POST.
+    """
+
+    async def _start_blocked_pass(self, url):
+        gate = self.images.gate(url)
+        task = asyncio.create_task(self._run_pass())
+        for _ in range(400):
+            if url in self.images.fetches:
+                return gate, task
+            await asyncio.sleep(0.01)
+        self.fail(f"the download of {url} never started")
+
+    async def test_url_changed_mid_download_never_creates_the_old_image(self):
+        self._add_product("Swapped Product")
+        pid = await self._product_id("Swapped Product")
+        self.images.put(url_for(0), (10, 10, 10, 255))
+        self._set_icon(pid, url_for(0))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+
+        gate, task = await self._start_blocked_pass(url_for(0))
+        # Real Dashboard save while the download is blocked.
+        self.images.put(url_for(1), (200, 20, 20, 255))
+        self._set_icon(pid, url_for(1))
+        gate.set()
+        report = await asyncio.wait_for(task, timeout=90)
+
+        self.assertEqual(self.fake.creates, 0,
+                         "URL A must never reach Discord once B is the current image")
+        self.assertEqual(len(self.fake.remote), 0, "no obsolete emoji exists")
+        stale = await self._one(
+            "SELECT COUNT(*) FROM shop_emoji_url_aliases WHERE guild_id=? AND source_url=?",
+            (GUILD, url_for(0)))
+        self.assertEqual(stale[0], 0, "no ready alias may be created for the stale URL")
+        # B survives and is genuinely prepared afterwards.
+        row = await self._one(
+            "SELECT state,source_url FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
+            (GUILD, pid))
+        self.assertIsNotNone(row, "B intent must survive")
+        self.assertEqual(row[1], url_for(1))
+        await self._drain()
+        self.assertEqual(self.fake.creates, 1, "only the current image is uploaded")
+        ready = await self._one(
+            "SELECT e.status FROM shop_emoji_url_aliases a JOIN shop_emoji_assets e "
+            "ON e.application_id=a.application_id AND e.content_hash=a.content_hash "
+            "WHERE a.guild_id=? AND a.source_url=?", (GUILD, url_for(1)))
+        self.assertIsNotNone(ready)
+        self.assertEqual(ready[0], "ready")
+
+    async def test_url_cleared_mid_download_never_creates_the_old_image(self):
+        self._add_product("Cleared Product")
+        pid = await self._product_id("Cleared Product")
+        self.images.put(url_for(2), (11, 22, 33, 255))
+        self._set_icon(pid, url_for(2))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+
+        gate, task = await self._start_blocked_pass(url_for(2))
+        self._set_icon(pid, "")        # real save with the image removed
+        gate.set()
+        await asyncio.wait_for(task, timeout=90)
+
+        self.assertEqual(self.fake.creates, 0,
+                         "a cleared image must not be uploaded")
+        self.assertEqual(len(self.fake.remote), 0)
+        self.assertEqual(self.fake.deletes, 0)
+        self.assertIsNone(await self._queue_state(pid),
+                          "the intent is void, not resurrected")
+
+    async def test_stale_work_consumes_no_quota(self):
+        self._add_product("Quota Product")
+        pid = await self._product_id("Quota Product")
+        self.images.put(url_for(3), (40, 50, 60, 255))
+        self._set_icon(pid, url_for(3))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+
+        gate, task = await self._start_blocked_pass(url_for(3))
+        self.images.put(url_for(4), (61, 71, 81, 255))
+        self._set_icon(pid, url_for(4))
+        gate.set()
+        await asyncio.wait_for(task, timeout=90)
+
+        # Not one asset row may exist for the abandoned image: those rows are
+        # exactly what consume the 100-per-guild allowance.
+        assets = await self._one(
+            "SELECT COUNT(*) FROM shop_emoji_assets WHERE status IN "
+            "('ready','preparing','uncertain')")
+        self.assertEqual(assets[0], 0, "stale work must not occupy quota")
+        await self._drain()
+        self.assertEqual((await self._one(
+            "SELECT COUNT(*) FROM shop_emoji_assets WHERE status IN "
+            "('ready','preparing','uncertain')"))[0], 1, "only the current image")
+
+
+# ── 4a3. audit: stale queue deletions must not destroy newer intent ────────
+class StaleQueueDeletionTests(AutomationTestBase):
+    """`clear_product()` deletes by (guild, product) with no generation fence.
+
+    A worker holding an OLDER listing snapshot would then destroy a newer queue
+    row the Dashboard has just written, losing that intent entirely.
+    """
+
+    async def _row_dict(self, pid):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                f"SELECT {','.join(Q.QUEUE_FIELDS)} FROM shop_emoji_queue "
+                "WHERE guild_id=? AND product_id=?", (GUILD, pid))
+            fetched = await cur.fetchone()
+            return Q._row(fetched) if fetched else None
+
+    async def _resume_stale_worker(self, old_row):
+        """Run `_process_row` with the snapshot a previous pass would hold."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            return await W._process_row(
+                db, self.fake, old_row, list(self.fake.remote), BOT_ID,
+                W._empty_report())
+
+    async def test_disabled_listing_does_not_destroy_a_newer_generation(self):
+        self._add_product("Disabling Product")
+        pid = await self._product_id("Disabling Product")
+        self.images.put(url_for(5), (5, 5, 5, 255))
+        self._set_icon(pid, url_for(5))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        old_row = await self._row_dict(pid)
+        old_generation = old_row["generation"]
+
+        # A newer intent arrives while the old worker is mid-flight.
+        self.images.put(url_for(6), (6, 6, 6, 255))
+        self._set_icon(pid, url_for(6))
+        newer = await self._row_dict(pid)
+        self.assertEqual(newer["source_url"], url_for(6))
+        self.assertGreater(newer["generation"], old_generation)
+
+        # The stale worker now observes a DISABLED listing (its old snapshot).
+        await self._exec("UPDATE shop_items SET enabled=0 WHERE id=?", (pid,))
+        await self._resume_stale_worker(old_row)
+
+        survivor = await self._row_dict(pid)
+        self.assertIsNotNone(
+            survivor,
+            "a stale worker must never delete the queue row for a NEWER generation")
+        self.assertEqual(survivor["generation"], newer["generation"],
+                         "the newer generation must be byte-identical")
+        self.assertEqual(survivor["source_url"], url_for(6))
+
+    async def test_url_less_listing_does_not_destroy_a_newer_generation(self):
+        self._add_product("Blank Product")
+        pid = await self._product_id("Blank Product")
+        self.images.put(url_for(7), (7, 7, 7, 255))
+        self._set_icon(pid, url_for(7))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        old_row = await self._row_dict(pid)
+
+        self.images.put(url_for(8), (8, 8, 8, 255))
+        self._set_icon(pid, url_for(8))
+        newer = await self._row_dict(pid)
+
+        # The stale worker sees the image as absent (its own older snapshot).
+        await self._exec("UPDATE shop_items SET icon_url='' WHERE id=?", (pid,))
+        await self._resume_stale_worker(old_row)
+
+        survivor = await self._row_dict(pid)
+        self.assertIsNotNone(survivor, "the newer intent must survive")
+        self.assertEqual(survivor["generation"], newer["generation"])
+        self.assertEqual(survivor["source_url"], url_for(8))
+
+    async def test_deleted_listing_does_not_destroy_a_newer_generation(self):
+        self._add_product("Vanishing Product")
+        pid = await self._product_id("Vanishing Product")
+        self.images.put(url_for(9), (9, 9, 9, 255))
+        self._set_icon(pid, url_for(9))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        old_row = await self._row_dict(pid)
+        newer = await self._row_dict(pid)
+        await self._resume_stale_worker(old_row)
+        # Nothing changed, so the row is legitimately finished and removed.
+        self.assertIsNone(await self._row_dict(pid))
+
+    async def test_reactivate_cannot_reset_a_newer_intent(self):
+        """An old Backfill snapshot must not revive/reset a newer row."""
+        self._add_product("Reactivate Product")
+        pid = await self._product_id("Reactivate Product")
+        self.images.put(url_for(10), (10, 10, 10, 255))
+        self._set_icon(pid, url_for(10))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        stale = await self._row_dict(pid)
+
+        # A newer URL arrives after the Backfill snapshot was read.
+        self.images.put(url_for(11), (11, 11, 11, 255))
+        self._set_icon(pid, url_for(11))
+        newer = await self._row_dict(pid)
+
+        # The stale Backfill's explicit reactivation must not touch it.
+        async with aiosqlite.connect(DB_PATH) as db:
+            changed = await Q.reactivate(db, GUILD, pid,
+                                         expect_generation=stale["generation"],
+                                         expect_source_url=stale["source_url"])
+        self.assertFalse(changed, "a stale reactivation must be refused")
+        after = await self._row_dict(pid)
+        self.assertEqual(after["generation"], newer["generation"])
+        self.assertEqual(after["source_url"], url_for(11))
+        self.assertEqual(after["attempts"], newer["attempts"])
+
+
+# ── 4a4. audit: the fence cannot be bypassed via the uncertain/remap paths ─
+class FenceCoverageTests(AutomationTestBase):
+    """Every path that can reach Discord must pass through the fence."""
+
+    async def test_all_creation_sites_are_fenced(self):
+        """Structural proof that no creation call can bypass validate_source."""
+        source = (ROOT / "utils/shop_emoji.py").read_text(encoding="utf-8")
+        fences = source.count("await _guard_source(validate_source)")
+        self.assertGreaterEqual(
+            fences, 3,
+            "the fence must guard the fresh-create, uncertain-recovery and "
+            "changed-source remap paths")
+        # The fresh-create site specifically: a fence must appear between the
+        # download and _create_claimed in the main path.
+        main = source[source.index("async def _prepare_one"):]
+        download_at = main.index("final_png = await _download_and_normalize(source_url)")
+        create_at = main.index("return await _create_claimed(db, discord, claimed")
+        fence_at = main.index("await _guard_source(validate_source)")
+        self.assertLess(download_at, fence_at,
+                        "the fence must run AFTER the download")
+        self.assertLess(fence_at, create_at,
+                        "the fence must run BEFORE the Discord creation call")
+
+    async def test_worker_supplies_a_fence_to_prepare_one(self):
+        source = (ROOT / "utils/shop_emoji_worker.py").read_text(encoding="utf-8")
+        self.assertIn("validate_source=lambda: _source_still_current(db, row)", source,
+                      "the worker must pass an authoritative staleness fence")
+        self.assertIn("async def _source_still_current", source)
+
+    async def test_fence_rejects_a_disabled_listing(self):
+        """The fence is authoritative about the LISTING, not only the generation."""
+        self._add_product("Fence Disabled")
+        pid = await self._product_id("Fence Disabled")
+        self.images.put(url_for(150), (1, 1, 9, 255))
+        self._set_icon(pid, url_for(150))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+            row = Q._row(await (await db.execute(
+                f"SELECT {','.join(Q.QUEUE_FIELDS)} FROM shop_emoji_queue "
+                "WHERE guild_id=? AND product_id=?", (GUILD, pid))).fetchone())
+            await self._exec("UPDATE shop_items SET enabled=0 WHERE id=?", (pid,))
+            self.assertFalse(await W._source_still_current(db, row),
+                             "a disabled listing must never be created")
+
+    async def test_fence_rejects_a_listing_edit_that_has_not_yet_queued(self):
+        """An edit that has not produced a queue row is still a change."""
+        self._add_product("Fence Pending Edit")
+        pid = await self._product_id("Fence Pending Edit")
+        self.images.put(url_for(151), (2, 3, 4, 255))
+        self._set_icon(pid, url_for(151))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+            row = Q._row(await (await db.execute(
+                f"SELECT {','.join(Q.QUEUE_FIELDS)} FROM shop_emoji_queue "
+                "WHERE guild_id=? AND product_id=?", (GUILD, pid))).fetchone())
+            # Change the listing WITHOUT going through the enqueue hook.
+            await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?",
+                             (url_for(152), pid))
+            self.assertFalse(await W._source_still_current(db, row),
+                             "the listing must be re-read, not trusted")
+
+    async def test_fence_accepts_an_unchanged_listing(self):
+        self._add_product("Fence Unchanged")
+        pid = await self._product_id("Fence Unchanged")
+        self.images.put(url_for(153), (5, 6, 7, 255))
+        self._set_icon(pid, url_for(153))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+            row = Q._row(await (await db.execute(
+                f"SELECT {','.join(Q.QUEUE_FIELDS)} FROM shop_emoji_queue "
+                "WHERE guild_id=? AND product_id=?", (GUILD, pid))).fetchone())
+            self.assertTrue(await W._source_still_current(db, row),
+                            "normal work must still be allowed")
+
+
+# ── 4b. generation fencing ──────────────────────────────────────────────────# ── 4b. generation fencing ──────────────────────────────────────────────────
 class ProductionUncertainCreateTests(AutomationTestBase):
     """The historical production outcome: ``عصير المجرات: uncertain`` /
     "Discord's create response did not confirm the expected emoji."
@@ -1724,6 +2025,13 @@ class RenameCursorScopeTests(AutomationTestBase):
         ids_before = {e["id"]: e["name"] for e in self.fake.remote}
         self.assertTrue(target and other, "both guilds must have assets")
         self.legacy_names = legacy_names
+        # REAL before-state, captured so the assertions below compare actual
+        # values rather than an expression with itself.
+        self.ids_before = {
+            row[0]: row[1] for row in await self._all(
+                "SELECT content_hash, emoji_id FROM shop_emoji_assets")}
+        self.aliases_before = sorted(await self._all(
+            "SELECT guild_id, source_url, content_hash FROM shop_emoji_url_aliases"))
         # Prove the interleaving the reviewer described.
         ordered = sorted(target + other)
         self.assertNotEqual(ordered[:2], sorted(target)[:2],
@@ -1746,8 +2054,14 @@ class RenameCursorScopeTests(AutomationTestBase):
         rows = await self._all(
             "SELECT content_hash,emoji_id,creator_guild_id,emoji_name,managed_name "
             "FROM shop_emoji_assets ORDER BY content_hash")
-        self.assertEqual({r[0]: r[1] for r in rows},
-                         {r[0]: r[1] for r in rows}, "ids stable")
+        # GENUINE identity check: every content_hash -> emoji_id mapping must be
+        # unchanged, i.e. no emoji was recreated, rebound or deleted.
+        self.assertEqual({r[0]: r[1] for r in rows}, self.ids_before,
+                         "renaming must preserve every content_hash -> emoji_id pair")
+        self.assertEqual(sorted(await self._all(
+            "SELECT guild_id, source_url, content_hash FROM shop_emoji_url_aliases")),
+            self.aliases_before,
+            "renaming must not touch a single alias row")
         for chash, _eid, guild, name, managed in rows:
             if chash in other:
                 self.assertEqual(guild, OTHER_GUILD)
@@ -1767,11 +2081,15 @@ class RenameCursorScopeTests(AutomationTestBase):
         self.assertEqual(second["renamed"], 0, second)
         self.assertEqual(self.fake.patch_requests, before,
                          "a second scoped run must issue no PATCH")
-        # IDs, hashes and aliases are all preserved.
-        aliases_before = await self._all(
-            "SELECT guild_id,source_url,content_hash FROM shop_emoji_url_aliases "
-            "ORDER BY content_hash")
-        self.assertTrue(aliases_before)
+        # IDs, hashes and aliases are all preserved, compared against a REAL
+        # snapshot taken before the first run.
+        rows = await self._all(
+            "SELECT content_hash, emoji_id FROM shop_emoji_assets")
+        self.assertEqual({r[0]: r[1] for r in rows}, self.ids_before,
+                         "a second run must not rebind any emoji")
+        self.assertEqual(sorted(await self._all(
+            "SELECT guild_id, source_url, content_hash FROM shop_emoji_url_aliases")),
+            self.aliases_before)
         self.assertEqual({e["id"] for e in self.fake.remote}, set(ids_before))
 
 
@@ -1873,10 +2191,15 @@ class DashboardBulkActionTests(AutomationTestBase):
 
 # ── 4m. review round 2, item 1: the control actually exists in the page ────
 class DashboardControlPresenceTests(unittest.TestCase):
-    """Static check that the owner action is really rendered and wired.
+    """SOURCE-LEVEL checks only — the rendered element and the wiring strings.
 
-    A backend endpoint nobody can reach is not a feature, so this asserts on the
-    shipped template and script rather than on the API alone.
+    These are deliberately NOT proof that a user can click the control. A
+    source-string assertion cannot tell whether the page mounts, whether the
+    button is enabled, or whether a click reaches fetch(). The runtime proof
+    lives in ``scripts/test_shop_designer_ui.js``, which renders the real
+    template in a DOM, mounts the real module through the real page lifecycle,
+    dispatches a real MouseEvent and asserts on the outgoing request. Both run
+    in this PR's battery; neither substitutes for the other.
     """
 
     def setUp(self):
@@ -2332,6 +2655,142 @@ class ConcurrentWorkerTests(AutomationTestBase):
         self.assertIsNotNone(ready)
         self.assertEqual(ready[0], "ready")
         self.assertEqual(self.fake.deletes, 0)
+
+
+# ── 6f. audit: the Dashboard report must agree with Backfill ───────────────
+class ReportAgreementTests(AutomationTestBase):
+    """One readiness predicate for Backfill and the report.
+
+    If they disagree, the Dashboard says "everything is prepared" while the
+    worker keeps queueing the same product — or the reverse, which is worse:
+    a product that can never render is reported as complete.
+    """
+
+    async def _plant(self, canon, emoji_id, *, status="ready", guild=None):
+        guild = GUILD if guild is None else guild
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO shop_emoji_assets (application_id,content_hash,"
+                "emoji_name,emoji_id,animated,creator_guild_id,pipeline_version,status) "
+                "VALUES (?,?,?,?,0,?,?,?)",
+                (APP, "e" * 64, "shop_planted12345678", emoji_id, guild,
+                 "rgba-128-png-v1", status))
+            await db.execute(
+                "INSERT OR REPLACE INTO shop_emoji_url_aliases "
+                "(application_id,guild_id,source_url,content_hash) VALUES (?,?,?,?)",
+                (APP, guild, canon, "e" * 64))
+            await db.commit()
+
+    async def _report(self):
+        r = self.client.get("/api/shop-publisher/emojis/report",
+                            headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        return r.get_json()
+
+    async def _backfill_says_queued(self):
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            return (await Q.enqueue_guild_products(db, GUILD))["queued"]
+
+    async def _ready_agreement(self, label, value, index):
+        """Report and Backfill must agree that this asset is NOT prepared."""
+        name = f"Agree {label}"
+        self._add_product(name)
+        pid = await self._product_id(name)
+        canon = url_for(120 + index)
+        self.images.put(canon, (120 + index, 40, 40, 255))
+        self._set_icon(pid, canon)
+        await self._plant(canon, value)
+
+        report = await self._report()
+        self.assertEqual(report["unprepared_products"], 1,
+                         f"the report must not call a {label} emoji_id prepared")
+        self.assertEqual(report["already_ready"], 0)
+        self.assertEqual(await self._backfill_says_queued(), 1,
+                         "and Backfill must agree it is queueable")
+
+    async def test_report_agrees_empty_string_id_is_not_prepared(self):
+        await self._ready_agreement("empty", "", 0)
+
+    async def test_report_agrees_non_numeric_id_is_not_prepared(self):
+        await self._ready_agreement("text", "abc", 1)
+
+    async def test_report_agrees_zero_id_is_not_prepared(self):
+        await self._ready_agreement("zero", 0, 2)
+
+    async def test_report_agrees_null_id_is_not_prepared(self):
+        await self._ready_agreement("null", None, 3)
+
+    async def test_report_agrees_a_valid_id_is_prepared(self):
+        self._add_product("Agree Valid")
+        pid = await self._product_id("Agree Valid")
+        canon = url_for(125)
+        self.images.put(canon, (9, 99, 9, 255))
+        self._set_icon(pid, canon)
+        await self._plant(canon, "960000000000000001")
+        report = await self._report()
+        self.assertEqual(report["already_ready"], 1)
+        self.assertEqual(report["unprepared_products"], 0)
+        self.assertEqual(await self._backfill_says_queued(), 0)
+
+    async def test_invalid_source_urls_are_reported_not_silently_dropped(self):
+        self._add_product("Valid Product")
+        pid = await self._product_id("Valid Product")
+        self.images.put(url_for(130), (1, 2, 3, 255))
+        self._set_icon(pid, url_for(130))
+        # Two products whose stored URL cannot be canonicalized at all.
+        for name, bad in (("Http Product", "http://insecure.example.com/x.png"),
+                          ("Malformed Product", "https://")):
+            await self._exec(
+                "INSERT INTO shop_items (guild_id,name,price,type,icon_url,enabled) "
+                "VALUES (?,?,?,?,?,1)", (GUILD, name, 10, "custom", bad))
+        await self._exec("DELETE FROM shop_emoji_queue")
+
+        report = await self._report()
+        self.assertEqual(report["eligible_products"], 3,
+                         "all three non-blank enabled listings are eligible")
+        self.assertEqual(len(report["invalid_source_products"]), 2,
+                         "unsupported URLs must be reported, not dropped")
+        self.assertEqual(
+            report["already_ready"] + report["unprepared_products"]
+            + len(report["invalid_source_products"]), report["eligible_products"],
+            "ready + unprepared + invalid must ACCOUNT FOR every eligible product")
+        self.assertFalse(report["fully_prepared"],
+                         "cannot claim completion while products were excluded")
+
+    async def test_fully_prepared_is_only_true_when_nothing_is_outstanding(self):
+        self._add_product("Done Product")
+        pid = await self._product_id("Done Product")
+        self.images.put(url_for(140), (4, 5, 6, 255))
+        self._set_icon(pid, url_for(140))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        await self._drain()
+        report = await self._report()
+        self.assertEqual(report["unprepared_products"], 0)
+        self.assertEqual(report["invalid_source_products"], [])
+        self.assertTrue(report["fully_prepared"])
+
+    async def test_deferred_count_is_not_labelled_uncertain(self):
+        """`stats()` counts all future retry rows, not just uncertain creates."""
+        self._add_product("Deferred Product")
+        pid = await self._product_id("Deferred Product")
+        self.images.put(url_for(141), (7, 8, 9, 255))
+        self._set_icon(pid, url_for(141))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        # A plain source failure in backoff: NOT an uncertain Discord create.
+        await self._exec(
+            "UPDATE shop_emoji_queue SET state=?, attempts=1, last_error='source_http_error: 404', "
+            "next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','+600 seconds') "
+            "WHERE guild_id=? AND product_id=?", (Q.STATE_RETRY, GUILD, pid))
+        report = await self._report()
+        self.assertGreaterEqual(report["queue"]["deferred"], 1)
+        self.assertEqual(report["uncertain"], 0,
+                         "a source failure is not an uncertain Discord create")
+        self.assertTrue(report["queue"]["retrying_backoff"] >= 1)
 
 
 # ── 7. read-only consumers ──────────────────────────────────────────────────

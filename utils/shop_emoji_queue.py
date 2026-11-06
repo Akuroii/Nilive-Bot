@@ -240,14 +240,27 @@ async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
     return url
 
 
-async def reactivate(db, guild_id, product_id):
-    """Owner retry of a parked row: new generation, fresh retry budget."""
-    await db.execute(
-        "UPDATE shop_emoji_queue SET state=?, generation=generation+1, attempts=0, "
-        f"next_attempt_at=NULL, last_error=NULL, updated_at={_now_sql()} "
-        "WHERE guild_id=? AND product_id=?",
-        (STATE_QUEUED, guild_id, product_id))
+async def reactivate(db, guild_id, product_id, *, expect_generation=None,
+                     expect_source_url=None):
+    """Owner retry of a parked row: new generation, fresh retry budget.
+
+    ``expect_generation``/``expect_source_url`` turn this into a compare-and-swap
+    so an OLD Backfill snapshot cannot reset a newer intent that arrived after
+    its catalog was read. Returns True when a row was actually reactivated.
+    """
+    sql = ("UPDATE shop_emoji_queue SET state=?, generation=generation+1, attempts=0, "
+           f"next_attempt_at=NULL, last_error=NULL, updated_at={_now_sql()} "
+           "WHERE guild_id=? AND product_id=?")
+    params = [STATE_QUEUED, guild_id, product_id]
+    if expect_generation is not None:
+        sql += " AND generation=?"
+        params.append(int(expect_generation))
+    if expect_source_url is not None:
+        sql += " AND source_url=?"
+        params.append(expect_source_url)
+    cur = await db.execute(sql, tuple(params))
     await db.commit()
+    return bool(cur.rowcount)
 
 
 async def enqueue_guild_products(db, guild_id, *, reason="backfill",
@@ -292,8 +305,9 @@ async def enqueue_guild_products(db, guild_id, *, reason="backfill",
         # Same shape on every path: callers must never see an int here.
         return {"queued": 0, "reactivated": 0}
 
-    # Resolve "already prepared" with the SAME canonicalization the alias table
-    # uses, per product, instead of a coarse name/id join.
+    # Resolve "already prepared" through the SAME predicate the Dashboard report
+    # uses, so the two can never disagree. An unusable (non-numeric/zero/NULL)
+    # emoji ID is not prepared and must not suppress backfill.
     ready_urls = set()
     if only_unprepared and app_id:
         for _pid, _name, raw in rows:
@@ -330,8 +344,10 @@ async def enqueue_guild_products(db, guild_id, *, reason="backfill",
                 # /emojis/retry endpoint uses. Calling enqueue_product() here
                 # would preserve the parked state for an unchanged URL, so the
                 # row would be reported as queued while due() still ignored it.
-                await reactivate(db, guild_id, pid)
-                reactivated += 1
+                if await reactivate(db, guild_id, pid,
+                                    expect_generation=existing["generation"],
+                                    expect_source_url=existing["source_url"]):
+                    reactivated += 1
                 continue
             if same_url and existing["state"] in (STATE_QUEUED, STATE_RETRY):
                 # Already pending for this URL: true no-op (kept for clarity even
@@ -341,6 +357,32 @@ async def enqueue_guild_products(db, guild_id, *, reason="backfill",
                                  reason=reason) is not None:
             queued += 1
     return {"queued": queued, "reactivated": reactivated}
+
+
+async def usable_emoji_id_for(db, application_id, guild_id, canonical_url):
+    """The emoji ID a product's CURRENT image resolves to, if it is usable.
+
+    Single source of truth for "prepared successfully". Backfill, the Dashboard
+    report and the worker all call this, so they can never disagree about
+    whether a product still needs work. "Usable" is the read-side rule
+    (``shop_emoji._valid_emoji_id``: a positive numeric ID), because an ID that
+    Inventory and Rank cannot render is not prepared, whatever its row says.
+    """
+    if not canonical_url:
+        return None
+    from utils.shop_emoji import _valid_emoji_id
+
+    cur = await db.execute(
+        "SELECT e.emoji_id FROM shop_emoji_url_aliases a "
+        "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
+        "  AND e.content_hash=a.content_hash "
+        "WHERE a.application_id=? AND a.guild_id=? AND a.source_url=? "
+        "AND e.status='ready' ORDER BY e.emoji_id",
+        (application_id, guild_id, canonical_url))
+    for (emoji_id,) in await cur.fetchall():
+        if _valid_emoji_id(emoji_id):
+            return str(emoji_id)
+    return None
 
 
 async def _resolves_ready(db, application_id, guild_id, canonical_url):
@@ -353,22 +395,46 @@ async def _resolves_ready(db, application_id, guild_id, canonical_url):
     backfill — otherwise the product looks prepared and is permanently
     invisible. There is exactly one definition, imported from the consumer path.
     """
-    if not canonical_url:
-        return False
-    from utils.shop_emoji import _valid_emoji_id
-
-    cur = await db.execute(
-        "SELECT e.emoji_id FROM shop_emoji_url_aliases a "
-        "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
-        "  AND e.content_hash=a.content_hash "
-        "WHERE a.application_id=? AND a.guild_id=? AND a.source_url=? "
-        "AND e.status='ready'",
-        (application_id, guild_id, canonical_url))
-    rows = await cur.fetchall()
-    return any(_valid_emoji_id(row[0]) for row in rows)
+    return await usable_emoji_id_for(
+        db, application_id, guild_id, canonical_url) is not None
 
 
 # ── Backfill authorisation (owner-gated discovery) ──────────────────────────
+async def classify_catalog(db, guild_id, application_id=None):
+    """Every eligible listing, split into prepared / unprepared / unsupported.
+
+    The Dashboard report is built from this so its numbers are BY CONSTRUCTION
+    the same partition Backfill acts on: a product is either already usable, or
+    queueable, or its stored URL cannot be used at all. Nothing is silently
+    dropped, and ``fully_prepared`` therefore cannot be true while an eligible
+    product was excluded from the accounting.
+    """
+    from utils.shop_emoji import configured_application_id
+
+    app_id = str(application_id or configured_application_id() or "")
+    cur = await db.execute(
+        "SELECT id,name,icon_url FROM shop_items WHERE guild_id=? "
+        "AND icon_url IS NOT NULL AND TRIM(icon_url)<>'' AND COALESCE(enabled,1)=1 "
+        "ORDER BY id", (guild_id,))
+    rows = await cur.fetchall()
+
+    prepared, unprepared, unsupported = [], [], []
+    for product_id, name, raw in rows:
+        canon = queue_source_url(raw)
+        if canon is None:
+            unsupported.append({"product_id": int(product_id), "name": name,
+                                "icon_url": raw,
+                                "reason": "The stored image URL is not a usable HTTPS URL."})
+            continue
+        emoji_id = (await usable_emoji_id_for(db, app_id, guild_id, canon)
+                    if app_id else None)
+        entry = {"product_id": int(product_id), "name": name, "source_url": canon,
+                 "emoji_id": emoji_id}
+        (prepared if emoji_id else unprepared).append(entry)
+    return {"eligible": len(rows), "prepared": prepared,
+            "unprepared": unprepared, "unsupported": unsupported}
+
+
 async def authorize_backfill(db, guild_id, *, actor=None):
     """Record that an owner asked for this guild's existing catalog to be filled.
 
@@ -408,12 +474,23 @@ async def record_sweep(db, guild_id, result):
 
 
 # ── Lifecycle ───────────────────────────────────────────────────────────────
-async def clear_product(db, guild_id, product_id):
-    """Drop queued work for a product (deleted listing, cleared image)."""
-    await db.execute(
-        "DELETE FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
-        (guild_id, product_id))
+async def clear_product(db, guild_id, product_id, *, generation=None):
+    """Drop queued work for a product (deleted listing, cleared image).
+
+    With ``generation`` the delete is a compare-and-swap: a worker acting on an
+    older snapshot must never destroy intent that was written after it. Returns
+    True when a row was removed.
+    """
+    if generation is None:
+        cur = await db.execute(
+            "DELETE FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
+            (guild_id, product_id))
+    else:
+        cur = await db.execute(
+            "DELETE FROM shop_emoji_queue WHERE guild_id=? AND product_id=? "
+            "AND generation=?", (guild_id, product_id, int(generation)))
     await db.commit()
+    return bool(cur.rowcount)
 
 
 async def prune_orphans(db):
@@ -470,7 +547,19 @@ async def stats(db, *, guild_id=None):
         " SUM(CASE WHEN last_error IS NOT NULL AND state<>'parked' THEN 1 ELSE 0 END), "
         " MAX(attempts) FROM shop_emoji_queue" + where, tuple(params))
     total, parked, deferred, errored, max_attempts = await cur.fetchone()
+    # `deferred` is EVERY row in a future backoff — a source failure waiting to
+    # be retried as much as an uncertain create pending reconciliation. Callers
+    # must not label the whole count "uncertain"; `retrying_backoff` names the
+    # same set explicitly, and `uncertain_queue` counts only genuinely ambiguous
+    # creations so the two can never be confused in the UI.
+    cur = await db.execute(
+        "SELECT COUNT(*) FROM shop_emoji_queue WHERE state='retry' "
+        "AND last_error LIKE '%uncertain%' " + ("AND guild_id=?" if guild_id is not None else ""),
+        tuple(params))
+    uncertain_queue = (await cur.fetchone())[0] or 0
     return {"total": total or 0, "parked": parked or 0, "deferred": deferred or 0,
+            "retrying_backoff": deferred or 0,
+            "uncertain": uncertain_queue,
             "errored": errored or 0, "max_attempts": max_attempts or 0}
 
 

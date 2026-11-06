@@ -219,8 +219,11 @@ def api_shop_emoji_retry():
             for pid in product_ids:
                 if not isinstance(pid, int) or isinstance(pid, bool):
                     continue
-                if await queue.descriptor(db, guild_id, pid):
-                    await queue.reactivate(db, guild_id, pid)
+                current = await queue.descriptor(db, guild_id, pid)
+                if current and await queue.reactivate(
+                        db, guild_id, pid,
+                        expect_generation=current["generation"],
+                        expect_source_url=current["source_url"]):
                     reactivated += 1
                 else:
                     # Never queued (or already finished): queue it now.
@@ -284,11 +287,15 @@ async def _table_exists(db, name):
 def api_shop_emoji_report():
     """Operational report: what a backfill would do, and what is stuck.
 
-    Read-only. Separates eligible products, already-ready products, the assets a
-    backfill would still have to attempt, reuse through SHARED CONTENT (the real
-    dedupe axis: several products, identical image bytes, one emoji), quota
-    usage, permanently failed products, uncertain assets and rows waiting on a
-    retry.
+    Read-only. Built from ``queue.classify_catalog()`` — the SAME partition
+    Backfill acts on — so the numbers here can never disagree with what the
+    worker will actually queue. In particular an asset whose ``emoji_id`` is not
+    a positive numeric value is NOT "already prepared", because Inventory and
+    Rank cannot render it.
+
+    ``eligible = already_ready + unprepared_products + invalid_source_products``
+    always holds, so "fully prepared" cannot be claimed while some eligible
+    product was excluded from the accounting.
     """
     from utils import shop_emoji_queue as queue
     from utils.shop_emoji import GUILD_ASSET_LIMIT, configured_application_id
@@ -299,34 +306,17 @@ def api_shop_emoji_report():
 
     async def run():
         async with aiosqlite.connect(DB_PATH) as db:
-            rows = await (await db.execute(
-                "SELECT id,name,icon_url FROM shop_items WHERE guild_id=? "
-                "AND icon_url IS NOT NULL AND TRIM(icon_url)<>'' "
-                "AND COALESCE(enabled,1)=1", (guild_id,))).fetchall()
-            eligible = len(rows)
-            url_owner = {}       # canonical url -> product count
-            ready_urls, unprepared_urls = set(), set()
-            for _pid, _name, raw in rows:
-                canon = queue_source_url(raw)
-                if not canon:
-                    continue
-                url_owner[canon] = url_owner.get(canon, 0) + 1
-                found = await (await db.execute(
-                    "SELECT 1 FROM shop_emoji_url_aliases a "
-                    "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
-                    "  AND e.content_hash=a.content_hash "
-                    "WHERE a.application_id=? AND a.guild_id=? AND a.source_url=? "
-                    "AND e.status='ready' LIMIT 1", (app_id, guild_id, canon))).fetchone()
-                (ready_urls if found else unprepared_urls).add(canon)
+            catalog = await queue.classify_catalog(db, guild_id, app_id)
 
-            # Content reuse, measured on what is already prepared: products
-            # whose current image resolves to the same content hash.
+            # Reuse through shared CONTENT is the real dedupe axis (several
+            # products, identical bytes, one emoji) — distinct from shared URLs.
             content_users = await (await db.execute(
                 "SELECT a.content_hash, COUNT(DISTINCT a.source_url) "
                 "FROM shop_emoji_url_aliases a "
                 "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
                 "  AND e.content_hash=a.content_hash "
                 "WHERE a.application_id=? AND a.guild_id=? AND e.status='ready' "
+                "AND e.emoji_id IS NOT NULL AND e.emoji_id<>'' "
                 "GROUP BY a.content_hash HAVING COUNT(DISTINCT a.source_url) > 1",
                 (app_id, guild_id))).fetchall()
 
@@ -341,19 +331,29 @@ def api_shop_emoji_report():
                 "AND status IN ('ready','preparing','uncertain') AND creator_guild_id=?",
                 (app_id, guild_id))).fetchone())[0]
 
+            url_counts = {}
+            for entry in catalog["prepared"] + catalog["unprepared"]:
+                url_counts[entry["source_url"]] = url_counts.get(
+                    entry["source_url"], 0) + 1
+
             stats = (await queue.stats(db, guild_id=guild_id)) \
                 if await _table_exists(db, "shop_emoji_queue") else {}
+            parked = (await queue.parked_rows(db, guild_id=guild_id)
+                      if await _table_exists(db, "shop_emoji_queue") else [])
+
+            invalid = catalog["unsupported"]
             return {"success": True,
-                    "eligible_products": eligible,
-                    "already_ready": sum(url_owner[u] for u in ready_urls),
-                    "unprepared_products": sum(url_owner[u] for u in unprepared_urls),
-                    "distinct_urls": len(url_owner),
-                    # An attempt per unprepared URL; identical bytes will still
-                    # collapse to one asset once hashed, which is why this is a
-                    # ceiling and not a promise.
-                    "assets_to_attempt_max": len(unprepared_urls),
-                    "shared_url_groups": sorted(
-                        c for c in url_owner.values() if c > 1),
+                    "eligible_products": catalog["eligible"],
+                    "already_ready": len(catalog["prepared"]),
+                    "unprepared_products": len(catalog["unprepared"]),
+                    "invalid_source_products": invalid,
+                    "invalid_source_count": len(invalid),
+                    # Only truthful when nothing is outstanding AND nothing was
+                    # excluded from the ready/unprepared accounting.
+                    "fully_prepared": (not catalog["unprepared"] and not invalid),
+                    "distinct_urls": len(url_counts),
+                    "assets_to_attempt_max": len(catalog["unprepared"]),
+                    "shared_url_groups": sorted(c for c in url_counts.values() if c > 1),
                     "content_reused_groups": [{"content_hash": h, "products": n}
                                               for h, n in content_users],
                     "quota": {"used": used, "limit": GUILD_ASSET_LIMIT},
@@ -361,8 +361,11 @@ def api_shop_emoji_report():
                     "uncertain": uncertain_n,
                     "failed_or_missing": failed_n,
                     "queue": stats,
-                    "parked": (await queue.parked_rows(db, guild_id=guild_id)
-                               if await _table_exists(db, "shop_emoji_queue") else [])}
+                    # `stats()["deferred"]` is every row in a future backoff,
+                    # NOT only uncertain Discord creations — source failures and
+                    # retries are counted there too. Kept separate from
+                    # `uncertain` so the UI never mislabels them.
+                    "parked": parked}
 
     try:
         return jsonify(run_async(run()))

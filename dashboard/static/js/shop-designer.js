@@ -332,8 +332,12 @@ window.NERO = window.NERO || {};
                     ['Eligible products (whole catalog)', report.eligible_products],
                     ['Already prepared', report.already_ready],
                     ['Still unprepared', report.unprepared_products],
+                    ['Unusable image URL (needs fixing first)', report.invalid_source_count],
                     ['Waiting in the queue', queue.total],
-                    ['Deferred (uncertain, awaiting a read-only recheck)', queue.deferred],
+                    // Deferred ≠ uncertain: this counts EVERY row in a future
+                    // backoff, including plain source failures.
+                    ['Retrying after a delay (not necessarily uncertain)', queue.deferred],
+                    ['Uncertain creations awaiting a read-only recheck', queue.uncertain],
                     ['Given up (parked)', queue.parked],
                     ['Application emojis in use here', (report.quota || {}).used]
                 ];
@@ -341,6 +345,16 @@ window.NERO = window.NERO || {};
                     catalogEmojiReport.appendChild(
                         make(doc, 'div', 'sd-muted', pair[0] + ': ' + (pair[1] === undefined || pair[1] === null ? 0 : pair[1])));
                 });
+                var invalid = report.invalid_source_products || [];
+                if (invalid.length) {
+                    catalogEmojiReport.appendChild(make(doc, 'div', 'sd-product-name',
+                        'Products that cannot be prepared until their image URL is fixed'));
+                    invalid.slice(0, 25).forEach(function (row) {
+                        catalogEmojiReport.appendChild(make(doc, 'div', 'sd-muted',
+                            (row.name || ('Product #' + row.product_id)) + ' — ' +
+                            (row.reason || 'unsupported image URL')));
+                    });
+                }
                 if (report.quota_limited) {
                     catalogEmojiReport.appendChild(make(doc, 'div', 'sd-status sd-error',
                         'This server has reached its 100-emoji limit. New images stay queued and are reported below; nothing is deleted automatically.'));
@@ -357,8 +371,9 @@ window.NERO = window.NERO || {};
                 }
             }
 
-            function refreshCatalogEmojiReport() {
+            function refreshCatalogEmojiReport(options) {
                 if (catalogEmojiInFlight) return Promise.resolve(null);
+                var keepStatus = !!(options && options.keepStatus);
                 return requestJSON(EMOJI_REPORT_URL, { method: 'GET' }).then(function (data) {
                     if (destroyed || ctx.isDestroyed()) return null;
                     if (!data || data.success !== true) {
@@ -366,9 +381,23 @@ window.NERO = window.NERO || {};
                         return null;
                     }
                     renderCatalogEmojiReport(data);
-                    setCatalogEmojiStatus(data.unprepared_products
-                        ? data.unprepared_products + ' product(s) still need an icon.'
-                        : 'Every eligible product in this server has a prepared icon.');
+                    // After a backfill the caller has a more specific message
+                    // ("Queued N product(s)…") that must survive this refresh.
+                    if (!keepStatus) {
+                        if (data.unprepared_products) {
+                            setCatalogEmojiStatus(data.unprepared_products +
+                                ' product(s) still need an icon.');
+                        } else if ((data.invalid_source_products || []).length) {
+                            setCatalogEmojiStatus((data.invalid_source_products || []).length +
+                                ' product(s) have an image URL that cannot be used, so they ' +
+                                'cannot be prepared yet.', true);
+                        } else if (data.fully_prepared) {
+                            setCatalogEmojiStatus(
+                                'Every eligible product in this server has a prepared icon.');
+                        } else {
+                            setCatalogEmojiStatus('Some products still need attention.');
+                        }
+                    }
                     return data;
                 }, function (error) {
                     if (!destroyed && !ctx.isDestroyed()) {
@@ -404,7 +433,7 @@ window.NERO = window.NERO || {};
                         'Queued ' + queued + ' product(s) for this server' +
                         (reactivated ? ' and re-activated ' + reactivated + ' parked product(s)' : '') +
                         '. Uploads run in the background in small batches; refresh to follow progress.');
-                    return refreshCatalogEmojiReport();
+                    return refreshCatalogEmojiReport({ keepStatus: true });
                 }, function (error) {
                     catalogEmojiInFlight = false;
                     updateEmojiControls();

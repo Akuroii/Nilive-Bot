@@ -1469,8 +1469,37 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
     return outcome, remote
 
 
+class StalePreparation(ShopEmojiError):
+    """The image stopped being what the product currently uses.
+
+    Raised by the injected ``validate_source`` hook after the download and
+    BEFORE any Discord creation, so an obsolete worker cannot leave a durable,
+    undeletable emoji behind for an image the storefront no longer shows.
+    """
+
+    def __init__(self, message="The product's image changed during preparation."):
+        super().__init__(message, code="stale_preparation", status=409)
+
+
+async def _guard_source(validate_source):
+    """Run the caller's staleness fence, if any, exactly where it belongs."""
+    if validate_source is None:
+        return True
+    return bool(await validate_source())
+
+
 async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
-                       retry_uncertain, acknowledgement, emoji_name=None):
+                       retry_uncertain, acknowledgement, emoji_name=None,
+                       validate_source=None):
+    """Prepare one product image, with a caller-supplied staleness fence.
+
+    ``validate_source`` is awaited after the image has been downloaded and
+    normalised, immediately before any creation request. It must return True
+    only while the product's current image is still the one being prepared.
+    A False return raises :class:`StalePreparation` before the POST, so no
+    external side effect can be produced for an obsolete image. All creation
+    paths (fresh create, uncertain recovery, remap) are covered.
+    """
     alias_asset = await _get_alias_asset(db, discord.application_id, guild_id, source_url)
     if alias_asset and alias_asset["status"] in {"preparing", "uncertain"}:
         original_asset = alias_asset
@@ -1479,6 +1508,8 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         # old asset ready. A later request must not inherit an unmarked ready
         # alias after an error, crash, or unacknowledged preparation attempt.
         final_png = await _download_and_normalize(source_url)
+        if not await _guard_source(validate_source):
+            raise StalePreparation()
         changed_hash = content_identity(final_png)
         source_changed = changed_hash != original_asset["content_hash"]
         recovery_not_before = original_asset.get("recovery_not_before")
@@ -1513,6 +1544,8 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                 remote = await discord.list_emojis()
             # Only this acknowledged flow may move the alias and clear its
             # durable recovery requirement. The old hash is never re-POSTed.
+            if not await _guard_source(validate_source):
+                raise StalePreparation()
             return await _remap_changed_source(
                 db, discord, guild_id, source_url, alias_asset, final_png, remote, bot_user_id,
                 emoji_name=emoji_name)
@@ -1537,6 +1570,12 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         alias_asset = await _refresh_ready_asset(db, alias_asset, remote, bot_user_id)
 
     final_png = await _download_and_normalize(source_url)
+    # ── FENCE ── the download is the long operation. If the product's image
+    # changed while it was in flight, stop HERE: no asset row (which would
+    # consume quota), no alias, and no Discord request may be produced for an
+    # image the storefront no longer shows.
+    if not await _guard_source(validate_source):
+        raise StalePreparation()
     content_hash = content_identity(final_png)
     if old_alias_asset and old_alias_asset.get("recovery_ack_required"):
         if content_hash == old_alias_asset["content_hash"]:
@@ -1553,6 +1592,8 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                     "use acknowledged recovery after quarantine to remap it.",
                     code="source_changed_recovery_required", status=409)
             remote = await discord.list_emojis()
+            if not await _guard_source(validate_source):
+                raise StalePreparation()
             return await _remap_changed_source(
                 db, discord, guild_id, source_url, old_alias_asset, final_png, remote, bot_user_id,
                 emoji_name=emoji_name)
@@ -1613,6 +1654,10 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         return _result(asset, duplicates=duplicates), remote
     if content_identity(final_png) != claimed["content_hash"]:
         return _result(claimed, code="content_changed", message="The normalized content changed before creation."), remote
+    # ── FENCE ── the download is finished; the product may have changed while it
+    # was in flight. Verify against the caller's authority before creating.
+    if not await _guard_source(validate_source):
+        raise StalePreparation()
     return await _create_claimed(db, discord, claimed, final_png, bot_user_id), remote
 
 

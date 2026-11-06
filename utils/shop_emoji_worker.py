@@ -164,6 +164,31 @@ async def _rename_or_defer(db, discord, asset, target, report):
     return await SE._get_asset(db, asset["application_id"], asset["content_hash"])
 
 
+async def _source_still_current(db, row):
+    """Is the image this worker is preparing STILL the product's current image?
+
+    Called after the download finishes and immediately before any creation
+    request. Two independent facts must both still hold:
+
+    * the queue generation this worker claimed is still the queued intent
+      (nothing newer was written), and
+    * ``shop_items.icon_url`` still canonicalizes to the URL being prepared.
+
+    Either check alone is insufficient. The generation catches a Dashboard save
+    that queued a new URL; the listing check also catches an edit that has not
+    yet produced a queue row, and a listing that was disabled or cleared.
+    """
+    if not await Q.still_current(db, row):
+        return False
+    listing = await _load_listing(db, row["guild_id"], row["product_id"])
+    if listing is None:
+        return False
+    _id, _gid, _name, icon_url, enabled = listing
+    if not enabled:
+        return False
+    return Q.queue_source_url(icon_url) == row["source_url"]
+
+
 async def _asset_by_hash(db, application_id, content_hash):
     if not content_hash:
         return None
@@ -181,19 +206,33 @@ async def _process_row(db, discord, row, remote, bot_user_id, report):
     guild_id, product_id = row["guild_id"], row["product_id"]
     listing = await _load_listing(db, guild_id, product_id)
     if listing is None:
-        await Q.mark_done(db, row)      # listing deleted: intent is void
+        # Intent is void, but only for THIS generation: mark_done is the
+        # compare-and-swap, so a newer row written meanwhile survives intact.
+        if not await Q.mark_done(db, row):
+            report["stale"] += 1
+            return "stale_listing_gone"
         report["skipped"] += 1
         return "listing_gone"
     _id, _gid, item_name, icon_url, enabled = listing
     if not enabled:
-        await Q.mark_done(db, row)
-        await Q.clear_product(db, guild_id, product_id)
+        # Fenced completion FIRST. Only if this generation is still the current
+        # intent may the row be removed; a failed CAS means the Dashboard has
+        # already written newer intent, which must not be destroyed.
+        if not await Q.mark_done(db, row):
+            report["stale"] += 1
+            return "stale_listing_disabled"
+        await Q.clear_product(db, guild_id, product_id,
+                              generation=row["generation"])
         report["skipped"] += 1
         return "listing_disabled"
 
     current_url = Q.queue_source_url(icon_url)
     if current_url is None:
-        await Q.clear_product(db, guild_id, product_id)
+        # Same rule: never delete a generation this worker does not own.
+        if not await Q.clear_product(db, guild_id, product_id,
+                                     generation=row["generation"]):
+            report["stale"] += 1
+            return "stale_no_usable_url"
         report["skipped"] += 1
         return "no_usable_url"
     if current_url != row["source_url"]:
@@ -238,7 +277,20 @@ async def _process_row(db, discord, row, remote, bot_user_id, report):
             db, discord, guild_id, current_url, remote, bot_user_id,
             False, False,
             emoji_name=lambda h: SE.safe_emoji_name(
-                SE.readable_emoji_name(label or "", h), h))
+                SE.readable_emoji_name(label or "", h), h),
+            # Download happens inside _prepare_one; this hook runs after it and
+            # before any creation request, so an obsolete image can never be
+            # uploaded even though the download started while it was current.
+            validate_source=lambda: _source_still_current(db, row))
+    except SE.StalePreparation as exc:
+        # The product's image changed while it was downloading. Nothing was
+        # created. Leave the row alone: if a newer generation exists, the CAS
+        # below protects it; if not, the next pass re-validates from scratch.
+        report["stale"] += 1
+        report["results"].append({"product_id": product_id,
+                                  "code": "stale_preparation",
+                                  "message": str(exc)})
+        return "stale"
     except SE.SourceImageError as exc:
         await Q.mark_failed(db, row, f"{exc.code}: {exc}", retryable=True)
         report["failed"] += 1

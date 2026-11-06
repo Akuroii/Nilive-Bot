@@ -1,22 +1,150 @@
-# PR #122 — Acceptance Report (review round 2)
+# PR #122 — Acceptance Report (audit round 3)
 
 Same PR, same branch. **OPEN / NOT MERGED / NOT DEPLOYED.**
 
 | | |
 |---|---|
 | Branch | `arena/5e11d3cf-nilive-bot` |
-| Final HEAD | `325e65ede308f2e7ef5e0a8d4a03aa65aca0375a` |
+| Audited HEAD | `1f73000293a4c527c39e5ee2bc1fd0f7bffbc503` |
 | Base | `e0ca73853be97c5ebbf1e3dd66e70c76595ecd52` |
-| Previous reviewed HEAD | `ecf60aad0e8ffb07c807eb9f3264ce027d47d54f` |
 
-No replacement implementation, no new branch, no refactor of the queue/worker/
+No replacement implementation, no new branch, no rewrite of the queue/worker/
 preparation/reconciliation core. Inventory (`cogs/wallet.py`), Rank
-(`utils/rank_card_data.py`) and `utils/rank_card_renderer.py` are **byte-identical to
-base** — verified with `git diff --quiet e0ca738 -- <file>`.
+(`utils/rank_card_data.py`) and `utils/rank_card_renderer.py` remain
+**byte-identical to base**.
 
 ---
 
-## 1. The bulk backfill now has a working Dashboard control
+## Round-3 findings — what was wrong and what changed
+
+### 1. A stale download could still CREATE an emoji (critical)
+
+**Confirmed.** `_prepare_one()` downloaded, then went straight into asset
+creation with no revalidation, so a worker that started on URL A while the
+Dashboard switched the product to URL B could still POST an emoji for A — a
+durable, undeletable side effect that consumes guild quota forever. The queue
+fence protected the *row*, not the *world*.
+
+**Repair — a fence placed where the side effect happens.** `_prepare_one()` now
+takes an optional `validate_source` callable and awaits it **exactly once
+between the download and any creation request**. The worker supplies
+`_source_still_current(db, row)`, which re-reads two independent authorities:
+
+* the queue generation it claimed is still the queued intent, and
+* `shop_items.icon_url` still canonicalizes to the URL being prepared, and the
+  listing is still enabled.
+
+Either alone is insufficient: the generation catches a Dashboard save, while the
+listing re-read also catches an edit that has not yet produced a queue row. A
+failed fence raises `SE.StalePreparation` *before* the asset row (quota), the
+alias, or the POST. The fence guards all three creation paths (fresh create,
+uncertain recovery, changed-source remap).
+
+**Evidence** — `StaleCreationTests` (3), each **failing before the fix** for the
+intended reason (`1 != 0` on `fake.creates`):
+`test_url_changed_mid_download_never_creates_the_old_image` (block A → real
+Dashboard save to B → release A → `creates == 0`, no asset, no alias, B survives
+and is then prepared), `test_url_cleared_mid_download_never_creates_the_old_image`,
+`test_stale_work_consumes_no_quota` (no asset row exists, so no quota is spent).
+`FenceCoverageTests` (5) additionally proves the fence sits *after* the download
+and *before* `_create_claimed`, and that it rejects a disabled listing and an
+edit that has not queued yet, while still allowing normal work.
+
+### 2. Two worker branches deleted queue rows without a generation fence (critical)
+
+**Confirmed.** The disabled and no-usable-URL branches called
+`Q.clear_product(db, guild_id, product_id)`, which deletes by
+`(guild_id, product_id)` only; the disabled branch also ignored `mark_done()`'s
+return value. A stale worker destroyed newer intent.
+
+**Repair.** `clear_product(..., generation=)` is now a compare-and-swap and
+returns whether it removed anything. Both branches check the fenced completion
+first and only delete the generation they actually own; a failed CAS reports
+`stale` instead. `reactivate()` gained `expect_generation` /
+`expect_source_url`, and both callers (the Backfill loop and `/emojis/retry`) now
+pass the identity of the snapshot they read, so an old Backfill cannot reset a
+newer intent. The listing-gone branch also respects `mark_done()`.
+
+**Evidence** — `StaleQueueDeletionTests` (4), **failing before** with
+`unexpectedly None` on the survivor row: disabled, URL-less and
+reactivate-snapshot cases all preserve the newer generation byte-for-byte.
+
+### 3. The Dashboard report used the weaker readiness rule (critical)
+
+**Confirmed.** The report classified "prepared" on `status='ready'` alone, so an
+asset with `''`, `'abc'`, `0` or NULL `emoji_id` was reported ready while Backfill
+correctly queued it. Uncanonicalizable URLs were dropped from the accounting
+entirely, so the UI could claim completion with products excluded.
+
+**Repair — one shared predicate.** `queue.usable_emoji_id_for()` is now the only
+definition of "prepared successfully", used by Backfill, the report and the
+worker; it applies `_valid_emoji_id` (positive numeric). `queue.classify_catalog()`
+returns the exact partition Backfill acts on — prepared / unprepared /
+unsupported. The report is built from it, so
+`eligible = already_ready + unprepared + invalid_source_count` holds by
+construction, `fully_prepared` is only true when nothing is outstanding **and**
+nothing was excluded, and unsupported URLs are listed with a reason.
+`stats()` now distinguishes `deferred` (every row in a future backoff) from
+`retrying_backoff` and `uncertain`, and the UI label no longer calls all deferred
+rows "uncertain".
+
+**Evidence** — `ReportAgreementTests` (8), **failing before** on `0 != 1` for
+empty/non-numeric/NULL ids and `KeyError` for the new fields: the four invalid-ID
+cases, the valid-ID case, `invalid_source_products` for `http://` and malformed
+`https://` with a full-accounting assertion, `fully_prepared`, and the
+deferred-vs-uncertain separation.
+
+### 4. A tautological test assertion
+
+**Confirmed.** `test_interleaved_guilds_do_not_skip_the_target_guild` compared
+`{r[0]: r[1] for r in rows}` with itself. It now snapshots the real
+`content_hash -> emoji_id` mapping **and** the full alias table before the
+operation and compares both afterwards; the second scoped test does the same.
+
+### 5. A real browser interaction test (not source-string matching)
+
+The template/JS source assertions are **kept**, and their docstring now states
+plainly that they are not proof of usability. `scripts/test_shop_designer_ui.js`
+adds the runtime proof: it renders the **real template markup** in jsdom, loads
+the **real** `nav-lifecycle.js` and `shop-designer.js`, mounts through the real
+`NERO.lifecycle.mount()`, and dispatches a real `MouseEvent` on the real button.
+
+**28 interaction checks** prove: the button exists, is a real `<button>`,
+is **enabled with an empty roster**, is labelled for the whole catalog; opening
+the page only issues GETs and renders the report into the DOM (including parked
+failure reasons); **one click issues exactly one POST** to
+`/emojis/backfill` carrying `retry_parked:false` and **no `product_ids`**; the
+queued count is reported back to the user and survives the automatic refresh;
+ticking the switch changes the body to `retry_parked":true`; Refresh issues only
+GETs; and a server error is displayed while re-enabling the control.
+
+Building this found two genuine UI bugs, both fixed: the success message was
+immediately overwritten by the follow-up progress refresh (so the owner never
+saw "Queued N product(s)"), and the control was left disabled after a failed
+request.
+
+### 7. The stale catalog key set
+
+Already corrected in the previous round; `test_shop_publisher_api.py` is
+**18 passed** with `app_emoji` in the expected set, and production behaviour was
+not changed to satisfy the assertion.
+
+### 8. Uncertain-create safety — unchanged
+
+No ownership relaxation, no name-only guessing, still never a second POST after
+an ambiguous create. The report keeps the three categories explicitly separate:
+what the double simulates (a 2xx create reply lacking `application_id`/`user`),
+what Discord documents (create/list return the emoji object with ownership
+metadata), and what was actually observed in production (an `uncertain` asset
+with no `emoji_id` and the "did not confirm" message). The exact historical
+response body was never captured, and the report does not claim the fake
+reproduces it.
+
+---
+
+## Round-2 fixes (still in place, re-verified)
+
+### R2-1. The bulk backfill now has a working Dashboard control
 
 **Was.** `POST /shop-publisher/emojis/backfill` existed with no frontend. The old
 controls were roster-bound: *Prepare roster* submitted `draft.products.slice()`, i.e.
@@ -56,7 +184,7 @@ switch that is unchecked by default and confirmed before use.
 
 The static checks matter: an endpoint nobody can reach is not a feature.
 
-## 2. `retry_parked` now genuinely reactivates
+### R2-2. `retry_parked` now genuinely reactivates
 
 **Was.** The parked row passed the guard, then `enqueue_product()` preserved the parked
 state for the unchanged URL. The API reported work that `due()` would never select.
@@ -74,7 +202,7 @@ byte-identical, `reactivated == 0`),
 attempts 0, generation advanced, eligible immediately, **and the worker then creates it**),
 `test_retry_endpoint_still_reactivates_a_parked_product` (the existing endpoint still works).
 
-## 3. Same-URL discovery is now a true no-op
+### R2-3. Same-URL discovery is now a true no-op
 
 **Was.** `enqueue_product()` bumped `generation` on every conflict, and moved `retry` back
 to `queued` while keeping a future `next_attempt_at`.
@@ -96,7 +224,7 @@ generation, so the compare-and-swap fencing is intact.
    1 create, no duplicate.
 4. `test_changed_url_still_bumps_the_generation`.
 
-## 4. One definition of “prepared”
+### R2-4. One definition of “prepared”
 
 **Was.** `_resolves_ready()` accepted any non-NULL `emoji_id`; the consumer path uses
 `_valid_emoji_id()` (positive numeric). An asset with `''`, `'abc'`, `0` or `NULL` rendered
@@ -110,7 +238,7 @@ nowhere yet suppressed backfill — making the product permanently invisible.
 between iterations and produced false failures); a valid positive ID **is** recognised; a
 valid ID with `status='uncertain'` is not.
 
-## 5. Canonicalised URL matching in the name lookup
+### R2-5. Canonicalised URL matching in the name lookup
 
 **Was.** `canonical_label_for_asset()` joined `s.icon_url = a.source_url` and `_labels_for()`
 compared a canonical URL against the raw stored one. An uppercase host or an explicit
@@ -127,7 +255,7 @@ unchanged.
 products sharing identical bytes but written differently, processing order/restart
 independence, and repeated passes issuing **no extra PATCHes**.
 
-## 6. Guild-scoped rename cursor
+### R2-6. Guild-scoped rename cursor
 
 **Was.** The `MAX(content_hash)` raw-page cursor omitted the `creator_guild_id` filter that
 `_rename_candidates()` applies, so another guild's interleaved hashes could advance the
@@ -144,7 +272,7 @@ renames **every** target-guild asset and **no** other-guild asset; emoji IDs are
 a second scoped run performs **zero** PATCHes. `LegacyRenameTests` (60 assets, 3 pages,
 resume, zero second-run PATCHes) still passes.
 
-## 7. The stale catalog key set
+### R2-7. The stale catalog key set
 
 `test_shop_publisher_api.py::test_catalog_products_carry_the_category_link` expected a
 literal catalog key set that predated the `app_emoji` field added by PR #121. I confirmed
@@ -156,7 +284,7 @@ assertion.**
 Result: `test_shop_publisher_api.py` — **18 passed, 15 subtests, exit 0** (was 1 failed /
 17 passed).
 
-## 8. Uncertain-create safety — unchanged, and now honestly labelled
+### R2-8. Uncertain-create safety — unchanged, and now honestly labelled
 
 The safeguards are untouched: an ambiguous POST is never retried blindly, reconciliation is
 read-only, adoption requires ownership **and** content identity, and no second POST is ever
@@ -176,7 +304,7 @@ The report does **not** claim the fake reproduces the exact historical response.
 
 ---
 
-## A real defect found while testing this round
+### R2-9. A real defect found while testing that round
 
 `test_concurrent_initialization_from_separate_processes` exposed a genuine race: the
 additive migrations were **check-then-act** (`PRAGMA table_info` → `ALTER TABLE`), so the
@@ -199,6 +327,9 @@ for `level_claims`**; I did not touch it, per the “no unrelated changes” con
 
 ---
 
+
+---
+
 ## Test evidence (commands, counts, real exit codes)
 
 Each command was run from the repository root. Exit codes are the **test process's own**
@@ -206,7 +337,8 @@ Each command was run from the repository root. Exit codes are the **test process
 
 | Command | Result | Exit |
 |---|---|---|
-| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 104 — OK** | **0** |
+| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 124 — OK** | **0** |
+| `node scripts/test_shop_designer_ui.js` | **28 interaction checks, 0 failures** | **0** |
 | `PYTHONPATH=. python scripts/test_shop_emoji_migration.py` | Ran 6 — OK | 0 |
 | `python -m pytest scripts/test_shop_emoji.py -q` | **93 passed** | 0 |
 | `python scripts/test_shop_icon_resolution.py` | Ran 13 — OK | 0 |
@@ -228,7 +360,7 @@ test counts are not the claim — every test above asserts on row state, attempt
 `creates`/`renames`/`deletes`/`patch_requests`/`patched_emoji_ids` counters, `images.fetches`
 and pre/post database rows.
 
-### Automation suite composition (104)
+### Automation suite composition (124)
 
 `BulkBackfillTests` 5 · `DuplicateContentTests` 4 · `GenerationFencingTests` 4 ·
 `BackfillScopeTests` 6 · `SourceFailureTests` 4 · `DiscordFailureTests` 5 ·
@@ -242,20 +374,34 @@ and pre/post database rows.
 
 (bold = added this round)
 
-### New test → FIX map (each failed before its fix)
+### Round-3 test → fix map (each was RED before its fix, GREEN after)
 
-| Fix | Tests that failed before it |
-|---|---|
-| 1 Dashboard control | the panel/JS/wiring assertions did not exist and the endpoint had no caller |
-| 2 `retry_parked` | `KeyError: 'reactivated'`; state stayed `parked` |
-| 3 idempotence | generation `1 → 4` after 3 no-op backfills; `retry → queued`; in-flight pass reported `stale: 1` |
-| 4 readiness | `''`/`'abc'`/`0`/`NULL` all suppressed backfill (`queued == 0`) |
-| 5 canonical naming | label lost → `zebra_item_…`, `zeta_item_…`, `mike_item_…` instead of the canonical minimum |
-| 6 rename cursor | target-guild assets skipped; second run still produced 4 PATCHes |
-| 7 stale assertion | `1 failed, 17 passed` at base and at `ecf60aa` |
-| schema race | 1/8 concurrent-init runs failed with `duplicate column name` |
+| Test | Failed before with | Fix it proves |
+|---|---|---|
+| `test_url_changed_mid_download_never_creates_the_old_image` | `1 != 0` on `fake.creates` | post-download fence blocks the POST |
+| `test_url_cleared_mid_download_never_creates_the_old_image` | `1 != 0` on `fake.creates` | cleared image never uploaded |
+| `test_stale_work_consumes_no_quota` | `1 != 0` on live asset rows | no quota spent on obsolete work |
+| `test_all_creation_sites_are_fenced` | n/a (new structural guard) | fence sits after download, before create |
+| `test_worker_supplies_a_fence_to_prepare_one` | FAIL when wiring removed | the worker passes an authoritative fence |
+| `test_fence_rejects_a_disabled_listing` | FAIL without the listing re-read | fence is authoritative about the listing |
+| `test_fence_rejects_a_listing_edit_that_has_not_yet_queued` | FAIL without the listing re-read | unqueued edits are still caught |
+| `test_fence_accepts_an_unchanged_listing` | passes (control) | normal work is not blocked |
+| `test_disabled_listing_does_not_destroy_a_newer_generation` | `unexpectedly None` | fenced deletion preserves newer intent |
+| `test_url_less_listing_does_not_destroy_a_newer_generation` | `unexpectedly None` | same, URL-less branch |
+| `test_deleted_listing_does_not_destroy_a_newer_generation` | passes (control) | genuine completion still removes the row |
+| `test_reactivate_cannot_reset_a_newer_intent` | `TypeError` (no CAS existed) | snapshot-fenced reactivation |
+| `test_report_agrees_{empty,text,zero,null}_id_is_not_prepared` | `0 != 1` unprepared | shared readiness predicate |
+| `test_report_agrees_a_valid_id_is_prepared` | passes (control) | valid IDs still count as prepared |
+| `test_invalid_source_urls_are_reported_not_silently_dropped` | `KeyError` | full accounting, no silent exclusions |
+| `test_fully_prepared_is_only_true_when_nothing_is_outstanding` | `KeyError` | completion cannot over-claim |
+| `test_deferred_count_is_not_labelled_uncertain` | `KeyError` | deferred ≠ uncertain |
+| `scripts/test_shop_designer_ui.js` (28 checks) | 2 checks failed on first run | real click path + two genuine UI bugs |
 
----
+**Proof the fixes are load-bearing.** Each fix was reverted in isolation and the
+suite re-run: removing the worker fence → `StaleCreationTests` + `FenceCoverageTests`
+**4 failures**; removing the `_prepare_one` fence → **2 failures**; restoring
+unfenced deletions → `StaleQueueDeletionTests` **2 failures**. Code was restored
+and byte-compared against a backup afterwards.
 
 ## Safety confirmations
 
@@ -276,24 +422,32 @@ and pre/post database rows.
   calls.
 - **The Dashboard bulk action processes the full eligible `shop_items` catalog** for the
   authorised guild, with no Shop Designer roster entry and no per-product selection —
-  proven by `test_one_action_queues_the_whole_catalog_without_a_roster`, where every product
-  is inserted directly into `shop_items` and never rostered.
+  proven twice: by `test_one_action_queues_the_whole_catalog_without_a_roster` (products
+  inserted directly into `shop_items`, never rostered) and by the runtime click in
+  `scripts/test_shop_designer_ui.js`, which asserts the request body contains **no
+  `product_ids`** at all.
+- **An obsolete worker cannot create an emoji for a superseded image.** `StaleCreationTests`
+  block the download, change the product through the real Dashboard save path, release it,
+  and assert `creates == 0`, no asset row, no alias, and that only the *current* image is
+  later uploaded. The fence is a compile-time visible call between the download and every
+  creation site, plus a structural test that the ordering cannot silently regress.
 
 ## Changed files
 
 | File | Change |
 |---|---|
-| `utils/shop_emoji_queue.py` | `state`/`generation` columns, `shop_icon_backfill` authorisation, same-URL no-op, `reactivate()` from `retry_parked`, dict return `{queued, reactivated}`, `_resolves_ready()` via `_valid_emoji_id`, CAS writers, race-safe migration |
-| `utils/shop_emoji.py` | 8-char suffix, readable naming, `canonical_product_label`, `product_names_for_asset`/`_canonical_or_raw` (canonicalised name lookup), `emoji_name_conflict`, `_add_column` race-safe migration |
-| `utils/shop_emoji_worker.py` | `_process_row` fencing, guild-scoped rename cursor, `_labels_for` canonicalisation, rename results carry identity, `rename_all`/`rename_pass` |
+| `utils/shop_emoji_queue.py` | `state`/`generation` columns, `shop_icon_backfill` authorisation, same-URL no-op, `reactivate()` with `expect_generation`/`expect_source_url`, dict return `{queued, reactivated}`, `usable_emoji_id_for()` + `classify_catalog()` (the single readiness predicate), **generation-fenced `clear_product()`**, `stats()` separating deferred/retrying/uncertain, CAS writers, race-safe migration |
+| `utils/shop_emoji.py` | 8-char suffix, readable naming, `canonical_product_label`, `product_names_for_asset`/`_canonical_or_raw` (canonicalised name lookup), `emoji_name_conflict`, `_add_column` race-safe migration, **`validate_source` post-download fence + `StalePreparation` at all three creation paths** |
+| `utils/shop_emoji_worker.py` | `_process_row` fencing, **`_source_still_current()` fence injected into `_prepare_one`**, **fenced `clear_product`/`mark_done` in every deletion branch**, guild-scoped rename cursor, `_labels_for` canonicalisation, rename results carry identity, `rename_all`/`rename_pass` |
 | `cogs/shop_emoji_worker.py` | NEW — worker + authorised-guild discovery loops |
-| `dashboard/api/shop_emoji.py` | backfill (authorise + bulk queue), read-only queue/retry/names/report; no DDL on GET |
+| `dashboard/api/shop_emoji.py` | backfill (authorise + bulk queue), read-only queue/retry/names/report; report rebuilt on `classify_catalog()` (`invalid_source_products`, `fully_prepared`); `/retry` reactivation fenced; no DDL on GET |
 | `dashboard/api/economy_shop.py` | auto-queue hooks on create / `icon_url` change |
 | `dashboard/templates/manage/shopdesigner.html` | NEW owner-only “Prepare all Shop product icons” panel |
-| `dashboard/static/js/shop-designer.js` | backfill handler, progress renderer, parked-retry switch |
+| `dashboard/static/js/shop-designer.js` | backfill handler, progress renderer (invalid URLs, deferred vs uncertain), parked-retry switch, success message preserved across refresh, control re-enabled after failure |
 | `main.py` | load the new cog |
 | `test_shop_publisher_api.py` | stale catalog key set now includes `app_emoji` |
-| `scripts/test_shop_emoji_automation.py` | 104 tests |
+| `scripts/test_shop_emoji_automation.py` | 124 tests |
+| `scripts/test_shop_designer_ui.js` | NEW — real jsdom interaction test: renders the template, mounts the real module, clicks the real button, asserts the outgoing request (28 checks) |
 | `scripts/test_shop_emoji_migration.py` | NEW — pre-feature schema, idempotent/repeated init, race-safe concurrent init, previous-revision queue upgrade |
 | `tools/icon_diagnostic.py`, `INVESTIGATION_PRODUCT_ICONS.md` | read-only diagnostic used for the investigation |
 
@@ -311,3 +465,13 @@ and pre/post database rows.
    (`shop_emoji.py:1017`) and a truthy marker would silently change identity tolerance.
 5. **First backfill wall-clock**: ~8 products/minute, paced so Discord is never hammered.
    The Dashboard request returns immediately.
+6. **The UI interaction test needs jsdom**, which is not vendored here (it is a dev-only
+   harness dependency). `scripts/test_shop_designer_ui.js` resolves it from
+   `JSDOM_PATH`, the repo's `node_modules`, or a local install, and exits **2** with an
+   actionable message if it is absent rather than passing vacuously. No browser binary is
+   available in this environment, so this is a real DOM + real event dispatch in jsdom,
+   not a headless-browser render.
+7. **`stats()["deferred"]` keeps its old meaning** (every row in a future backoff) for
+   backwards compatibility, but every UI label and the report now separate
+   `retrying_backoff` from `uncertain`. Anything else reading `deferred` should be
+   reviewed with the same distinction in mind.
