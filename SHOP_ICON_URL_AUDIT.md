@@ -181,4 +181,6 @@ If those conditions hold and icons still fail, capture the prepared result statu
 
 ## 9. Delivery
 
-Implementation and verification are committed on `arena/3ae570ab-nilive-bot`. The final commit SHA and follow-up PR status are reported in the delivery message. PR #120 remains merged; it was not reopened, merged again, or deployed.
+Implementation and verification commit: `093dc3d428ec0e0a96b97710840382173f77381d` on `arena/3ae570ab-nilive-bot`.
+
+Follow-up PR: https://github.com/Akuroii/Nilive-Bot/pull/121 (opened because #120 was already merged). The final branch HEAD, including this report update, is reported in the delivery message. PR #120 remains merged; it was not reopened, merged again, or deployed.
