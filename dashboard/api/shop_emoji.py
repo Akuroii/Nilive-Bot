@@ -7,6 +7,7 @@ these mutating preparation/deletion operations.
 
 import asyncio
 
+import aiosqlite
 from flask import jsonify, request
 
 from dashboard.api import api_bp
@@ -14,6 +15,7 @@ from dashboard.permissions import (
     LEVEL_OWNER, get_session_guild_id, require_api_permission,
 )
 from dashboard.utils.async_utils import run_async
+from database import DB_PATH
 from utils.shop_emoji import (
     ShopEmojiError,
     delete_confirmed_duplicate,
@@ -97,3 +99,96 @@ def api_shop_emoji_delete_duplicate():
         return jsonify(result)
     except ShopEmojiError as exc:
         return _error_response(exc)
+
+
+@api_bp.route("/shop-publisher/emojis/backfill", methods=["POST"])
+@require_api_permission(LEVEL_OWNER)
+def api_shop_emoji_backfill():
+    """Queue every eligible existing product for preparation (one-time bulk).
+
+    Reads ``shop_items`` directly, so no Shop Designer roster entry is needed.
+    This endpoint only writes queue rows: the background worker performs the
+    uploads in bounded batches, so the request returns immediately and nothing
+    here can create 100 emojis inside one HTTP call.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Request body must be a JSON object.",
+                        "code": "invalid_json"}), 400
+    try:
+        _reject_url_targets(data)
+    except ShopEmojiError as exc:
+        return _error_response(exc)
+
+    from utils import shop_emoji_queue as queue
+
+    async def run():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await queue.ensure_schema(db)
+            queued = await queue.enqueue_guild_products(
+                get_session_guild_id(),
+                reason=str(data.get("reason") or "backfill"),
+                only_unprepared=data.get("include_prepared") is not True)
+            return {"success": True, "queued": queued, "queue": await queue.stats(db)}
+
+    try:
+        return jsonify(run_async(run()))
+    except Exception as exc:  # noqa: BLE001 - owner-visible, never a 500 stack
+        return jsonify({"success": False, "error": str(exc), "code": "backfill_failed"}), 500
+
+
+@api_bp.route("/shop-publisher/emojis/queue", methods=["GET"])
+@require_api_permission(LEVEL_OWNER)
+def api_shop_emoji_queue_status():
+    """Read-only queue report: depth, retries and the next scheduled attempt."""
+    from utils import shop_emoji_queue as queue
+
+    async def run():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await queue.ensure_schema(db)
+            guild_id = get_session_guild_id()
+            rows = await queue.due(db, guild_id=guild_id, limit=queue.MAX_BATCH_LIMIT)
+            return {"success": True,
+                    "queue": await queue.stats(db, guild_id=guild_id),
+                    "next_attempt_at": await queue.next_attempt_at(db),
+                    "pending_sample": [
+                        {"product_id": r["product_id"], "item_name": r["item_name"],
+                         "attempts": r["attempts"], "last_error": r["last_error"],
+                         "next_attempt_at": r["next_attempt_at"]}
+                        for r in rows]}
+
+    try:
+        return jsonify(run_async(run()))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc), "code": "queue_read_failed"}), 500
+
+
+@api_bp.route("/shop-publisher/emojis/names", methods=["POST"])
+@require_api_permission(LEVEL_OWNER)
+def api_shop_emoji_names():
+    """Preview or apply readable renames via Discord's Modify Emoji API.
+
+    ``apply`` performs a PATCH per asset — same emoji ID, no recreate, no
+    delete, and every alias/hash row is untouched. Only ready, bound assets are
+    eligible, so a rename can never disturb an in-flight creation.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Request body must be a JSON object.",
+                        "code": "invalid_json"}), 400
+    try:
+        _reject_url_targets(data)
+    except ShopEmojiError as exc:
+        return _error_response(exc)
+
+    from utils import shop_emoji as SE
+    from utils.shop_emoji_worker import rename_pass
+
+    try:
+        result = run_async(rename_pass(guild_id=get_session_guild_id(),
+                                       apply=data.get("apply") is True))
+        return jsonify({"success": True, **result})
+    except ShopEmojiError as exc:
+        return _error_response(exc)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc), "code": "rename_failed"}), 500

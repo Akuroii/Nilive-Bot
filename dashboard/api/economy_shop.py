@@ -423,6 +423,9 @@ def delete_shop_item(item_id: int):
             await db.execute(
                 "DELETE FROM shop_items WHERE id = ? AND guild_id = ?",
                 (item_id, guild_id))
+            # The listing is gone, so any queued preparation for it is void.
+            from utils.shop_emoji_queue import clear_product
+            await clear_product(db, guild_id, item_id)
             await db.commit()
         return True
 
@@ -437,6 +440,39 @@ def delete_shop_item(item_id: int):
         return jsonify({"success": False,
                         "error": "A root product with options cannot be deleted."}), 409
     return ""
+
+
+async def _enqueue_icon_work(guild_id, item_name, icon_url, *, product_id=None,
+                             reason="product_saved", reset_attempts=False):
+    """Record that this product's icon should be prepared. Never uploads.
+
+    A queue row is intent, not an action: the background worker performs the
+    upload outside this request. Failure here must never fail the save the
+    admin just made, so a missing table or an unusable URL is swallowed and the
+    product simply keeps the icon behaviour it had before.
+    """
+    from utils import shop_emoji_queue as _queue
+
+    async def _write():
+        async with aiosqlite.connect(DB_PATH) as db:
+            pid = product_id
+            if pid is None:
+                cur = await db.execute(
+                    "SELECT id FROM shop_items WHERE guild_id=? AND name=? "
+                    "ORDER BY id DESC LIMIT 1", (guild_id, item_name))
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                pid = int(row[0])
+            return await _queue.enqueue_product(
+                db, guild_id, pid, item_name, icon_url, reason=reason,
+                reset_attempts=reset_attempts)
+
+    try:
+        return await _write()
+    except Exception as exc:  # noqa: BLE001 - never break the save path
+        print(f"[shop-emoji-queue] enqueue skipped for guild {guild_id}: {exc!r}")
+        return None
 
 
 @api_bp.route("/shop/item", methods=["POST"])
@@ -539,6 +575,11 @@ def add_shop_item():
         await upsert_catalog_entry(
             guild_id, item_name, icon_url=icon_url, rarity=rarity,
             value_currency=value_currency, value_amount=value_amount)
+
+        # Automatic icon preparation: record the intent, never the upload.
+        # The background worker in cogs/shop_emoji_worker drains this; saving a
+        # product must not block a dashboard request on Discord.
+        await _enqueue_icon_work(guild_id, item_name, icon_url, reason="product_created")
 
     try:
         run_async(save())
@@ -869,6 +910,14 @@ def update_shop_item(item_id: int):
     run_async(upsert_catalog_entry(
         guild_id, new_name, icon_url=icon_url_val, rarity=rarity,
         value_currency=value_currency, value_amount=value_amount))
+
+    # Only an actual icon_url change queues work. Editing a price, rarity, stock
+    # or description must never re-enter the emoji pipeline (and re-queueing the
+    # same URL is anyway a no-op inside the queue).
+    if "icon_url" in raw and (icon_url_val or None) != (existing["icon_url"] or None):
+        run_async(_enqueue_icon_work(guild_id, new_name, icon_url_val,
+                                     product_id=item_id, reason="icon_url_changed",
+                                     reset_attempts=True))
 
     log_action(guild_id, f"Edited shop item: {new_name}", "shop")
     return jsonify({"success": True})
