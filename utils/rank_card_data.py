@@ -141,6 +141,11 @@ async def get_rank_card_data(guild_id: int, user_id: int,
         grid_candidates.append({
             **it,
             "icon_url": (catalog["icon_url"] or "").strip(),
+            # The exact current Shop listing URL, kept SEPARATE from the
+            # catalog URL on purpose: both are valid raw-image fallbacks
+            # and the renderer needs to try them in a defined order. It is
+            # filled in below, read-only, and never written back.
+            "listing_icon_url": "",
             "rarity": catalog["rarity"],
             "value_currency": catalog["value_currency"],
             "value_amount": catalog["value_amount"],
@@ -173,28 +178,35 @@ async def get_rank_card_data(guild_id: int, user_id: int,
             # unique, guild-scoped listing icon_url — never guessed, never
             # written back into item_catalog.
             #
-            # The listing URL is also kept on the item itself as the RAW
-            # image fallback, restoring the pre-repair behaviour where the
-            # renderer could still draw an icon with nothing prepared. Order
-            # at draw time is: prepared Discord CDN -> this listing URL ->
-            # the catalog URL -> placeholder. A stale catalog URL is
-            # therefore replaced (it is not a valid source once it failed to
-            # resolve), while an item with no listing at all keeps whatever
-            # its catalog row holds. Ambiguous listings are absent from
-            # `found` by construction (find_listing_icon_urls only returns a
-            # single exact guild-scoped match), so nothing is guessed here.
+            # The listing URL is ALSO kept on the item -- in its own field,
+            # `listing_icon_url` -- as a raw image fallback, restoring the
+            # pre-repair behaviour where the renderer could still draw an
+            # icon with nothing prepared. It deliberately does NOT overwrite
+            # `icon_url`: the catalog URL stays intact as the third source,
+            # because either URL can be the live one (a listing can rot
+            # while the catalog row is still good, and vice versa). Order at
+            # draw time, in _fetch_item_icon():
+            #
+            #   prepared Discord CDN -> current listing URL -> catalog URL
+            #   -> placeholder
+            #
+            # It is resolved for EVERY grid item, not only the unresolved
+            # ones, so an item whose emoji already came from the catalog
+            # alias still has its listing URL when the CDN asset fails.
+            # Ambiguous listings are absent from `found` by construction
+            # (find_listing_icon_urls only returns a single exact
+            # guild-scoped match), so nothing is ever guessed here.
+            found = await find_listing_icon_urls(
+                db, guild_id, [it["item_name"] for it in grid_candidates])
+            for it in grid_candidates:
+                it["listing_icon_url"] = found.get(it["item_name"], "")
             unresolved = [it for it in grid_candidates if not it.get("app_emoji")]
             if unresolved:
-                found = await find_listing_icon_urls(
-                    db, guild_id, [it["item_name"] for it in unresolved])
                 listing_candidates = [
-                    {"icon_url": found.get(it["item_name"], "")} for it in unresolved]
+                    {"icon_url": it["listing_icon_url"]} for it in unresolved]
                 await attach_prepared_emojis(db, guild_id, listing_candidates)
                 for it, candidate in zip(unresolved, listing_candidates):
                     it["app_emoji"] = candidate.get("app_emoji") or ""
-                    listing_url = found.get(it["item_name"], "")
-                    if listing_url:
-                        it["icon_url"] = listing_url
     except Exception:
         # A missing/unreadable emoji mapping is an ordinary state, never a
         # reason to fail the whole card. Icons degrade to the placeholder.
