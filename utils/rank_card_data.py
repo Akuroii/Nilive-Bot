@@ -172,6 +172,17 @@ async def get_rank_card_data(guild_id: int, user_id: int,
             # one. Anything still unresolved is retried against its exact,
             # unique, guild-scoped listing icon_url — never guessed, never
             # written back into item_catalog.
+            #
+            # The listing URL is also kept on the item itself as the RAW
+            # image fallback, restoring the pre-repair behaviour where the
+            # renderer could still draw an icon with nothing prepared. Order
+            # at draw time is: prepared Discord CDN -> this listing URL ->
+            # the catalog URL -> placeholder. A stale catalog URL is
+            # therefore replaced (it is not a valid source once it failed to
+            # resolve), while an item with no listing at all keeps whatever
+            # its catalog row holds. Ambiguous listings are absent from
+            # `found` by construction (find_listing_icon_urls only returns a
+            # single exact guild-scoped match), so nothing is guessed here.
             unresolved = [it for it in grid_candidates if not it.get("app_emoji")]
             if unresolved:
                 found = await find_listing_icon_urls(
@@ -181,6 +192,9 @@ async def get_rank_card_data(guild_id: int, user_id: int,
                 await attach_prepared_emojis(db, guild_id, listing_candidates)
                 for it, candidate in zip(unresolved, listing_candidates):
                     it["app_emoji"] = candidate.get("app_emoji") or ""
+                    listing_url = found.get(it["item_name"], "")
+                    if listing_url:
+                        it["icon_url"] = listing_url
     except Exception:
         # A missing/unreadable emoji mapping is an ordinary state, never a
         # reason to fail the whole card. Icons degrade to the placeholder.

@@ -650,7 +650,9 @@ def _brand_inventory(embed: discord.Embed, interaction, tab: str,
     bot_user = getattr(getattr(interaction, "client", None), "user", None)
     bot_name = getattr(bot_user, "name", None) or "Nilive"
     user = getattr(interaction, "user", None)
-    username = getattr(user, "display_name", None) or getattr(user, "name", None) or "Inventory"
+    # The member's actual ACCOUNT name first, exactly as the original
+    # _inventory_identity() did — a nick is not an identity.
+    username = getattr(user, "name", None) or getattr(user, "display_name", None) or "Inventory"
     embed.color = INVENTORY_COLOR
     embed.set_author(name=f"{bot_name}: {TAB_AUTHOR_WORD[tab]} {username}"[:256],
                      icon_url=INVENTORY_AUTHOR_ICON)
@@ -666,16 +668,30 @@ def _role_entry_is_equipped(entry: dict, equipped_role: str | None) -> bool:
     return not entry.get("timed") and entry.get("item_name") == equipped_role
 
 
-def _code_name(name: str) -> str:
+# A list row's name column is capped at 48 characters (with a trailing
+# ellipsis) exactly as the original implementation did, so one pathological
+# name cannot blow the 4096-char description budget. Items are never
+# dropped for it. Select options have their own, separate 100-char limit
+# (Discord's hard cap on SelectOption.label) and are handled in
+# InventoryItemSelect, not here.
+LIST_NAME_LIMIT = 48
+
+
+def _code_name(name: str, limit: int | None = None) -> str:
     """Item name inside an inline code span (the agreed decorated-row style).
 
     Discord renders inline code literally — markdown is inert there, so
     markdown-escaping would only leak backslashes. Only the code-span
     delimiters themselves need neutralising; mentions are likewise inert
     inside code and are left untouched so copy/paste stays clean.
+
+    `limit` truncates with a trailing ellipsis; list rows pass
+    LIST_NAME_LIMIT (48), detail titles pass nothing.
     """
     clean = " ".join((name or "").split()).replace("`", "'")
-    return clean[:100] or "—"
+    if limit is not None and len(clean) > limit:
+        clean = clean[:max(1, limit - 1)].rstrip() + "…"
+    return clean or "—"
 
 
 def _expiry_dt(entry: dict):
@@ -698,7 +714,8 @@ def _is_equipped_entry(it: dict, equipped_role: str | None,
 
 def _inventory_line(emoji: str, quantity, name, suffix: str | None = None) -> str:
     """`> - {emoji} • ` {quantity} ` • ` {name} `` — the agreed row template."""
-    line = f"> - {emoji} • ` {int(quantity or 0):,} ` • ` {_code_name(name)} `"
+    line = (f"> - {emoji} • ` {int(quantity or 0):,} ` • "
+            f"` {_code_name(name, LIST_NAME_LIMIT)} `")
     if suffix:
         line += f" • {suffix}"
     return line
@@ -782,15 +799,6 @@ async def currency_balance_rows(guild_id: int, user_id: int) -> list[dict]:
     return rows
 
 
-def _thumbnail_for(entries: list[dict]) -> str | None:
-    # Discord allows one thumbnail per embed, so a list can only ever
-    # feature one image rather than a per-line one. The four standard list
-    # tabs deliberately show NO thumbnail (the agreed panel is author line
-    # + description lines + colour + footer only); this is used by the
-    # Equipped slot view, which is not part of that agreed template.
-    return next((u for u in (_item_thumbnail_url(it) for it in entries) if u), None)
-
-
 def build_inventory_embed(tab: str, entries: list[dict],
                           equipped_role: str | None,
                           equipped_title_name: str | None,
@@ -833,30 +841,41 @@ def build_inventory_embed(tab: str, entries: list[dict],
     return embed
 
 
-def _slot_value(slot: dict | None) -> str:
+def _slot_row(marker: str, slot: dict | None) -> str:
+    """One equipped slot as a `> -` row, the same shape as every other tab.
+
+    The two equipped slots are the ONLY rows this view draws: the row
+    carries the slot marker, the prepared Shop emoji (or the rarity glyph
+    when nothing was prepared), the item name, rarity, the real role
+    mention when there is one, and a relative expiry for timed holdings.
+    Nothing else from the collection appears here.
+    """
     if not slot:
-        return "*Nothing equipped*"
+        return f"> - {marker} • *Nothing equipped*"
     emoji = slot.get("emoji") or _rarity_glyph(slot.get("rarity") or "common")
-    name = _code_name(slot["name"])
-    lines = [f"{emoji} `{name}`"]
-    bits = []
+    bits = [f"> - {marker} • {emoji} • ` {_code_name(slot['name'], LIST_NAME_LIMIT)} `"]
     if slot.get("rarity"):
         bits.append(f"*{_rarity_label(slot['rarity'])}*")
     if slot.get("mention"):
         bits.append(slot["mention"])
-    if bits:
-        lines.append(" · ".join(bits))
     if slot.get("expires") is not None:
-        lines.append(f"expires {discord.utils.format_dt(slot['expires'], 'R')}")
+        bits.append(f"expires {discord.utils.format_dt(slot['expires'], 'R')}")
     elif slot.get("timed"):
-        lines.append("expires *unknown*")
-    return "\n".join(lines)
+        bits.append("expires *unknown*")
+    return " · ".join(bits)
 
 
 def _build_equipped_embed(embed: discord.Embed, entries: list[dict],
                           equipped_role: str | None,
                           equipped_title_name: str | None,
                           slots: dict | None) -> discord.Embed:
+    """The Equipped tab: the two worn slots as description rows.
+
+    Deliberately NO embed fields and NO thumbnail, matching the agreed
+    panel shape used by the other five tabs (author line + description +
+    colour + footer). Only the currently equipped Role and Title are
+    drawn -- never the wider collection, which lives in its own tabs.
+    """
     slots = slots or {"role": None, "title": None}
     role_slot, title_slot = slots.get("role"), slots.get("title")
 
@@ -866,15 +885,13 @@ def _build_equipped_embed(embed: discord.Embed, entries: list[dict],
             "Equip a role, a color or a title and it will appear here.")
         return embed
 
-    thumb = _thumbnail_for(entries)
-    if thumb:
-        embed.set_thumbnail(url=thumb)
+    # Both slots are always drawn once anything is worn, so the panel has a
+    # stable shape and an empty slot says so instead of silently vanishing.
+    rows = [_slot_row("🎭 **Role**", role_slot),
+            _slot_row("🏷️ **Title**", title_slot)]
     embed.description = (
-        "-# What you're wearing right now — your full collection lives in the other tabs.")
-    embed.add_field(name="🎭 Role", value=_slot_value(role_slot),
-                    inline=True)
-    embed.add_field(name="🏷️ Title", value=_slot_value(title_slot),
-                    inline=True)
+        "-# What you're wearing right now — your full collection lives in the other tabs.\n"
+        + "\n".join(rows))
     return embed
 
 
@@ -900,8 +917,11 @@ class InventoryItemSelect(discord.ui.Select):
         for it in entries[:25]:
             name = it["item_name"]
             equipped = _is_equipped_entry(it, equipped_role, equipped_title_name)
+            # Discord caps SelectOption.label at 100 chars. This is a
+            # SEPARATE limit from the 48-char list-row column: a select
+            # label is plain text, so the row ellipsis does not apply.
             options.append(discord.SelectOption(
-                label=name[:100],
+                label=" ".join(str(name).split())[:100] or "—",
                 description=_select_description(it, equipped),
                 value=it.get("entry_key") or name[:100],
                 # The product's OWN prepared emoji, the same one the

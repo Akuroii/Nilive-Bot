@@ -9,6 +9,7 @@ Usage:
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -59,6 +60,49 @@ class EmbedTests(unittest.TestCase):
         # The footer is the branded line, exactly — never a page counter.
         self.assertEqual(embed.footer.text, wallet.INVENTORY_FOOTER_TEXT)
         self.assertEqual(embed.footer.icon_url, wallet.INVENTORY_FOOTER_ICON)
+
+    def test_author_prefers_account_name_over_display_name(self):
+        """Original _inventory_identity(): the account name wins."""
+        interaction = SimpleNamespace(
+            client=SimpleNamespace(user=SimpleNamespace(name="Nero",
+                                                        display_name="NeroBot")),
+            user=SimpleNamespace(name="shadow_account", display_name="✦ Shadow ✦"),
+            guild_id=1)
+        embed = discord.Embed()
+        wallet._brand_inventory(embed, interaction, wallet.TAB_ITEMS)
+        self.assertIn("shadow_account", embed.author.name)
+        self.assertNotIn("✦ Shadow ✦", embed.author.name)
+        # bot side likewise: account name first
+        self.assertTrue(embed.author.name.startswith("Nero:"), embed.author.name)
+
+    def test_list_names_are_capped_at_48_chars_with_an_ellipsis(self):
+        long_name = "A" * 80
+        embed = wallet.build_inventory_embed(
+            wallet.TAB_ITEMS, [entry(long_name, "i:1")], None, None)
+        row = embed.description
+        self.assertNotIn(long_name, row)
+        self.assertIn("…", row)
+        # "> - {emoji} • ` {qty} ` • ` {name} `"
+        cells = [c for c in row.split("`") if c.strip()]
+        shown = cells[-2].strip()   # last inline-code cell is the notes
+        self.assertEqual(len(shown), wallet.LIST_NAME_LIMIT)
+        self.assertTrue(shown.endswith("…"), shown)
+
+    def test_short_list_names_are_untouched_and_select_keeps_its_own_limit(self):
+        embed = wallet.build_inventory_embed(
+            wallet.TAB_ITEMS, [entry("Moon Ball", "i:1")], None, None)
+        self.assertIn("` Moon Ball `", embed.description)
+
+        long_name = "B" * 120
+        view = wallet.InventoryView(1, 2, wallet.TAB_ITEMS,
+                                    [entry(long_name, "i:1")], None, None, 0, 1)
+        select = next(x for x in view.children
+                      if isinstance(x, wallet.InventoryItemSelect))
+        label = select.options[0].label
+        self.assertEqual(len(label), 100)          # Discord's hard cap
+        self.assertGreater(len(long_name), 100)    # proves it was capped
+        self.assertNotIn("…", label)               # not the 48-char row rule
+        view.stop()
 
     def test_panel_has_no_competing_title_or_extra_fields(self):
         """The agreed panel: author line, description, colour, footer only."""
@@ -205,11 +249,62 @@ class EmbedTests(unittest.TestCase):
         embed = wallet.build_inventory_embed(wallet.TAB_EQUIPPED, entries,
                                              "Sunglasses", "The Silent One",
                                              slots=slots)
-        self.assertEqual([f.name for f in embed.fields], ["🎭 Role", "🏷️ Title"])
-        self.assertIn("`Sunglasses`", embed.fields[0].value)
-        self.assertIn("<@&12345>", embed.fields[0].value)
-        self.assertIn("<:shades:1562903222086279178>", embed.fields[0].value)
-        self.assertIn("`The Silent One`", embed.fields[1].value)
+        # The Equipped view uses the SAME description-row panel shape as the
+        # other five tabs: no fields, no thumbnail (Akuroi's review).
+        self.assertEqual([f.name for f in embed.fields], [])
+        self.assertIsNone(embed.thumbnail.url)
+        rows = [l for l in embed.description.splitlines() if l.startswith("> - ")]
+        self.assertEqual(len(rows), 2, embed.description)
+        self.assertIn("**Role**", rows[0])
+        self.assertIn("` Sunglasses `", rows[0])
+        self.assertIn("<@&12345>", rows[0])
+        self.assertIn("<:shades:1562903222086279178>", rows[0])
+        self.assertIn("*Rare*", rows[0])
+        self.assertIn("**Title**", rows[1])
+        self.assertIn("` The Silent One `", rows[1])
+        self.assertIn("*Epic*", rows[1])
+
+    def test_equipped_rows_keep_fallback_glyph_expiry_and_empty_slot(self):
+        slots = {
+            "role": {"name": "Sunglasses", "emoji": None,
+                     "rarity": "legendary", "expires": datetime(2035, 1, 1, tzinfo=timezone.utc),
+                     "timed": True, "mention": None},
+            "title": None,
+        }
+        embed = wallet.build_inventory_embed(wallet.TAB_EQUIPPED, [], None, None,
+                                             slots=slots)
+        self.assertEqual([f.name for f in embed.fields], [])
+        self.assertIsNone(embed.thumbnail.url)
+        rows = [l for l in embed.description.splitlines() if l.startswith("> - ")]
+        self.assertEqual(len(rows), 2, embed.description)
+        # no prepared emoji -> the rarity glyph is the visual anchor
+        self.assertIn(wallet.RARITY_GLYPH["legendary"], rows[0])
+        # relative, not absolute, expiry
+        self.assertIn("<t:", rows[0])
+        self.assertIn(":R>", rows[0])
+        # an empty slot still renders as a row instead of a blank field
+        self.assertIn("**Title**", rows[1])
+        self.assertIn("Nothing equipped", rows[1])
+
+    def test_equipped_never_lists_the_rest_of_the_collection(self):
+        """Only the worn Role and Title appear — never the owned inventory."""
+        owned = [entry("Sunglasses", "i:9", item_type="role", rarity="rare"),
+                 entry("Unworn Cape", "i:10", item_type="role", rarity="epic"),
+                 entry("The Silent One", "i:11", item_type="title", rarity="epic"),
+                 entry("Another Title", "i:12", item_type="title", rarity="rare")]
+        slots = {
+            "role": {"name": "Sunglasses", "emoji": None, "rarity": "rare",
+                     "expires": None, "timed": False, "mention": None},
+            "title": {"name": "The Silent One", "emoji": None, "rarity": "epic",
+                      "expires": None, "timed": False, "mention": None},
+        }
+        embed = wallet.build_inventory_embed(wallet.TAB_EQUIPPED, owned,
+                                             "Sunglasses", "The Silent One",
+                                             slots=slots)
+        self.assertNotIn("Unworn Cape", embed.description)
+        self.assertNotIn("Another Title", embed.description)
+        rows = [l for l in embed.description.splitlines() if l.startswith("> - ")]
+        self.assertEqual(len(rows), 2, embed.description)
 
     def test_select_options_carry_product_emoji_and_clean_description(self):
         entries = [entry("Moon Ball", "i:11", rarity="epic", quantity=3,
