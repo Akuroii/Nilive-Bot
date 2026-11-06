@@ -640,6 +640,13 @@ async def open_streak_panel(interaction: discord.Interaction,
 
 def _brand_inventory(embed: discord.Embed, interaction, tab: str,
                      footer: str | None = None) -> None:
+    """Author line + branded footer, exactly as agreed.
+
+    The six-tab panel passes NO footer suffix: the agreed template's footer
+    is the branded line alone (no `Page n/m`, no coverage note). The two
+    action panels (item detail, drop confirm) still pass a short descriptor,
+    which is unchanged behaviour from before this repair.
+    """
     bot_user = getattr(getattr(interaction, "client", None), "user", None)
     bot_name = getattr(bot_user, "name", None) or "Nilive"
     user = getattr(interaction, "user", None)
@@ -1009,11 +1016,29 @@ def _event_time(raw):
     return discord.utils.escape_markdown(str(raw))[:40]
 
 
+def _coverage_note(started) -> str:
+    """One-line, factually bounded coverage statement for the History tab.
+
+    `started` is `inventory_activity_settings.started_at` — the SQLite
+    CURRENT_TIMESTAMP (UTC) written when the log table was first created.
+    Nothing before that instant can exist, and several mutation paths are
+    documented as unrecorded (INVENTORY_ACTIVITY_STATUS.md), so "partial
+    coverage" is the accurate claim. An absent row says so instead of
+    inventing a date.
+    """
+    if started:
+        return f"-# Partial coverage · recording started {started} UTC"
+    return "-# Partial coverage · recording start not recorded"
+
+
 def build_history_embed(events, started):
     """Append-only activity log — reads as an audit trail, not as money.
 
     Only real, recorded events are rendered; unknown event types are shown
     with their raw (escaped) name rather than hidden or reinterpreted.
+
+    The coverage statement is a trailing footnote of the DESCRIPTION, never
+    part of the footer: the panel footer is the agreed branded line alone.
     """
     embed = discord.Embed(color=INVENTORY_COLOR)
     lines = []
@@ -1030,8 +1055,9 @@ def build_history_embed(events, started):
             head += f" **×{qty}**"
         head += f" · {source}"
         lines.append(f"{head}\n*{_event_time(event.get('created_at'))}*")
-    embed.description = ("\n\n".join(lines) if lines
-                         else "No recorded inventory activity yet.")
+    body = ("\n\n".join(lines) if lines
+            else "No recorded inventory activity yet.")
+    embed.description = f"{body}\n\n{_coverage_note(started)}"
     return embed
 
 
@@ -1105,9 +1131,11 @@ async def open_inventory_panel(interaction: discord.Interaction,
             guild_id, user_id,
             offset=page * INVENTORY_PAGE_SIZE, limit=INVENTORY_PAGE_SIZE)
         started = await get_activity_start()
+        # The panel footer is the agreed branded line, full stop — no page
+        # counter. The coverage statement lives in the embed description
+        # (see _coverage_note), so it cannot alter the agreed footer.
         embed = build_history_embed(events, started)
-        _brand_inventory(embed, interaction, tab,
-                         f"Partial coverage · Recording started {started or 'unknown'} UTC · Page {page + 1}/{pages}")
+        _brand_inventory(embed, interaction, tab)
         view = InventoryView(guild_id, user_id, tab, [], None, None, page, pages)
         if first:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -1145,8 +1173,7 @@ async def open_inventory_panel(interaction: discord.Interaction,
                      if tab == TAB_ITEMS else [])
     embed = build_inventory_embed(tab, entries, equipped_role, equipped_title_name,
                                   slots=slots, currency_rows=currency_rows)
-    _brand_inventory(embed, interaction, tab,
-                     f"Page {page + 1}/{pages}" if pages > 1 else None)
+    _brand_inventory(embed, interaction, tab)
     if first:
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         view.message = await interaction.original_response()
@@ -1493,7 +1520,7 @@ async def open_item_panel(interaction: discord.Interaction, guild_id: int,
         equipped = False
     view = ItemPanelView(guild_id, user_id, tab, item, equipped)
     embed = build_item_embed(interaction.guild, tab, item, equipped)
-    _brand_inventory(embed, interaction, tab, f"Item details · Page {page + 1}")
+    _brand_inventory(embed, interaction, tab, "Item details")
     await interaction.response.edit_message(embed=embed, view=view)
     view.message = interaction.message
 

@@ -56,13 +56,9 @@ class EmbedTests(unittest.TestCase):
         self.assertEqual(embed.author.name, "Nero: \U0001d413\U0001d408\U0001d413\U0001d40b\U0001d404\U0001d412 Shadow")
         self.assertEqual(embed.author.icon_url, wallet.INVENTORY_AUTHOR_ICON)
         self.assertEqual(embed.color.value, wallet.INVENTORY_COLOR)
-        # The footer is the branded line alone when no page suffix is asked
-        # for, and the branded line plus the suffix otherwise.
+        # The footer is the branded line, exactly — never a page counter.
         self.assertEqual(embed.footer.text, wallet.INVENTORY_FOOTER_TEXT)
         self.assertEqual(embed.footer.icon_url, wallet.INVENTORY_FOOTER_ICON)
-        wallet._brand_inventory(embed, interaction, wallet.TAB_TITLES, "Page 2/3")
-        self.assertEqual(embed.footer.text,
-                         f"{wallet.INVENTORY_FOOTER_TEXT} · Page 2/3")
 
     def test_panel_has_no_competing_title_or_extra_fields(self):
         """The agreed panel: author line, description, colour, footer only."""
@@ -231,7 +227,63 @@ class EmbedTests(unittest.TestCase):
     def test_history_embed_empty_state(self):
         embed = wallet.build_history_embed([], None)
         self.assertIsNone(embed.title)
-        self.assertEqual(embed.description, "No recorded inventory activity yet.")
+        self.assertTrue(embed.description.startswith(
+            "No recorded inventory activity yet."))
+        # An absent start row is reported as absent, never invented.
+        self.assertIn("recording start not recorded", embed.description)
+
+    def test_history_coverage_note_states_the_recorded_start(self):
+        embed = wallet.build_history_embed([], "2026-09-01 00:00:00")
+        self.assertIn("-# Partial coverage · recording started "
+                      "2026-09-01 00:00:00 UTC", embed.description)
+        self.assertNotIn("unknown", embed.description)
+
+
+class FooterContractTests(unittest.IsolatedAsyncioTestCase):
+    """The agreed footer is the branded line — no page counter, no note."""
+
+    async def test_paged_tab_keeps_the_agreed_footer_verbatim(self):
+        response = SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock())
+        interaction = SimpleNamespace(
+            response=response, message=object(),
+            user=SimpleNamespace(id=2, display_name="Shadow", name="Shadow"),
+            client=SimpleNamespace(user=SimpleNamespace(name="Nilive")))
+        items = [entry(f"Item {n:02}", f"i:{n+1}") for n in range(31)]
+        with patch.object(wallet, "get_inventory_entries", AsyncMock(return_value=items)), \
+             patch.object(wallet, "cleanup_unowned_title", AsyncMock()), \
+             patch.object(wallet, "_decorate", AsyncMock(side_effect=lambda gid, e: e)), \
+             patch.object(wallet, "_attach_prepared_app_emojis", AsyncMock()), \
+             patch.object(wallet, "get_currency_config", AsyncMock(
+                 return_value={"coins": {"name": "Coins", "emoji": "🪙"},
+                               "diamonds": {"name": "Diamonds", "emoji": "💎"}})), \
+             patch.object(wallet, "get_balance", AsyncMock(return_value=0)), \
+             patch.object(wallet, "get_equipped", AsyncMock(return_value=None)), \
+             patch.object(wallet, "get_equipped_title", AsyncMock(return_value=None)):
+            await wallet.open_inventory_panel(interaction, 1, 2, wallet.TAB_ITEMS, page=1)
+            embed = response.edit_message.await_args.kwargs["embed"]
+            self.assertEqual(embed.footer.text, wallet.INVENTORY_FOOTER_TEXT)
+            self.assertNotIn("Page", embed.footer.text)
+
+    async def test_history_tab_keeps_the_agreed_footer_verbatim(self):
+        """It knows the recording start, and still does not put it in the footer."""
+        response = SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock())
+        interaction = SimpleNamespace(
+            response=response, message=object(),
+            user=SimpleNamespace(id=2, display_name="Shadow", name="Shadow"),
+            client=SimpleNamespace(user=SimpleNamespace(name="Nilive")))
+        with patch("utils.inventory_activity.count_activity", AsyncMock(return_value=40)), \
+             patch("utils.inventory_activity.get_activity_page", AsyncMock(return_value=[])), \
+             patch("utils.inventory_activity.get_activity_start",
+                   AsyncMock(return_value="2026-10-01 00:00:00")):
+            await wallet.open_inventory_panel(interaction, 1, 2, wallet.TAB_HISTORY, page=1)
+            embed = response.edit_message.await_args.kwargs["embed"]
+            self.assertEqual(embed.footer.text, wallet.INVENTORY_FOOTER_TEXT)
+            self.assertNotIn("Page", embed.footer.text)
+            self.assertNotIn("Recording started", embed.footer.text)
+            # ...but the coverage statement is still told, as a description
+            # footnote, and it states the recorded start rather than a guess.
+            self.assertIn("-# Partial coverage · recording started "
+                          "2026-10-01 00:00:00 UTC", embed.description)
 
 
 class ComponentBehaviourTests(unittest.IsolatedAsyncioTestCase):

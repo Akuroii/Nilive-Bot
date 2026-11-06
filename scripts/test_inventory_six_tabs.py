@@ -65,7 +65,8 @@ class SixTabTests(unittest.IsolatedAsyncioTestCase):
             select = next(x for x in view.children if isinstance(x, wallet.InventoryItemSelect))
             self.assertEqual(len(select.options), 15)
             self.assertEqual(select.options[0].value, 'i:16')
-            self.assertIn('Page 2/3', response.edit_message.await_args.kwargs['embed'].footer.text)
+            self.assertEqual(wallet.INVENTORY_FOOTER_TEXT,
+                             response.edit_message.await_args.kwargs['embed'].footer.text)
             self.assertEqual(view.page, 1)
             view.stop()
 
