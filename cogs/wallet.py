@@ -941,7 +941,8 @@ class ItemPanelView(WalletBaseView):
       * Potions     -> Activate (disabled if effect is misconfigured)
       * Titles      -> Equip or Unequip, whichever applies
       * Equippables -> Equip or Unequip, whichever applies
-      * All items   -> Drop (with confirmation) and Back
+      * Permanent items -> Drop (with confirmation)
+      * All items   -> Back
     """
 
     def __init__(self, guild_id: int, user_id: int, tab: str,
@@ -962,7 +963,8 @@ class ItemPanelView(WalletBaseView):
         elif item["item_type"] == TITLE_ITEM_TYPE or item["item_type"] in EQUIPPABLE_TYPES:
             self.add_item(EquipToggleButton(equipped))
 
-        self.add_item(DropButton())
+        if not self.timed:
+            self.add_item(DropButton())
         self.add_item(ItemBackButton())
 
 
@@ -1106,15 +1108,8 @@ class DropConfirmView(WalletBaseView):
     async def confirm_button(self, interaction: discord.Interaction,
                              button: discord.ui.Button):
         if self.timed_holding is not None:
-            from utils.timed_ownership import expire_one
-            result = await expire_one(interaction.client, self.timed_holding, drop_requested=True)
-            if result.get("status") != "removed":
-                await interaction.response.send_message(
-                    f"Could not drop that item — {result.get('reason', 'try again later')}.",
-                    ephemeral=True)
-                return
-            await open_inventory_panel(interaction, self.guild_id, self.user_id,
-                                       self.tab, page=self.page)
+            await interaction.response.send_message(
+                "Timed holdings cannot be dropped.", ephemeral=True)
             return
         from utils.equip_engine import slot_lock
         async with slot_lock(self.guild_id, self.user_id):
@@ -1184,12 +1179,14 @@ async def open_drop_confirm(interaction: discord.Interaction,
     if not item or (tab != TAB_EQUIPPED and item not in split_by_tab(items).get(tab, [])):
         await interaction.response.send_message("That entry cannot be dropped.", ephemeral=True)
         return
-    holding = dict(item) if item.get("timed") else None
+    if item.get("timed"):
+        await interaction.response.send_message(
+            "Timed holdings cannot be dropped.", ephemeral=True)
+        return
     item = (await _decorate(guild_id, [item]))[0]
     view = DropConfirmView(guild_id, user_id, tab, item["item_name"],
                            item_id=item["id"], item_type=item["item_type"], page=page,
-                           quantity=item["quantity"], metadata=item.get("metadata") or {},
-                           timed_holding=holding)
+                           quantity=item["quantity"], metadata=item.get("metadata") or {})
     embed = build_drop_confirm_embed(tab, item["item_name"], item)
     _brand_inventory(embed, interaction, tab, "Confirm or cancel")
     await interaction.response.edit_message(embed=embed, view=view)

@@ -10,20 +10,19 @@
 8. Test pipelines must retain Python's exit code, not the exit code of `tail` or another consumer. Prefer direct subprocess capture.
 9. Distinguish product failures from test-environment and mock failures.
 10. Do not change production requirements just to run tests. Install test dependencies in an isolated environment.
-11. Do not modify production data, deploy, or merge pull requests.
+11. Do not modify production data, deploy, or merge pull requests without explicit user approval.
 12. Do not silently continue after a required schema migration or security check fails.
 13. Absence of tests is not evidence of correctness.
 14. If requirements conflict, or a decision needs a schema change or a change to legacy ownership policy, explain alternatives and risks and ask before choosing.
 15. If a repair cannot be implemented safely, do not invent a workaround or weaken the condition. Describe the safe alternative and what must be deferred; obtain approval for policy-changing alternatives.
 
-## Session safeguards
+## Repository safeguards
 
-- Work and publish only on `arena/cb283edb-nilive-bot` for this session.
 - No destructive reset, clean, force push, or checkout that discards local work.
 - Recovery archives are unreviewed references, never bulk overlays or approved source merges.
 - Keep AGENTS.md and CLAUDE.md byte-identical (`cmp -s AGENTS.md CLAUDE.md`).
 - Record exact tested HEAD and any uncommitted patch; never attribute dirty-tree results to a clean SHA.
-- A PR is allowed only after the user's acceptance gates are met; do not merge it or deploy.
+- A PR is allowed only after the user's acceptance gates are met; do not merge or deploy without explicit user approval.
 
 ## Working principles
 

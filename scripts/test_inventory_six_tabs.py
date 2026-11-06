@@ -131,8 +131,9 @@ class SixTabTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_awaited_once()
         view.stop()
 
-    async def test_timed_drop_offers_confirmation(self):
-        item = entry('Timed', 'h:2', timed=True)
-        view = wallet.ItemPanelView(1, 2, wallet.TAB_ITEMS, item, False)
-        self.assertTrue(any(isinstance(x, wallet.DropButton) for x in view.children))
-        view.stop()
+    async def test_timed_drop_not_offered_on_any_item_type(self):
+        for kind in ('custom', 'temp_role', 'potion', 'title'):
+            item = entry('Timed', 'h:2', item_type=kind, timed=True)
+            view = wallet.ItemPanelView(1, 2, wallet.TAB_ITEMS, item, False)
+            self.assertFalse(any(isinstance(x, wallet.DropButton) for x in view.children))
+            view.stop()

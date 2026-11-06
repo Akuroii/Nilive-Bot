@@ -40,6 +40,39 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await inventory_activity.get_activity_page(2, 2), [])
         self.assertTrue(await inventory_activity.get_activity_start())
 
+    async def test_member_drop_confirmation_preserves_permanent_behavior(self):
+        from types import SimpleNamespace
+        from cogs import wallet
+        await inventory.give_item(1, 2, 'Sword', 3)
+        item = (await inventory.get_inventory_entries(1, 2))[0]
+        interaction = SimpleNamespace(
+            client=object(), message=object(),
+            response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock()))
+        with patch.object(wallet, '_brand_inventory'), \
+             patch.object(wallet, 'open_inventory_panel', AsyncMock()) as back:
+            await wallet.open_drop_confirm(interaction, 1, 2, wallet.TAB_ITEMS, item['entry_key'])
+            view = interaction.response.edit_message.await_args.kwargs['view']
+            await view.confirm_button.callback(interaction)
+            back.assert_awaited_once()
+        self.assertFalse(await inventory.has_item(1, 2, 'Sword'))
+        self.assertEqual([e['event_type'] for e in await inventory_activity.get_activity_page(1, 2)],
+                         ['dropped', 'acquired'])
+        view.stop()
+
+    async def test_member_cannot_drop_live_timed_holding(self):
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+        from cogs import wallet
+        from utils import timed_ownership as timed
+        future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        ident = await timed.grant_timed_holding(1, 2, 'Clock', expires_at=future)
+        interaction = SimpleNamespace(response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock()))
+        await wallet.open_drop_confirm(interaction, 1, 2, wallet.TAB_ITEMS, f'h:{ident}')
+        interaction.response.edit_message.assert_not_awaited()
+        self.assertIn('cannot be dropped', interaction.response.send_message.await_args.args[0])
+        self.assertIsNotNone(await timed.get_timed_holding(f'h:{ident}'))
+        self.assertEqual([e['event_type'] for e in await inventory_activity.get_activity_page(1, 2)], ['acquired'])
+
     async def test_drop_rejects_replaced_stack_id(self):
         await inventory.give_item(1, 2, 'Sword', 1)
         old_id = (await inventory.get_inventory(1, 2))[0]['id']
