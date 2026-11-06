@@ -17,6 +17,7 @@ from dashboard.permissions import (
 from dashboard.utils.async_utils import run_async
 from database import DB_PATH
 from utils.shop_emoji import (
+    GUILD_ASSET_LIMIT,
     ShopEmojiError,
     delete_confirmed_duplicate,
     prepare_product_emojis,
@@ -104,12 +105,18 @@ def api_shop_emoji_delete_duplicate():
 @api_bp.route("/shop-publisher/emojis/backfill", methods=["POST"])
 @require_api_permission(LEVEL_OWNER)
 def api_shop_emoji_backfill():
-    """Queue every eligible existing product for preparation (one-time bulk).
+    """Authorise and queue this guild's existing catalog (one bulk action).
 
-    Reads ``shop_items`` directly, so no Shop Designer roster entry is needed.
-    This endpoint only writes queue rows: the background worker performs the
-    uploads in bounded batches, so the request returns immediately and nothing
-    here can create 100 emojis inside one HTTP call.
+    Two distinct effects, both scoped to the caller's OWN guild:
+
+    * an authorisation row, which is what the bot's periodic discovery reads —
+      without it, deploying the build cannot start creating emojis for other
+      servers;
+    * queue rows for every eligible product, read straight from ``shop_items``,
+      so no Shop Designer roster entry and no per-product selection is needed.
+
+    This returns immediately: the background worker performs the uploads in
+    bounded batches, so nothing here can create 100 emojis inside one request.
     """
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
@@ -122,14 +129,20 @@ def api_shop_emoji_backfill():
 
     from utils import shop_emoji_queue as queue
 
+    guild_id = get_session_guild_id()
+
     async def run():
         async with aiosqlite.connect(DB_PATH) as db:
-            await queue.ensure_schema(db)
+            await queue.authorize_backfill(db, guild_id,
+                                          actor=data.get("actor") or "dashboard-owner")
             queued = await queue.enqueue_guild_products(
-                get_session_guild_id(),
+                db, guild_id,
                 reason=str(data.get("reason") or "backfill"),
-                only_unprepared=data.get("include_prepared") is not True)
-            return {"success": True, "queued": queued, "queue": await queue.stats(db)}
+                only_unprepared=data.get("include_prepared") is not True,
+                reactivate_parked=data.get("retry_parked") is True)
+            report = await queue.stats(db, guild_id=guild_id)
+            report["authorized"] = await queue.is_authorized(db, guild_id)
+            return {"success": True, "queued": queued, "queue": report}
 
     try:
         return jsonify(run_async(run()))
@@ -140,37 +153,100 @@ def api_shop_emoji_backfill():
 @api_bp.route("/shop-publisher/emojis/queue", methods=["GET"])
 @require_api_permission(LEVEL_OWNER)
 def api_shop_emoji_queue_status():
-    """Read-only queue report: depth, retries and the next scheduled attempt."""
+    """READ-ONLY queue report for this guild.
+
+    Deliberately performs no DDL: schema creation belongs to application
+    initialisation (``init_db``), not to a GET. If the queue table does not
+    exist yet, the report says so instead of creating it as a side effect.
+    """
     from utils import shop_emoji_queue as queue
+
+    guild_id = get_session_guild_id()
 
     async def run():
         async with aiosqlite.connect(DB_PATH) as db:
-            await queue.ensure_schema(db)
-            guild_id = get_session_guild_id()
+            if not await _table_exists(db, "shop_emoji_queue"):
+                return {"success": True, "schema_ready": False,
+                        "queue": {"total": 0, "parked": 0, "deferred": 0,
+                                  "errored": 0, "max_attempts": 0},
+                        "authorized": False, "next_attempt_at": None,
+                        "pending_sample": [], "parked": []}
             rows = await queue.due(db, guild_id=guild_id, limit=queue.MAX_BATCH_LIMIT)
-            return {"success": True,
+            return {"success": True, "schema_ready": True,
                     "queue": await queue.stats(db, guild_id=guild_id),
-                    "next_attempt_at": await queue.next_attempt_at(db),
+                    "authorized": await queue.is_authorized(db, guild_id),
+                    # Guild-scoped, matching every other number in this payload.
+                    "next_attempt_at": await queue.next_attempt_at(db, guild_id=guild_id),
                     "pending_sample": [
                         {"product_id": r["product_id"], "item_name": r["item_name"],
                          "attempts": r["attempts"], "last_error": r["last_error"],
                          "next_attempt_at": r["next_attempt_at"]}
-                        for r in rows]}
+                        for r in rows],
+                    "parked": await queue.parked_rows(db, guild_id=guild_id)}
 
     try:
         return jsonify(run_async(run()))
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"success": False, "error": str(exc), "code": "queue_read_failed"}), 500
+        return jsonify({"success": False, "error": str(exc),
+                        "code": "queue_read_failed"}), 500
+
+
+@api_bp.route("/shop-publisher/emojis/retry", methods=["POST"])
+@require_api_permission(LEVEL_OWNER)
+def api_shop_emoji_retry():
+    """Explicit owner retry: reactivate parked products with a fresh budget."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Request body must be a JSON object.",
+                        "code": "invalid_json"}), 400
+    product_ids = data.get("product_ids")
+    if not isinstance(product_ids, list) or not product_ids:
+        return jsonify({"success": False, "error": "Send a list of product IDs.",
+                        "code": "invalid_product_ids"}), 400
+
+    from utils import shop_emoji_queue as queue
+
+    guild_id = get_session_guild_id()
+
+    async def run():
+        async with aiosqlite.connect(DB_PATH) as db:
+            await queue.ensure_schema(db)
+            reactivated = 0
+            for pid in product_ids:
+                if not isinstance(pid, int) or isinstance(pid, bool):
+                    continue
+                if await queue.descriptor(db, guild_id, pid):
+                    await queue.reactivate(db, guild_id, pid)
+                    reactivated += 1
+                else:
+                    # Never queued (or already finished): queue it now.
+                    cur = await db.execute(
+                        "SELECT name, icon_url FROM shop_items WHERE id=? AND guild_id=?",
+                        (pid, guild_id))
+                    row = await cur.fetchone()
+                    if row and await queue.enqueue_product(
+                            db, guild_id, pid, row[0], row[1],
+                            reason="owner_retry", reset_attempts=True) is not None:
+                        reactivated += 1
+            return {"success": True, "reactivated": reactivated,
+                    "queue": await queue.stats(db, guild_id=guild_id)}
+
+    try:
+        return jsonify(run_async(run()))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc),
+                        "code": "retry_failed"}), 500
 
 
 @api_bp.route("/shop-publisher/emojis/names", methods=["POST"])
 @require_api_permission(LEVEL_OWNER)
 def api_shop_emoji_names():
-    """Preview or apply readable renames via Discord's Modify Emoji API.
+    """Preview or apply readable renames across the WHOLE existing catalog.
 
-    ``apply`` performs a PATCH per asset — same emoji ID, no recreate, no
-    delete, and every alias/hash row is untouched. Only ready, bound assets are
-    eligible, so a rename can never disturb an in-flight creation.
+    ``apply`` performs one PATCH per asset — same emoji ID, no recreate, no
+    delete, and every alias/hash row is untouched. Pagination is keyset-based
+    over ``content_hash``, so more than one page of legacy emojis is reachable
+    and a second complete run performs zero PATCHes.
     """
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
@@ -181,14 +257,111 @@ def api_shop_emoji_names():
     except ShopEmojiError as exc:
         return _error_response(exc)
 
-    from utils import shop_emoji as SE
-    from utils.shop_emoji_worker import rename_pass
+    from utils.shop_emoji_worker import rename_all
 
     try:
-        result = run_async(rename_pass(guild_id=get_session_guild_id(),
-                                       apply=data.get("apply") is True))
+        result = run_async(rename_all(guild_id=get_session_guild_id(),
+                                      apply=data.get("apply") is True))
         return jsonify({"success": True, **result})
     except ShopEmojiError as exc:
         return _error_response(exc)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"success": False, "error": str(exc), "code": "rename_failed"}), 500
+
+
+async def _table_exists(db, name):
+    cur = await db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
+    return await cur.fetchone() is not None
+
+
+@api_bp.route("/shop-publisher/emojis/report", methods=["GET"])
+@require_api_permission(LEVEL_OWNER)
+def api_shop_emoji_report():
+    """Operational report: what a backfill would do, and what is stuck.
+
+    Read-only. Separates eligible products, already-ready products, the assets a
+    backfill would still have to attempt, reuse through SHARED CONTENT (the real
+    dedupe axis: several products, identical image bytes, one emoji), quota
+    usage, permanently failed products, uncertain assets and rows waiting on a
+    retry.
+    """
+    from utils import shop_emoji_queue as queue
+    from utils.shop_emoji import GUILD_ASSET_LIMIT, configured_application_id
+    from utils.shop_emoji_queue import queue_source_url
+
+    guild_id = get_session_guild_id()
+    app_id = configured_application_id()
+
+    async def run():
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await (await db.execute(
+                "SELECT id,name,icon_url FROM shop_items WHERE guild_id=? "
+                "AND icon_url IS NOT NULL AND TRIM(icon_url)<>'' "
+                "AND COALESCE(enabled,1)=1", (guild_id,))).fetchall()
+            eligible = len(rows)
+            url_owner = {}       # canonical url -> product count
+            ready_urls, unprepared_urls = set(), set()
+            for _pid, _name, raw in rows:
+                canon = queue_source_url(raw)
+                if not canon:
+                    continue
+                url_owner[canon] = url_owner.get(canon, 0) + 1
+                found = await (await db.execute(
+                    "SELECT 1 FROM shop_emoji_url_aliases a "
+                    "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
+                    "  AND e.content_hash=a.content_hash "
+                    "WHERE a.application_id=? AND a.guild_id=? AND a.source_url=? "
+                    "AND e.status='ready' LIMIT 1", (app_id, guild_id, canon))).fetchone()
+                (ready_urls if found else unprepared_urls).add(canon)
+
+            # Content reuse, measured on what is already prepared: products
+            # whose current image resolves to the same content hash.
+            content_users = await (await db.execute(
+                "SELECT a.content_hash, COUNT(DISTINCT a.source_url) "
+                "FROM shop_emoji_url_aliases a "
+                "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
+                "  AND e.content_hash=a.content_hash "
+                "WHERE a.application_id=? AND a.guild_id=? AND e.status='ready' "
+                "GROUP BY a.content_hash HAVING COUNT(DISTINCT a.source_url) > 1",
+                (app_id, guild_id))).fetchall()
+
+            uncertain_n = (await (await db.execute(
+                "SELECT COUNT(*) FROM shop_emoji_assets WHERE application_id=? "
+                "AND status IN ('uncertain','preparing')", (app_id,))).fetchone())[0]
+            failed_n = (await (await db.execute(
+                "SELECT COUNT(*) FROM shop_emoji_assets WHERE application_id=? "
+                "AND status IN ('failed','missing')", (app_id,))).fetchone())[0]
+            used = (await (await db.execute(
+                "SELECT COUNT(*) FROM shop_emoji_assets WHERE application_id=? "
+                "AND status IN ('ready','preparing','uncertain') AND creator_guild_id=?",
+                (app_id, guild_id))).fetchone())[0]
+
+            stats = (await queue.stats(db, guild_id=guild_id)) \
+                if await _table_exists(db, "shop_emoji_queue") else {}
+            return {"success": True,
+                    "eligible_products": eligible,
+                    "already_ready": sum(url_owner[u] for u in ready_urls),
+                    "unprepared_products": sum(url_owner[u] for u in unprepared_urls),
+                    "distinct_urls": len(url_owner),
+                    # An attempt per unprepared URL; identical bytes will still
+                    # collapse to one asset once hashed, which is why this is a
+                    # ceiling and not a promise.
+                    "assets_to_attempt_max": len(unprepared_urls),
+                    "shared_url_groups": sorted(
+                        c for c in url_owner.values() if c > 1),
+                    "content_reused_groups": [{"content_hash": h, "products": n}
+                                              for h, n in content_users],
+                    "quota": {"used": used, "limit": GUILD_ASSET_LIMIT},
+                    "quota_limited": used >= GUILD_ASSET_LIMIT,
+                    "uncertain": uncertain_n,
+                    "failed_or_missing": failed_n,
+                    "queue": stats,
+                    "parked": (await queue.parked_rows(db, guild_id=guild_id)
+                               if await _table_exists(db, "shop_emoji_queue") else [])}
+
+    try:
+        return jsonify(run_async(run()))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"success": False, "error": str(exc),
+                        "code": "report_failed"}), 500

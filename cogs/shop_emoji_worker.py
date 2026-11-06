@@ -4,17 +4,21 @@ Two loops, both bounded and both restarted with the process:
 
 * ``worker_loop`` every ``WORKER_INTERVAL_SECONDS``: drains up to
   ``BATCH_LIMIT`` due rows, reconciling ambiguous assets first.
-* ``backfill_loop`` every ``BACKFILL_INTERVAL_SECONDS``: top up the queue from
-  ``shop_items`` (the authoritative table) so products that were never prepared
-  — including everything that predates this feature — are picked up without any
-  Shop Designer roster entry.
+* ``backfill_loop`` every ``BACKFILL_INTERVAL_SECONDS``: tops up the queue from
+  ``shop_items`` for guilds whose owner has authorised a backfill.
+
+Discovery is **owner-gated per guild**. The loop iterates the
+``shop_icon_backfill`` authorisation table, not ``bot.guilds``, so deploying
+this build cannot start creating application emojis for every connected
+server. New and changed products are still queued automatically by the
+Dashboard save path, which is already an authorised, owner-issued action.
 
 The loops never overlap with the manual prepare action: both go through
 ``utils.shop_emoji_worker.run_pass``, which holds a process-wide lock, and the
-underlying asset writes are fenced in the database.
+underlying queue writes are generation-fenced in the database.
 
 Nothing here reads or writes Inventory or Rank state, and no loop touches
-Discord unless the queue has due work — an idle bot makes zero API calls.
+Discord unless there is due work — an idle bot makes zero API calls.
 """
 import asyncio
 import logging
@@ -49,22 +53,27 @@ class ShopEmojiWorker(commands.Cog):
         self.worker_loop.cancel()
         self.backfill_loop.cancel()
 
-    async def _guild_ids(self):
-        """Every guild this bot serves — the queue is per guild by design."""
-        return [guild.id for guild in self.bot.guilds]
-
-    async def _top_up(self, guild_id, *, reason="backfill"):
+    async def authorized_guild_ids(self):
+        """Guilds whose owner explicitly authorised backfill."""
         async with aiosqlite.connect(DB_PATH) as db:
-            return await Q.enqueue_guild_products(db, guild_id, reason=reason)
+            await Q.ensure_schema(db)
+            return await Q.authorized_guilds(db)
 
     @tasks.loop(seconds=BACKFILL_INTERVAL_SECONDS)
     async def backfill_loop(self):
-        """Discover eligible products straight from the Shop database."""
+        """Discover eligible products for AUTHORISED guilds only."""
         if not _credentials_present() or not self.bot.is_ready():
             return
-        for guild_id in await self._guild_ids():
+        for guild_id in await self.authorized_guild_ids():
+            # A guild the bot has left must not keep accruing work.
+            if self.bot.get_guild(guild_id) is None:
+                continue
             try:
-                queued = await self._top_up(guild_id)
+                async with aiosqlite.connect(DB_PATH) as db:
+                    queued = await Q.enqueue_guild_products(db, guild_id,
+                                                            reason="backfill")
+                    if queued:
+                        await Q.record_sweep(db, guild_id, f"queued {queued}")
                 if queued:
                     log.info("shop emoji backfill: queued %s product(s) for guild %s",
                              queued, guild_id)
@@ -86,10 +95,11 @@ class ShopEmojiWorker(commands.Cog):
         if report.get("processed") or report.get("renamed") or report.get("pruned"):
             log.info(
                 "shop emoji pass: processed=%s created=%s reused=%s renamed=%s "
-                "deferred=%s failed=%s pruned=%s budget_exhausted=%s",
+                "deferred=%s failed=%s stale=%s pruned=%s budget_exhausted=%s",
                 report.get("processed"), report.get("created"), report.get("reused"),
                 report.get("renamed"), report.get("deferred"), report.get("failed"),
-                report.get("pruned"), report.get("budget_exhausted"))
+                report.get("stale"), report.get("pruned"),
+                report.get("budget_exhausted"))
 
     @backfill_loop.before_loop
     async def _before_backfill(self):

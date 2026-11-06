@@ -238,8 +238,14 @@ def deterministic_emoji_name(content_hash: str) -> str:
 # content hash, which is why the name always ends in a hash-derived suffix.
 # Renaming is therefore cosmetic and can never change an asset's identity.
 _EMOJI_NAME_LIMIT = 32          # Discord's documented maximum
-_NAME_SLUG_BUDGET = 24          # 32 - len("_") - len(suffix of 6)
-_SUFFIX_LENGTH = 6
+# 8 hex characters = 32 bits of the content hash inside the name. The suffix is
+# only a human-readable tie-breaker, NOT the identity: identity is (and remains)
+# the full SHA-256 in shop_emoji_assets, and adoption additionally verifies the
+# suffix against that full hash (see _name_matches_content). A longer suffix
+# makes an accidental name collision between two different images negligible
+# while still leaving room for a readable slug.
+_SUFFIX_LENGTH = 8
+_NAME_SLUG_BUDGET = _EMOJI_NAME_LIMIT - 1 - _SUFFIX_LENGTH
 
 # Digraphs are replaced first (as whole strings) so they win over their parts;
 # single letters then go through one translate table.
@@ -325,13 +331,104 @@ def safe_emoji_name(candidate, content_hash) -> str:
     return deterministic_emoji_name(content_hash)
 
 
-def rename_target_name(asset, item_name) -> str | None:
+def name_slug_part(name: str) -> str:
+    """The readable part of an emoji name (everything before the suffix)."""
+    if not isinstance(name, str):
+        return ""
+    if "_" not in name:
+        return "" if name.startswith("shop_") else name
+    return name.rsplit("_", 1)[0]
+
+
+def _name_matches_content(name: str, content_hash: str) -> bool:
+    """Is this Discord emoji name a legitimate name for THIS content hash?
+
+    Guards adoption: a name match must never attach an emoji that belongs to a
+    different image. Accepts
+
+    * the deterministic legacy form ``shop_<hash24>``, or
+    * a readable ``<slug>_<hash8>`` whose suffix equals this hash's suffix.
+
+    Anything else - including a readable name built from a different hash that
+    happens to share the slug - is rejected, so a collision can never be
+    adopted.
+    """
+    if not _HEX_64.fullmatch(content_hash or "") or not isinstance(name, str):
+        return False
+    if name == deterministic_emoji_name(content_hash):
+        return True
+    return name.endswith("_" + name_suffix(content_hash)) and bool(name_slug_part(name))
+
+
+def canonical_product_label(names) -> str | None:
+    """The one deterministic product label for a shared image.
+
+    Content-based deduplication means several products can share a single
+    application emoji. Its name must not depend on which product happened to be
+    processed first, so the label is the lexicographically smallest usable
+    product name among everything bound to that content. Pure: the same set of
+    names always yields the same label, in any order, across restarts.
+    """
+    usable = [str(n).strip() for n in (names or [])
+              if isinstance(n, str) and str(n).strip() and not str(n).strip().isdigit()]
+    return min(usable) if usable else None
+
+
+async def canonical_label_for_asset(db, application_id, content_hash) -> str | None:
+    """Canonical product label for a prepared asset, read from the alias table.
+
+    Every product bound to this asset contributes its listing name; the
+    deterministic minimum wins. Returned label is what the emoji should be
+    called, independent of queue order.
+    """
+    if not content_hash:
+        return None
+    cur = await db.execute(
+        "SELECT DISTINCT s.name FROM shop_emoji_url_aliases a "
+        "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
+        "  AND e.content_hash=a.content_hash "
+        "JOIN shop_items s ON s.guild_id=a.guild_id AND s.icon_url=a.source_url "
+        "WHERE a.application_id=? AND a.content_hash=?",
+        (application_id, content_hash))
+    names = [row[0] for row in await cur.fetchall()]
+    return canonical_product_label(names)
+
+
+async def resolve_asset_name(db, asset) -> str:
+    """The name this asset should carry, for its own content identity."""
+    content_hash = (asset or {}).get("content_hash") or ""
+    label = await canonical_label_for_asset(db, (asset or {}).get("application_id"), content_hash)
+    return readable_emoji_name(label or "", content_hash)
+
+
+async def emoji_name_conflict(db, application_id, emoji_id, content_hash):
+    """The other content hash already bound to this emoji ID, if any.
+
+    A Discord emoji ID belongs to exactly one image. This returns a DIFFERENT
+    hash than ``content_hash`` when this emoji is already spoken for, so a
+    colliding name or ID can never point two images at one emoji.
+    """
+    if not _valid_emoji_id(emoji_id):
+        return None
+    cur = await db.execute(
+        "SELECT content_hash FROM shop_emoji_assets WHERE application_id=? AND emoji_id=? "
+        "AND content_hash<>?", (application_id, str(emoji_id), content_hash))
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+def rename_target_name(asset, label) -> str | None:
     """The name a *ready* asset should carry, or None when it is already fine.
+
+    ``label`` must be the CANONICAL product label (see
+    ``canonical_product_label``), not whichever product the caller happens to
+    be processing - that is what keeps a shared emoji's name stable instead of
+    oscillating with queue order.
 
     Only a ready, bound asset is a rename candidate: renaming anything else
     would change what reconciliation expects while a create may still be in
-    flight. Returns None when the current name is already the readable one, so
-    repeat passes are free.
+    flight. Returns None when the current name already matches, so repeat
+    passes issue zero PATCHes.
     """
     if not isinstance(asset, dict) or asset.get("status") != "ready":
         return None
@@ -341,7 +438,7 @@ def rename_target_name(asset, item_name) -> str | None:
     if not _HEX_64.fullmatch(content_hash):
         return None
     current = asset.get("emoji_name") or ""
-    target = readable_emoji_name(item_name, content_hash)
+    target = readable_emoji_name(label or "", content_hash)
     return None if current == target else target
 
 
@@ -651,6 +748,15 @@ async def _clear_alias_recovery_required(db, application_id, guild_id, source_ur
 async def _adopt_asset(db, asset, candidate):
     if not _valid_emoji_id(candidate.get("id")):
         return asset
+    # A Discord emoji ID may be bound to exactly one content hash. If it is
+    # already bound elsewhere, adopting it here would silently point two
+    # different images at the same emoji — the collision failure this guards.
+    bound_elsewhere = await emoji_name_conflict(
+        db, asset["application_id"], candidate.get("id"), asset["content_hash"])
+    if bound_elsewhere:
+        return await _set_last_error(
+            db, asset,
+            "This Discord emoji ID is already bound to different content; refusing to adopt it.")
     cur = await db.execute(
         "UPDATE shop_emoji_assets SET status='ready',emoji_id=?,attempt_id=NULL,"
         "attempt_started_at=NULL,quarantine_until=NULL,last_error=NULL,updated_at=? "
@@ -827,6 +933,15 @@ async def _reconcile_asset(db, asset, remote, bot_user_id, *, stale_after=PREPAR
         candidate = matches[0]
         if (_valid_emoji_id(candidate.get("id"))
                 and _ownership_supported(candidate, asset["application_id"], bot_user_id)):
+            # Ownership is not enough: the name must also be a legitimate name
+            # for THIS content hash, otherwise a slug collision would adopt an
+            # emoji that belongs to a different image.
+            if not _name_matches_content(candidate.get("name"), asset["content_hash"]):
+                message = ("The emoji name match does not correspond to this content hash; "
+                           "refusing to adopt it.")
+                if asset["status"] == "preparing":
+                    return await _mark_uncertain(db, asset, message), []
+                return await _set_last_error(db, asset, message), []
             return await _adopt_asset(db, asset, candidate), []
         # A name match without positive bot-uploader provenance is a collision,
         # not absence. Keep ambiguous creation uncertain and return its ID so

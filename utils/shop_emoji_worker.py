@@ -18,23 +18,27 @@ Safety properties
   new item starts once the budget is spent.
 * **Resumable.** Progress lives in SQLite, so a Railway restart mid-pass simply
   leaves the row queued. ``prepare`` is idempotent per (guild, product).
+* **Generation-fenced.** The row is claimed with its ``generation`` before any
+  network work, and every progress write is a compare-and-swap on that
+  generation. A worker finishing URL A therefore cannot delete or overwrite
+  intent the Dashboard queued for URL B meanwhile. This does not depend on the
+  in-process lock: the Dashboard and Bot are separate processes.
+* **Idle is free.** An empty queue produces zero Discord requests.
 * **Ambiguity is never retried blindly.** ``_prepare_one`` already treats an
-  unconfirmed POST as ``uncertain`` and leaves it quarantined; the worker
-  reacts by reconciling against Discord (read-only) and deferring the row, never
-  by issuing a second create.
-* **Reconcile before create.** Every pass lists Discord's application emojis
-  first and lets ``_prepare_one``/``_create_claimed`` reconcile against that
-  snapshot before any POST.
-* **No deletion, ever.** The worker has no code path that calls
-  ``delete_emoji``. Duplicates are surfaced for human review only.
-* **Read-only consumers stay read-only.** Inventory and Rank import neither
-  this module nor the queue.
+  unconfirmed POST as ``uncertain``; the worker reacts by reconciling against
+  Discord (read-only) and deferring, never by issuing a second create.
+* **No deletion, ever.** The worker has no code path that calls ``delete_emoji``.
+* **Read-only consumers stay read-only.** Inventory and Rank import neither this
+  module nor the queue.
 
 Renaming
 --------
-A ready asset may be renamed in place (PATCH, same ID) to the readable policy
-name. ``managed_name`` is set *before* the PATCH so a crash between request and
-bookkeeping reconciles from Discord instead of declaring a metadata conflict.
+A shared image is one emoji serving several products, so its name must not
+depend on which product was processed first. The name is derived from the
+**canonical product label** of the content (``canonical_product_label``): the
+lexicographically smallest listing name bound to that asset. That is stable
+across queue order, guild order, restarts and repeated passes, so repeated runs
+issue zero extra PATCHes.
 """
 
 from __future__ import annotations
@@ -52,8 +56,9 @@ from utils import shop_emoji_queue as Q
 
 log = logging.getLogger(__name__)
 
-# Serialises the whole worker for this process. Cross-process safety comes from
-# the DB fences in _prepare_one/_claim_existing, not from this lock.
+# Serialises passes *within* this process. Cross-process safety comes from the
+# generation compare-and-swap in the queue and the DB fences in _prepare_one,
+# never from this lock.
 _pass_lock = None
 
 
@@ -65,13 +70,13 @@ def _lock():
 
 
 class PassReport(dict):
-    """Plain dict subclass so callers/tests can read fields without a class."""
+    """Plain dict subclass so callers/tests read fields without a class."""
 
 
 def _empty_report():
     return PassReport(processed=0, created=0, reused=0, reconciled=0, renamed=0,
-                      deferred=0, failed=0, skipped=0, pruned=0, budget_exhausted=False,
-                      results=[])
+                      deferred=0, failed=0, parked=0, skipped=0, stale=0, pruned=0,
+                      budget_exhausted=False, results=[])
 
 
 async def _load_listing(db, guild_id, product_id):
@@ -82,7 +87,7 @@ async def _load_listing(db, guild_id, product_id):
 
 
 async def _alias_asset(db, application_id, guild_id, source_url):
-    """Ready asset for this URL in this guild, if any (read-only)."""
+    """Ready asset for this exact URL in this guild, if any (read-only)."""
     cur = await db.execute(
         f"SELECT {SE._ASSET_SELECT_E} FROM shop_emoji_url_aliases a "
         "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
@@ -93,18 +98,20 @@ async def _alias_asset(db, application_id, guild_id, source_url):
     return SE._asset(await cur.fetchone())
 
 
-async def _maybe_rename(db, discord, asset, item_name, report, bot_user_id):
-    """Rename a ready, bound asset to the readable policy name (PATCH, same ID).
+async def _maybe_rename(db, discord, asset, report):
+    """Rename a ready, bound asset to its canonical (label-based) name.
 
-    Returns the (possibly updated) asset. Never creates, never deletes, and
-    never renames while the bound emoji is absent or lost from Discord.
+    The label is re-derived from the alias table, so a shared emoji always gets
+    the same name regardless of which product triggered this call.
     """
-    target = SE.rename_target_name(asset, item_name)
+    if not isinstance(asset, dict) or asset.get("status") != "ready":
+        return asset
+    label = await SE.canonical_label_for_asset(db, asset["application_id"],
+                                               asset["content_hash"])
+    target = SE.rename_target_name(asset, label)
     if not target:
         return asset
-    # Only touch what Discord just confirmed is present and ours.
-    created = await _rename_or_defer(db, discord, asset, target, report)
-    return created
+    return await _rename_or_defer(db, discord, asset, target, report)
 
 
 async def _rename_or_defer(db, discord, asset, target, report):
@@ -119,13 +126,10 @@ async def _rename_or_defer(db, discord, asset, target, report):
         await discord.rename_emoji(asset["emoji_id"], target)
     except SE.DiscordAPIError as exc:
         if exc.uncertain:
-            # The rename may or may not have applied. Identity is unchanged, so
-            # this is cosmetic and safe to leave: the next refresh accepts either
-            # name for a managed asset.
+            # Cosmetic and identity-preserving: the next refresh accepts either
+            # name for a managed asset, so this needs no repair.
             report["results"].append({"code": "rename_uncertain", "message": str(exc)})
             return await SE._get_asset(db, asset["application_id"], asset["content_hash"])
-        # A definitive rejection (e.g. invalid name) keeps the old name; the
-        # asset stays ready and resolvable, which is what matters.
         report["results"].append({"code": "rename_rejected", "message": str(exc)})
         await db.execute(
             "UPDATE shop_emoji_assets SET managed_name=0, updated_at=? "
@@ -143,8 +147,20 @@ async def _rename_or_defer(db, discord, asset, target, report):
     return await SE._get_asset(db, asset["application_id"], asset["content_hash"])
 
 
-async def _process_row(db, discord, row, remote, bot_user_id, report, *, allow_create):
-    """Advance one queue row by exactly one step. Returns the report code."""
+async def _asset_by_hash(db, application_id, content_hash):
+    if not content_hash:
+        return None
+    return await SE._get_asset(db, application_id, content_hash)
+
+
+async def _process_row(db, discord, row, remote, bot_user_id, report):
+    """Advance one queue row by exactly one step.
+
+    Returns a short status string. Every progress write is generation-fenced,
+    and the row is re-validated against ``shop_items`` right before network
+    work, so work for a URL that has since changed is abandoned rather than
+    completed into stale intent.
+    """
     guild_id, product_id = row["guild_id"], row["product_id"]
     listing = await _load_listing(db, guild_id, product_id)
     if listing is None:
@@ -153,64 +169,74 @@ async def _process_row(db, discord, row, remote, bot_user_id, report, *, allow_c
         return "listing_gone"
     _id, _gid, item_name, icon_url, enabled = listing
     if not enabled:
+        await Q.mark_done(db, row)
         await Q.clear_product(db, guild_id, product_id)
         report["skipped"] += 1
         return "listing_disabled"
 
     current_url = Q.queue_source_url(icon_url)
     if current_url is None:
-        # The admin cleared/replaced the image with something unusable.
         await Q.clear_product(db, guild_id, product_id)
         report["skipped"] += 1
         return "no_usable_url"
     if current_url != row["source_url"]:
-        # The listing changed after this row was written; re-queue for the new
-        # URL instead of preparing an image the storefront no longer uses.
+        # The listing changed after this generation was written. Re-queue for
+        # the new URL (which bumps the generation and invalidates this row)
+        # instead of preparing an image the storefront no longer uses.
         await Q.enqueue_product(db, guild_id, product_id, item_name, current_url,
                                 reason="icon_url_changed")
         report["skipped"] += 1
         return "requeued_new_url"
 
-    # ── already prepared? (reuse) ────────────────────────────────────────
+    # ── already prepared for THIS exact URL? (reuse) ─────────────────────
     ready = await _alias_asset(db, discord.application_id, guild_id, current_url)
     if ready is not None:
-        await _maybe_rename(db, discord, ready, item_name, report, bot_user_id)
-        await Q.mark_done(db, row)
+        await _maybe_rename(db, discord, ready, report)
+        if not await Q.mark_done(db, row):
+            report["stale"] += 1
+            return "stale"
         report["reused"] += 1
         return "reused"
 
-    if not allow_create:
-        report["deferred"] += 1
-        return "budget"
+    # Claim this generation. If the Dashboard replaced it meanwhile, stop.
+    if not await Q.record_attempt(db, row):
+        report["stale"] += 1
+        return "stale"
+    # Re-read: another process may have changed the URL between claim and now.
+    fresh = await Q.descriptor(db, guild_id, product_id)
+    if fresh is None or fresh["generation"] != row["generation"] \
+            or fresh["source_url"] != row["source_url"]:
+        report["stale"] += 1
+        return "stale"
+    row = fresh
 
-    await Q.record_attempt(db, row)
+    # Resolve the canonical label ONCE, before the hash exists, so a new emoji
+    # is created with the same stable name a later rename would choose.
+    label = SE.canonical_product_label(
+        await _labels_for(db, guild_id, current_url, item_name))
     try:
         # The single existing entry point: hashing, aliasing, reconciliation,
         # create-fencing, quota and duplicate protection all live inside it.
-        # A brand-new emoji is created with the readable name directly; a
-        # reused one is renamed in place further down, so no new emoji ever
-        # starts life as the opaque hash name.
         result, remote = await SE._prepare_one(
             db, discord, guild_id, current_url, remote, bot_user_id,
             False, False,
-            emoji_name=lambda h: SE.readable_emoji_name(item_name, h))
+            emoji_name=lambda h: SE.safe_emoji_name(
+                SE.readable_emoji_name(label or "", h), h))
     except SE.SourceImageError as exc:
-        # Dead / non-image / oversized / timeout: retryable, the image may come back.
         await Q.mark_failed(db, row, f"{exc.code}: {exc}", retryable=True)
         report["failed"] += 1
         report["results"].append({"product_id": product_id, "code": exc.code,
                                   "message": str(exc)})
         return "source_error"
     except SE.ShopEmojiError as exc:
-        retryable = exc.code in {"guild_emoji_quota", "asset_creator_mismatch",
-                                 "asset_attribution_required"}
-        await Q.mark_failed(db, row, f"{exc.code}: {exc}", retryable=retryable)
+        # Quota is a real, reportable state; do not turn it into a hot retry
+        # loop (mark_failed backs off), and never raise the limit silently.
+        await Q.mark_failed(db, row, f"{exc.code}: {exc}", retryable=True)
         report["failed"] += 1
         report["results"].append({"product_id": product_id, "code": exc.code,
                                   "message": str(exc)})
         return "shop_error"
     except SE.DiscordAPIError as exc:
-        # Transport/5xx/429 — the asset fence already records any uncertainty.
         await Q.mark_failed(db, row, str(exc), retryable=True)
         report["failed"] += 1
         report["results"].append({"product_id": product_id, "code": exc.code,
@@ -222,8 +248,12 @@ async def _process_row(db, discord, row, remote, bot_user_id, report, *, allow_c
     if status == "ready":
         asset = await _asset_by_hash(db, discord.application_id, result.get("content_hash"))
         if asset is not None:
-            await _maybe_rename(db, discord, asset, item_name, report, bot_user_id)
-        await Q.mark_done(db, row)
+            await _maybe_rename(db, discord, asset, report)
+        if not await Q.mark_done(db, row):
+            report["stale"] += 1
+            report["results"].append({"product_id": product_id, "code": "stale_but_prepared",
+                                      "status": status})
+            return "stale"
         if code in {"created", "remapped_changed_source"}:
             report["created"] += 1
         else:
@@ -249,10 +279,31 @@ async def _process_row(db, discord, row, remote, bot_user_id, report, *, allow_c
     return "failed"
 
 
-async def _asset_by_hash(db, application_id, content_hash):
-    if not content_hash:
-        return None
-    return await SE._get_asset(db, application_id, content_hash)
+async def _labels_for(db, guild_id, source_url, fallback_name):
+    """Every product name bound to this URL in this guild (plus the current one).
+
+    The canonical label must not depend on which row triggered the work, so the
+    full bound set is resolved before the name is chosen.
+    """
+    cur = await db.execute(
+        "SELECT name FROM shop_items WHERE guild_id=? AND icon_url=?",
+        (guild_id, source_url))
+    names = [row[0] for row in await cur.fetchall()]
+    if fallback_name and fallback_name not in names:
+        names.append(fallback_name)
+    return names
+
+
+async def _ambiguous_count(db, application_id=None):
+    """How many assets still need a reconciliation read (cheap indexed count)."""
+    app_id = application_id or SE.configured_application_id()
+    if not app_id:
+        return 0
+    cur = await db.execute(
+        "SELECT COUNT(*) FROM shop_emoji_assets WHERE application_id=? "
+        "AND status IN ('uncertain','preparing')", (app_id,))
+    row = await cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
@@ -286,12 +337,18 @@ async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
                 async with SE._preparation_lock(discord.application_id):
                     # Credentials/ownership are verified before any work, exactly
                     # as the explicit path does.
-                    await discord.verify_application()
-                    bot_user_id = await discord.bot_user_id()
-
-                    if reconcile_uncertain:
-                        report["reconcile"] = await _reconcile_uncertain(
-                            db, discord, bot_user_id)
+                    try:
+                        await discord.verify_application()
+                        bot_user_id = await discord.bot_user_id()
+                        if reconcile_uncertain and ambiguous:
+                            report["reconciled"] += await _reconcile_uncertain(
+                                db, discord, bot_user_id)
+                    except (SE.DiscordAPIError, SE.ShopEmojiError) as exc:
+                        # A 429/5xx here is a transient "Discord is unavailable",
+                        # not a product failure: leave every row untouched and
+                        # record it so the next tick retries after the interval.
+                        report["discord_unavailable"] = str(exc)
+                        return report
 
                     if not allow_create:
                         return report
@@ -300,7 +357,12 @@ async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
                         return report
                     # One snapshot for the whole pass; later creations/adoptions
                     # are folded back in so intra-pass reuse is correct.
-                    remote = await discord.list_emojis()
+                    try:
+                        remote = await discord.list_emojis()
+                    except SE.DiscordAPIError as exc:
+                        # Same rule as above: back off, do not consume attempts.
+                        report["discord_unavailable"] = str(exc)
+                        return report
                     for row in rows:
                         if time.monotonic() - started >= time_budget:
                             report["budget_exhausted"] = True
@@ -308,29 +370,17 @@ async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
                         report["processed"] += 1
                         try:
                             await _process_row(db, discord, row, remote,
-                                               bot_user_id, report,
-                                               allow_create=True)
+                                               bot_user_id, report)
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:  # noqa: BLE001 - a pass must survive
                             log.warning("shop emoji worker: row %s/%s raised: %r",
                                         row.get("guild_id"), row.get("product_id"), exc)
-                            await Q.mark_failed(db, row, f"{exc.__class__.__name__}: {exc}",
-                                                retryable=True)
+                            await Q.mark_failed(db, row,
+                                                f"{exc.__class__.__name__}: {exc}",
+                                                retryable=True, count_attempt=True)
                             report["failed"] += 1
     return report
-
-
-async def _ambiguous_count(db, application_id=None):
-    """How many assets still need a reconciliation read (cheap indexed count)."""
-    app_id = application_id or SE.configured_application_id()
-    if not app_id:
-        return 0
-    cur = await db.execute(
-        "SELECT COUNT(*) FROM shop_emoji_assets WHERE application_id=? "
-        "AND status IN ('uncertain','preparing')", (app_id,))
-    row = await cur.fetchone()
-    return int(row[0]) if row else 0
 
 
 async def _reconcile_uncertain(db, discord, bot_user_id, limit=SE.STARTUP_RECONCILE_LIMIT):
@@ -338,7 +388,7 @@ async def _reconcile_uncertain(db, discord, bot_user_id, limit=SE.STARTUP_RECONC
 
     Reuses ``_reconcile_asset`` unchanged, so absence from one listing is never
     treated as proof of a failed create, and an adopted emoji must pass the same
-    ownership check. Returns the number of assets examined.
+    ownership AND content-identity checks. Returns the number of assets examined.
     """
     cur = await db.execute(
         f"SELECT {SE._ASSET_SELECT} FROM shop_emoji_assets WHERE application_id=? "
@@ -358,13 +408,131 @@ async def _reconcile_uncertain(db, discord, bot_user_id, limit=SE.STARTUP_RECONC
     return len(rows)
 
 
-async def process_product_now(db, discord, guild_id, product_id, *,
-                              item_name=None, bot_user_id=None):
-    """Test/support hook: advance one product through the same code path.
+# ── Legacy rename：complete, bounded, restart-safe traversal ────────────────
+RENAME_PAGE_SIZE = Q.MAX_BATCH_LIMIT
 
-    Used by the test-suite to drive the worker's per-row logic without a bot
-    connection or a scheduler tick.
+
+async def _rename_candidates(db, application_id, *, guild_id=None, after=None,
+                             limit=RENAME_PAGE_SIZE):
+    """One page of ready assets that still need the readable name.
+
+    Keyset pagination on ``content_hash`` (a stable primary-key component),
+    NOT on ``updated_at``: a successful rename updates ``updated_at``, so an
+    updated_at-ordered LIMIT would keep re-selecting the same newest rows and
+    never reach the older legacy assets.
+
+    Filtering happens in SQL against the canonical-name prefix, not in Python
+    after a LIMIT, so a page that is already correct costs no Discord calls.
     """
+    sql = (f"SELECT {SE._ASSET_SELECT_E} FROM shop_emoji_assets e "
+           "WHERE e.application_id=? AND e.status='ready' "
+           "AND e.emoji_id IS NOT NULL AND e.emoji_id<>''")
+    params = [application_id]
+    if guild_id is not None:
+        sql += " AND e.creator_guild_id=?"
+        params.append(guild_id)
+    if after is not None:
+        sql += " AND e.content_hash > ?"
+        params.append(after)
+    sql += " ORDER BY e.content_hash ASC LIMIT ?"
+    params.append(int(limit))
+    cur = await db.execute(sql, tuple(params))
+    rows = await cur.fetchall()
+    n = len(SE._ASSET_FIELDS)
+    out = []
+    for row in rows:
+        asset = SE._asset(row[:n])
+        if not asset:
+            continue
+        label = await SE.canonical_label_for_asset(db, application_id,
+                                                   asset["content_hash"])
+        target = SE.rename_target_name(asset, label)
+        if target:
+            out.append((asset, target))
+    return out
+
+
+async def rename_all(*, guild_id=None, apply=False, limit=None,
+                     page_size=RENAME_PAGE_SIZE, max_pages=200):
+    """Preview or apply readable names for the WHOLE existing catalog.
+
+    Walks every ready asset in content_hash order, page by page, so:
+    * more than 25 legacy emojis are all reachable,
+    * an interruption resumes from the assets still needing work (they are
+      still the ones whose name differs),
+    * a second complete run issues zero PATCHes,
+    * emoji IDs, aliases and content hashes are never touched.
+    """
+    report = {"preview": [], "renamed": 0, "pages": 0, "examined": 0,
+              "patch_requests": 0, "skipped_no_credentials": False, "results": []}
+    app_id = SE.configured_application_id()
+    if not app_id:
+        report["skipped_no_credentials"] = True
+        return report
+    async with aiosqlite.connect(DB_PATH) as db:
+        await Q.ensure_schema(db)
+        after = None
+        while report["pages"] < int(max_pages):
+            page = await _rename_candidates(db, app_id, guild_id=guild_id,
+                                            after=after, limit=page_size)
+            # Advance the cursor on the RAW page, not only on renamed rows:
+            # already-correct assets must still move the cursor forward.
+            cur = await db.execute(
+                "SELECT MAX(content_hash) FROM ("
+                f"  SELECT content_hash FROM shop_emoji_assets WHERE application_id=? "
+                "  AND status='ready' AND emoji_id IS NOT NULL AND emoji_id<>'' "
+                "  AND content_hash > ? ORDER BY content_hash ASC LIMIT ?)",
+                (app_id, after or "", int(page_size)))
+            row = await cur.fetchone()
+            if not row or row[0] is None:
+                break
+            after = row[0]
+            report["pages"] += 1
+            report["examined"] += 1
+            if not page:
+                continue
+            if not apply:
+                report["preview"].extend(
+                    {"content_hash": a["content_hash"], "emoji_id": a["emoji_id"],
+                     "current_name": a["emoji_name"], "proposed_name": t}
+                    for a, t in page)
+                if limit and len(report["preview"]) >= limit:
+                    break
+                continue
+            if not os.getenv("DISCORD_TOKEN", "").strip():
+                report["skipped_no_credentials"] = True
+                return report
+            async with SE.DiscordAPI() as discord:
+                async with SE._preparation_lock(discord.application_id):
+                    await discord.verify_application()
+                    bot_user_id = await discord.bot_user_id()
+                    remote = await discord.list_emojis()
+                    for asset, target in page:
+                        bound = next((e for e in remote
+                                      if str(e.get("id")) == str(asset["emoji_id"])), None)
+                        if bound is None or not SE._ownership_supported(
+                                bound, discord.application_id, bot_user_id):
+                            # Never rename what Discord no longer confirms is ours.
+                            continue
+                        report["patch_requests"] += 1
+                        await _rename_or_defer(db, discord, asset, target, report)
+            if limit and report["renamed"] >= limit:
+                break
+    return report
+
+
+# Backwards-compatible name used by the dashboard endpoint.
+async def rename_pass(*, guild_id=None, apply=False, limit=None):
+    result = await rename_all(guild_id=guild_id, apply=apply, limit=limit)
+    return {"preview": result["preview"], "renamed": result["renamed"],
+            "patch_requests": result["patch_requests"],
+            "pages": result["pages"],
+            "skipped_no_credentials": result.get("skipped_no_credentials", False),
+            "results": result.get("results", [])}
+
+
+async def process_product_now(db, discord, guild_id, product_id, *, bot_user_id=None):
+    """Test/support hook: advance one product through the same code path."""
     row = await Q.descriptor(db, guild_id, product_id)
     if row is None:
         return "not_queued"
@@ -372,69 +540,5 @@ async def process_product_now(db, discord, guild_id, product_id, *,
     remote = await discord.list_emojis()
     if bot_user_id is None:
         bot_user_id = await discord.bot_user_id()
-    return await _process_row(db, discord, row, remote, bot_user_id, report,
-                              allow_create=True), report
-
-
-async def rename_pass(*, guild_id=None, apply=False, limit=Q.MAX_BATCH_LIMIT):
-    """Preview (or apply) readable names for this guild's ready assets.
-
-    Renaming is purely cosmetic: the emoji ID, the bound ID, the content hash
-    and every alias row stay exactly as they are, which is why this can be run
-    later, repeatedly, and independently of preparation.
-
-    Only ``ready`` + bound assets owned by this guild are considered, and a
-    Discord 404/conflict is reported rather than repaired.
-    """
-    if not SE.configured_application_id() or not os.getenv("DISCORD_TOKEN", "").strip():
-        return {"preview": [], "renamed": 0, "skipped_no_credentials": True}
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await Q.ensure_schema(db)
-        params = [guild_id] if guild_id is not None else []
-        where = " AND e.creator_guild_id=?" if guild_id is not None else ""
-        cur = await db.execute(
-            f"SELECT {SE._ASSET_SELECT_E}, ("
-            "  SELECT s.name FROM shop_emoji_url_aliases a2 "
-            "  JOIN shop_items s ON s.guild_id=a2.guild_id "
-            "  WHERE a2.application_id=e.application_id "
-            "    AND a2.content_hash=e.content_hash AND s.icon_url IS NOT NULL "
-            "  ORDER BY a2.updated_at DESC LIMIT 1) "
-            "FROM shop_emoji_assets e WHERE e.application_id=? AND e.status='ready' "
-            "AND e.emoji_id IS NOT NULL" + where + " ORDER BY e.updated_at DESC LIMIT ?",
-            tuple([SE.configured_application_id(), *params, int(limit)]))
-        rows = await cur.fetchall()
-        n = len(SE._ASSET_FIELDS)
-        candidates = []
-        for row in rows:
-            asset = SE._asset(row[:n])
-            item_name = row[n]
-            target = SE.rename_target_name(asset, item_name)
-            if target:
-                candidates.append((asset, item_name, target))
-
-        if not candidates:
-            return {"preview": [], "renamed": 0}
-        report = _empty_report()
-        preview = [{"content_hash": a["content_hash"], "emoji_id": a["emoji_id"],
-                    "current_name": a["emoji_name"], "proposed_name": t,
-                    "item_name": name}
-                   for a, name, t in candidates]
-        if not apply:
-            return {"preview": preview, "renamed": 0}
-
-        async with SE.DiscordAPI() as discord:
-            async with SE._preparation_lock(discord.application_id):
-                await discord.verify_application()
-                bot_user_id = await discord.bot_user_id()
-                remote = await discord.list_emojis()
-                for asset, item_name, target in candidates:
-                    bound = next((e for e in remote
-                                  if str(e.get("id")) == str(asset["emoji_id"])), None)
-                    if bound is None or not SE._ownership_supported(
-                            bound, discord.application_id, bot_user_id):
-                        # Never rename something Discord no longer confirms as ours.
-                        continue
-                    await _maybe_rename(db, discord, asset, item_name, report, bot_user_id)
-        return {"preview": preview, "renamed": report["renamed"],
-                "results": report["results"]}
+    status = await _process_row(db, discord, row, remote, bot_user_id, report)
+    return status, report

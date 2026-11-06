@@ -466,6 +466,10 @@ async def _enqueue_icon_work(guild_id, item_name, icon_url, *, product_id=None,
                 pid = int(row[0])
             return await _queue.enqueue_product(
                 db, guild_id, pid, item_name, icon_url, reason=reason,
+                # Bumping the generation here is what invalidates an in-flight
+                # worker holding the previous intent: the Dashboard and the Bot
+                # are separate processes, so this compare-and-swap (not a lock)
+                # is what protects the newer URL.
                 reset_attempts=reset_attempts)
 
     try:

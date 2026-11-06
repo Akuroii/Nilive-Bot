@@ -11,41 +11,48 @@ This module is the *push* half. It stores intent only — a row per
 (guild_id, product_id) saying "this product's current icon_url should become a
 prepared application emoji". It never talks to Discord, never downloads an
 image, and never creates or deletes anything. All of that stays in
-``utils/shop_emoji`` behind its existing fences; the runtime lives in
+``utils.shop_emoji`` behind its existing fences; the runtime lives in
 ``utils/shop_emoji_worker``.
 
 Read-only consumers are untouched by design: Inventory (``cogs/wallet.py``) and
 Rank (``utils/rank_card_data.py``) import neither this module nor the worker,
 so opening either can never enqueue, download, upload or create.
 
-Durability
-----------
-The queue is SQLite, in the same file as the aliases, so it survives a Railway
-restart with the volume. A row is only marked ``done`` after Discord has been
-reconciled against the asset's current state, so an interrupted pass resumes
-rather than repeating. ``attempts`` and ``last_error`` make progress and the
-reason for a stall both visible.
+Three properties this module is responsible for
+------------------------------------------------
+1. **Terminal is terminal.** A row that exhausts its retry budget is written
+   with ``state='parked'``; ``due()`` never selects a parked row. Only an
+   explicit owner retry or a genuinely new image URL reactivates it.
+2. **Generation fencing.** Every row carries a ``generation``. A worker claims a
+   generation before doing network work and every progress write is a
+   compare-and-swap on that generation, so a slow worker finishing URL A can
+   never delete or overwrite newer intent for URL B. This does not rely on the
+   in-process lock: the Dashboard and the Bot are separate processes writing to
+   the same SQLite file.
+3. **Backfill honesty.** A product is only skipped when its *exact current*
+   canonical URL resolves to a ready asset under the *active* application and
+   the *correct* guild. An older alias, or another application's alias, never
+   suppresses the queue.
 
-Idempotence
------------
-``UNIQUE(guild_id, product_id)`` plus an upsert keyed on the canonical URL
-means re-enqueuing the same product for the same URL is a no-op, and a *new*
-URL replaces the pending work while leaving the old alias in place (it is what
-keeps the previously prepared emoji resolvable until the new image is ready).
+Two databases, deliberately
+---------------------------
+There are two audiences with different authority:
+
+* ``shop_emoji_queue`` — **work**, written by the Dashboard on save and read by
+  the Bot.
+* ``shop_icon_backfill`` — **owner authorisation**, written only by an explicit
+  owner action.
+
+The Bot's periodic discovery reads the *authorisation* table, never the work
+table, so it can never enqueue work nobody authorised. Both live in one SQLite
+file for a single restart-survivable source of truth.
 """
 
 from __future__ import annotations
 
 import aiosqlite
 
-from utils.shop_emoji import (
-    SourceImageError,
-    canonicalize_url,
-    content_identity,
-    deterministic_emoji_name,
-    readable_emoji_name,
-    rename_target_name,
-)
+from utils.shop_emoji import SourceImageError, canonicalize_url
 
 # ── Tunables ────────────────────────────────────────────────────────────────
 # One Discord list_emojis() covers a whole pass, so the pass cost is dominated
@@ -59,9 +66,15 @@ MAX_BATCH_LIMIT = 25
 DEFAULT_TIME_BUDGET_SECONDS = 45.0
 # How long a soft failure (dead URL, timeout) waits before another attempt.
 RETRY_BACKOFF_SECONDS = 900
-# Attempts after which a product stops being retried automatically and waits
-# for a human. Keeps a permanently dead URL from being fetched forever.
+# Attempts after which a product is parked for a human. Keeps a permanently
+# dead URL from being fetched forever.
 MAX_AUTO_ATTEMPTS = 4
+
+# Row states. 'queued' and 'retry' are the only ones ``due()`` will select.
+STATE_QUEUED = "queued"
+STATE_RETRY = "retry"
+STATE_PARKED = "parked"      # terminal until a new URL or an owner retry
+STATE_DONE = "done"          # terminal success (kept only when pinned)
 
 SCHEMA = (
     """
@@ -72,6 +85,8 @@ SCHEMA = (
         source_url    TEXT NOT NULL,
         content_hash  TEXT,
         reason        TEXT NOT NULL DEFAULT 'backfill',
+        state         TEXT NOT NULL DEFAULT 'queued',
+        generation    INTEGER NOT NULL DEFAULT 1,
         queued_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         next_attempt_at TEXT,
@@ -81,16 +96,45 @@ SCHEMA = (
     )
     """,
     """
-    CREATE INDEX IF NOT EXISTS idx_shop_emoji_queue_next
-    ON shop_emoji_queue(next_attempt_at)
+    CREATE TABLE IF NOT EXISTS shop_icon_backfill (
+        guild_id        INTEGER PRIMARY KEY,
+        enabled_by      TEXT,
+        authorized_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_sweep_at   TEXT,
+        last_sweep_result TEXT
+    )
     """,
 )
 
+# Columns as they existed before `state`/`generation`: used to migrate a queue
+# created by the previous revision of this module.
+_LEGACY_QUEUE_COLUMNS = {
+    "guild_id", "product_id", "item_name", "source_url", "content_hash", "reason",
+    "queued_at", "updated_at", "next_attempt_at", "attempts", "last_error",
+}
+
 
 async def ensure_schema(db):
-    """Create the queue tables. Additive only; never alters existing tables."""
+    """Create/upgrade queue tables. Additive only; never alters job tables."""
     for statement in SCHEMA:
         await db.execute(statement)
+    cur = await db.execute("PRAGMA table_info(shop_emoji_queue)")
+    columns = {row[1] for row in await cur.fetchall()}
+    if "state" not in columns:
+        await db.execute(
+            "ALTER TABLE shop_emoji_queue ADD COLUMN state TEXT NOT NULL DEFAULT 'queued'")
+        # A row carrying a future next_attempt_at was backing off, not parked.
+        await db.execute(
+            "UPDATE shop_emoji_queue SET state=CASE WHEN next_attempt_at IS NULL "
+            "THEN 'queued' ELSE 'retry' END")
+    if "generation" not in columns:
+        await db.execute(
+            "ALTER TABLE shop_emoji_queue ADD COLUMN generation INTEGER NOT NULL DEFAULT 1")
+    # Built only after the additive columns exist: a queue table created by the
+    # previous revision of this module has no `state` column yet.
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shop_emoji_queue_next "
+        "ON shop_emoji_queue(state, next_attempt_at)")
     await db.commit()
 
 
@@ -113,16 +157,32 @@ def _now_sql():
     return "strftime('%Y-%m-%dT%H:%M:%fZ','now')"
 
 
+def _now_minus(seconds):
+    """SQLite expression for "now minus N seconds" (string comparison safe)."""
+    return f"strftime('%Y-%m-%dT%H:%M:%fZ','now','-{int(seconds)} seconds')"
+
+
 # ── Enqueue ─────────────────────────────────────────────────────────────────
 async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
-                          reason="product_saved", reset_attempts=False):
-    """Queue one product's current icon URL.
+                          reason="product_saved", reset_attempts=False,
+                          embed_item_name=False):
+    """Queue one product's current icon URL. Returns the canonical URL or None.
 
-    A product with no usable URL is *removed* from the queue rather than
-    stored broken: absence is the honest state, and it stops a stale row from
-    being retried forever after an admin clears the image.
+    A product with no usable URL is *removed* from the queue rather than stored
+    broken: absence is the honest state, and it stops a stale row from being
+    retried forever after an admin clears the image.
 
-    Returns the canonical URL that is now queued, or None.
+    Generation semantics — this is the compare-and-swap the worker fences on:
+
+    * new URL       -> ``generation + 1``, attempts reset, state 'queued'
+    * same URL      -> generation and retry state preserved (a scheduler tick
+                       must not defeat a backoff), unless ``reset_attempts``
+                       asks explicitly
+    * ``embed_item_name`` / ``reset_attempts`` (owner retry) -> reactivate
+
+    The generation is bumped in BOTH the URL-change and the explicit-retry case,
+    so an in-flight worker holding the old generation fails its compare-and-swap
+    and cannot clobber this newer intent.
     """
     url = queue_source_url(icon_url)
     if url is None:
@@ -131,32 +191,48 @@ async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
             (guild_id, product_id))
         await db.commit()
         return None
-    # A genuinely new URL restarts the retry budget; re-queueing the same URL
-    # leaves an existing backoff intact so a scheduler tick cannot defeat it.
     await db.execute(
         "INSERT INTO shop_emoji_queue "
-        "(guild_id,product_id,item_name,source_url,reason,queued_at,updated_at,next_attempt_at,attempts) "
-        f"VALUES (?,?,?,?,?,{_now_sql()},{_now_sql()},NULL,0) "
+        "(guild_id,product_id,item_name,source_url,reason,state,generation,"
+        f"queued_at,updated_at,next_attempt_at,attempts) "
+        f"VALUES (?,?,?,?,?,'{STATE_QUEUED}',1,{_now_sql()},{_now_sql()},NULL,0) "
         "ON CONFLICT(guild_id,product_id) DO UPDATE SET "
         "  item_name=excluded.item_name,"
-        "  reason=excluded.reason,"
         "  updated_at=excluded.updated_at,"
+        "  generation=shop_emoji_queue.generation+1,"
+        "  reason=excluded.reason,"
         "  source_url=excluded.source_url,"
         "  content_hash=CASE WHEN shop_emoji_queue.source_url=excluded.source_url "
         "                    THEN shop_emoji_queue.content_hash ELSE NULL END,"
-        "  attempts=CASE WHEN shop_emoji_queue.source_url=excluded.source_url "
+        "  attempts=CASE WHEN shop_emoji_queue.source_url=excluded.source_url AND ?=0 "
         "                THEN shop_emoji_queue.attempts ELSE 0 END,"
-        "  next_attempt_at=CASE WHEN shop_emoji_queue.source_url=excluded.source_url "
+        "  next_attempt_at=CASE WHEN shop_emoji_queue.source_url=excluded.source_url AND ?=0 "
         "                       THEN shop_emoji_queue.next_attempt_at ELSE NULL END,"
-        "  last_error=CASE WHEN shop_emoji_queue.source_url=excluded.source_url "
-        "                  THEN shop_emoji_queue.last_error ELSE NULL END",
-        (guild_id, product_id, item_name, url, reason))
+        "  last_error=CASE WHEN shop_emoji_queue.source_url=excluded.source_url AND ?=0 "
+        "                  THEN shop_emoji_queue.last_error ELSE NULL END,"
+        "  state=CASE WHEN shop_emoji_queue.source_url=excluded.source_url AND ?=0 "
+        "                  AND shop_emoji_queue.state='parked' "
+        "             THEN shop_emoji_queue.state ELSE 'queued' END",
+        (guild_id, product_id, item_name, url, reason,
+         1 if reset_attempts else 0, 1 if reset_attempts else 0,
+         1 if reset_attempts else 0, 1 if reset_attempts else 0))
     await db.commit()
     return url
 
 
+async def reactivate(db, guild_id, product_id):
+    """Owner retry of a parked row: new generation, fresh retry budget."""
+    await db.execute(
+        "UPDATE shop_emoji_queue SET state=?, generation=generation+1, attempts=0, "
+        f"next_attempt_at=NULL, last_error=NULL, updated_at={_now_sql()} "
+        "WHERE guild_id=? AND product_id=?",
+        (STATE_QUEUED, guild_id, product_id))
+    await db.commit()
+
+
 async def enqueue_guild_products(db, guild_id, *, reason="backfill",
-                                 only_unprepared=True, limit=None):
+                                 only_unprepared=True, application_id=None,
+                                 limit=None, reactivate_parked=False):
     """Queue every eligible listing in one guild — the bulk backfill entry point.
 
     "Eligible" is deliberately narrow and read straight from the authoritative
@@ -164,42 +240,126 @@ async def enqueue_guild_products(db, guild_id, *, reason="backfill",
 
     * the row exists in ``shop_items`` for this guild,
     * it carries a non-empty ``icon_url`` that canonicalizes,
-    * it is enabled (a disabled listing is not for sale; it can be queued when
-      it is re-enabled).
+    * it is enabled (a disabled listing is not for sale).
 
-    With ``only_unprepared`` the rows that already resolve to a *ready* asset
-    are skipped, which is what makes a re-run cheap and is why a backfill can
-    be interrupted and restarted without repeating finished work.
+    With ``only_unprepared`` a product is skipped **only** when its exact
+    current canonical URL resolves to a ``ready`` asset under the given
+    application AND this guild. An older alias, another application's alias, a
+    wrong-guild alias, or a non-ready asset never suppresses the queue — that
+    false positive is what silently left products unprepared before.
 
     Returns the number of products queued.
     """
+    from utils.shop_emoji import configured_application_id
+
+    app_id = str(application_id or configured_application_id() or "")
     params = [guild_id]
     sql = ("SELECT s.id, s.name, s.icon_url FROM shop_items s "
            "WHERE s.guild_id=? AND s.icon_url IS NOT NULL AND TRIM(s.icon_url)<>'' "
-           "AND COALESCE(s.enabled,1)=1")
-    if only_unprepared:
-        # Already prepared for THIS guild (any application row is fine: the
-        # worker re-checks scope with the authenticated application).
-        sql += (" AND NOT EXISTS (SELECT 1 FROM shop_items q "
-                "JOIN shop_emoji_url_aliases a ON a.guild_id=q.guild_id "
-                "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
-                "  AND e.content_hash=a.content_hash "
-                "WHERE q.id=s.id AND e.status='ready')")
-    sql += " ORDER BY s.id"
+           "AND COALESCE(s.enabled,1)=1 ORDER BY s.id")
     if limit:
         sql += " LIMIT ?"
         params.append(int(limit))
     cur = await db.execute(sql, tuple(params))
     rows = await cur.fetchall()
+    if not rows:
+        return 0
+
+    # Resolve "already prepared" with the SAME canonicalization the alias table
+    # uses, per product, instead of a coarse name/id join.
+    ready_urls = set()
+    if only_unprepared and app_id:
+        for _pid, _name, raw in rows:
+            canon = queue_source_url(raw)
+            if canon and canon in ready_urls:
+                continue
+            if canon and await _resolves_ready(db, app_id, guild_id, canon):
+                ready_urls.add(canon)
+
+    # One read of the current queue, so "queued" reports NEW intent rather than
+    # rows that were already pending. This is what makes a re-run provably a
+    # no-op instead of an unobservable upsert.
+    cur = await db.execute(
+        f"SELECT {','.join(QUEUE_FIELDS)} FROM shop_emoji_queue WHERE guild_id=?",
+        (guild_id,))
+    existing_rows = {r["product_id"]: r for r in (_row(x) for x in await cur.fetchall())}
 
     queued = 0
     for product_id, name, icon_url in rows:
+        canon = queue_source_url(icon_url)
+        if only_unprepared and canon and canon in ready_urls:
+            continue
+        existing = existing_rows.get(int(product_id))
+        if existing:
+            same_url = existing["source_url"] == canon
+            if same_url and existing["state"] == STATE_PARKED and not reactivate_parked:
+                # Parked for this exact URL: keep it parked, do not resurrect it.
+                continue
+            if same_url and existing["state"] in (STATE_QUEUED, STATE_RETRY):
+                # Already pending for the same URL: nothing new to do.
+                await enqueue_product(db, guild_id, int(product_id), name, icon_url,
+                                      reason=existing["reason"] or reason)
+                continue
         if await enqueue_product(db, guild_id, int(product_id), name, icon_url,
                                  reason=reason) is not None:
             queued += 1
     return queued
 
 
+async def _resolves_ready(db, application_id, guild_id, canonical_url):
+    """True only when this exact URL has a ready asset for this app and guild."""
+    if not canonical_url:
+        return False
+    cur = await db.execute(
+        "SELECT 1 FROM shop_emoji_url_aliases a "
+        "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
+        "  AND e.content_hash=a.content_hash "
+        "WHERE a.application_id=? AND a.guild_id=? AND a.source_url=? "
+        "AND e.status='ready' AND e.emoji_id IS NOT NULL LIMIT 1",
+        (application_id, guild_id, canonical_url))
+    return await cur.fetchone() is not None
+
+
+# ── Backfill authorisation (owner-gated discovery) ──────────────────────────
+async def authorize_backfill(db, guild_id, *, actor=None):
+    """Record that an owner asked for this guild's existing catalog to be filled.
+
+    Periodic discovery refuses to create work for a guild without this row, so
+    deploying the build can never start creating application emojis for every
+    connected server.
+    """
+    await db.execute(
+        "INSERT INTO shop_icon_backfill (guild_id,enabled_by,authorized_at) "
+        f"VALUES (?,?,{_now_sql()}) ON CONFLICT(guild_id) DO UPDATE SET "
+        "enabled_by=excluded.enabled_by, authorized_at=excluded.authorized_at",
+        (guild_id, str(actor) if actor is not None else None))
+    await db.commit()
+
+
+async def is_authorized(db, guild_id):
+    cur = await db.execute(
+        "SELECT 1 FROM shop_icon_backfill WHERE guild_id=?", (guild_id,))
+    return await cur.fetchone() is not None
+
+
+async def authorized_guilds(db):
+    cur = await db.execute("SELECT guild_id FROM shop_icon_backfill ORDER BY guild_id")
+    return [row[0] for row in await cur.fetchall()]
+
+
+async def revoke_backfill(db, guild_id):
+    await db.execute("DELETE FROM shop_icon_backfill WHERE guild_id=?", (guild_id,))
+    await db.commit()
+
+
+async def record_sweep(db, guild_id, result):
+    await db.execute(
+        "UPDATE shop_icon_backfill SET last_sweep_at=" + _now_sql() +
+        ", last_sweep_result=? WHERE guild_id=?", (str(result)[:200], guild_id))
+    await db.commit()
+
+
+# ── Lifecycle ───────────────────────────────────────────────────────────────
 async def clear_product(db, guild_id, product_id):
     """Drop queued work for a product (deleted listing, cleared image)."""
     await db.execute(
@@ -222,8 +382,8 @@ async def prune_orphans(db):
 
 # ── Read ────────────────────────────────────────────────────────────────────
 QUEUE_FIELDS = ("guild_id", "product_id", "item_name", "source_url", "content_hash",
-                "reason", "queued_at", "updated_at", "next_attempt_at", "attempts",
-                "last_error")
+                "reason", "state", "generation", "queued_at", "updated_at",
+                "next_attempt_at", "attempts", "last_error")
 
 
 def _row(row):
@@ -231,9 +391,14 @@ def _row(row):
 
 
 async def due(db, *, guild_id=None, limit=DEFAULT_BATCH_LIMIT):
-    """Rows eligible for a pass right now, oldest intent first."""
+    """Rows eligible for a pass right now, oldest intent first.
+
+    Parked (terminal) rows are excluded here, which is what makes ``mark_failed``
+    after ``MAX_AUTO_ATTEMPTS`` actually stop the work rather than re-admit it.
+    """
     sql = (f"SELECT {','.join(QUEUE_FIELDS)} FROM shop_emoji_queue "
-           "WHERE (next_attempt_at IS NULL OR next_attempt_at <= " + _now_sql() + ")")
+           f"WHERE state IN ('{STATE_QUEUED}','{STATE_RETRY}') "
+           "AND (next_attempt_at IS NULL OR next_attempt_at <= " + _now_sql() + ")")
     params = []
     if guild_id is not None:
         sql += " AND guild_id=?"
@@ -251,109 +416,145 @@ async def stats(db, *, guild_id=None):
         where, params = " WHERE guild_id=?", [guild_id]
     cur = await db.execute(
         "SELECT COUNT(*), "
+        " SUM(CASE WHEN state='parked' THEN 1 ELSE 0 END), "
         " SUM(CASE WHEN next_attempt_at IS NOT NULL AND next_attempt_at > "
         "   strftime('%Y-%m-%dT%H:%M:%fZ','now') THEN 1 ELSE 0 END), "
-        " SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END), "
+        " SUM(CASE WHEN last_error IS NOT NULL AND state<>'parked' THEN 1 ELSE 0 END), "
         " MAX(attempts) FROM shop_emoji_queue" + where, tuple(params))
-    total, deferred, errored, max_attempts = await cur.fetchone()
-    return {"total": total or 0, "deferred": deferred or 0,
+    total, parked, deferred, errored, max_attempts = await cur.fetchone()
+    return {"total": total or 0, "parked": parked or 0, "deferred": deferred or 0,
             "errored": errored or 0, "max_attempts": max_attempts or 0}
 
 
-async def next_attempt_at(db):
-    """Earliest future retry time, or None when nothing is waiting on a clock.
+async def parked_rows(db, *, guild_id=None, limit=MAX_BATCH_LIMIT):
+    """Terminal rows with their reason, for the owner-facing report."""
+    sql = ("SELECT product_id,item_name,attempts,last_error,source_url FROM shop_emoji_queue "
+           "WHERE state='parked'")
+    params = []
+    if guild_id is not None:
+        sql += " AND guild_id=?"
+        params.append(guild_id)
+    sql += " ORDER BY product_id LIMIT ?"
+    params.append(int(limit))
+    cur = await db.execute(sql, tuple(params))
+    return [{"product_id": r[0], "item_name": r[1], "attempts": r[2],
+             "last_error": r[3]} for r in await cur.fetchall()]
 
-    The scheduler reads this to decide whether a pass is worth running, and it
-    costs one indexed row lookup.
-    """
-    cur = await db.execute(
-        "SELECT MIN(next_attempt_at) FROM shop_emoji_queue "
-        "WHERE next_attempt_at IS NOT NULL AND next_attempt_at > " + _now_sql())
+
+async def next_attempt_at(db, *, guild_id=None):
+    """Earliest future retry time (guild-scoped when a guild is given)."""
+    sql = ("SELECT MIN(next_attempt_at) FROM shop_emoji_queue "
+           f"WHERE state IN ('{STATE_QUEUED}','{STATE_RETRY}') "
+           "AND next_attempt_at IS NOT NULL AND next_attempt_at > " + _now_sql())
+    params = []
+    if guild_id is not None:
+        sql += " AND guild_id=?"
+        params.append(guild_id)
+    cur = await db.execute(sql, tuple(params))
     row = await cur.fetchone()
     return row[0] if row else None
 
 
-# ── Progress ────────────────────────────────────────────────────────────────
+# ── Progress: every write is a generation compare-and-swap ─────────────────
+def _fence(row):
+    return (row["guild_id"], row["product_id"], int(row["generation"]))
+
+
 async def record_attempt(db, row, *, content_hash=None):
-    """Persist that we are about to work on this row (survives a hard restart)."""
-    await db.execute(
+    """Persist that we are about to work on this generation.
+
+    Returns True when the row is still the generation we hold. False means a
+    newer intent replaced it while we were deciding; the caller must abandon.
+    """
+    cur = await db.execute(
         "UPDATE shop_emoji_queue SET attempts=attempts+1, content_hash=COALESCE(?,content_hash), "
-        f"updated_at={_now_sql()} WHERE guild_id=? AND product_id=?",
-        (content_hash, row["guild_id"], row["product_id"]))
+        f"updated_at={_now_sql()} WHERE guild_id=? AND product_id=? AND generation=?",
+        (content_hash, *_fence(row)))
     await db.commit()
+    return bool(cur.rowcount)
 
 
 async def mark_done(db, row):
-    await db.execute(
-        "DELETE FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
-        (row["guild_id"], row["product_id"]))
-    await db.commit()
+    """Finish this generation. Deletes the row only if it is still ours.
 
-
-async def mark_failed(db, row, message, *, retryable=True):
-    """Record a soft failure and schedule the next attempt.
-
-    Retryable failures back off; a non-retryable one (an image Discord
-    definitively rejected) parks the row with its reason visible instead of
-    hammering the API.
+    If the Dashboard has since queued a newer URL (generation bumped), the
+    row is left untouched so the new intent survives.
     """
-    attempts = int(row.get("attempts") or 0) + 1
+    cur = await db.execute(
+        "DELETE FROM shop_emoji_queue WHERE guild_id=? AND product_id=? AND generation=?",
+        _fence(row))
+    await db.commit()
+    return bool(cur.rowcount)
+
+
+async def mark_failed(db, row, message, *, retryable=True, count_attempt=False):
+    """Record a failure for THIS generation; park it when the budget is spent.
+
+    The attempt is normally counted by ``record_attempt`` at claim time (so a
+    process killed mid-download still consumes budget). ``count_attempt=True``
+    is for paths that fail before a claim, so one attempt is never counted twice.
+
+    Parked rows are excluded by ``due()``, so a dead URL stops being fetched
+    instead of looping. A stale generation is ignored entirely.
+    """
+    attempts = int(row.get("attempts") or 0) + (1 if count_attempt else 0)
+    attempts = max(attempts, 1)
     if not retryable or attempts >= MAX_AUTO_ATTEMPTS:
-        await db.execute(
-            "UPDATE shop_emoji_queue SET attempts=?, last_error=?, next_attempt_at=NULL, "
-            f"updated_at={_now_sql()} WHERE guild_id=? AND product_id=?",
-            (attempts, str(message)[:500], row["guild_id"], row["product_id"]))
+        cur = await db.execute(
+            "UPDATE shop_emoji_queue SET attempts=?, last_error=?, state=?, "
+            f"next_attempt_at=NULL, updated_at={_now_sql()} "
+            "WHERE guild_id=? AND product_id=? AND generation=?",
+            (attempts, str(message)[:500], STATE_PARKED, *_fence(row)))
     else:
         backoff = RETRY_BACKOFF_SECONDS * attempts
-        await db.execute(
-            "UPDATE shop_emoji_queue SET attempts=?, last_error=?, "
+        cur = await db.execute(
+            "UPDATE shop_emoji_queue SET attempts=?, last_error=?, state=?, "
             f"next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?), updated_at={_now_sql()} "
-            "WHERE guild_id=? AND product_id=?",
-            (attempts, str(message)[:500], f"+{backoff} seconds",
-             row["guild_id"], row["product_id"]))
+            "WHERE guild_id=? AND product_id=? AND generation=?",
+            (attempts, str(message)[:500], STATE_RETRY, f"+{backoff} seconds", *_fence(row)))
     await db.commit()
+    return bool(cur.rowcount)
 
 
 async def defer_uncertain(db, row, message):
     """An ambiguous create: keep the intent, never retry it blindly.
 
-    The row stays queued and is only advanced after Discord reconciliation
-    resolves the asset. ``next_attempt_at`` is used to space out the read-only
-    recheck, not to authorise a new POST.
+    The row stays live so reconciliation can still advance it, but it is not
+    selected again until the read-only recheck window elapses. A stale
+    generation is ignored.
     """
-    await db.execute(
-        "UPDATE shop_emoji_queue SET last_error=?, "
+    cur = await db.execute(
+        "UPDATE shop_emoji_queue SET last_error=?, state=?, "
         f"next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','+{RETRY_BACKOFF_SECONDS} seconds'), "
-        f"updated_at={_now_sql()} WHERE guild_id=? AND product_id=?",
-        (str(message)[:500], row["guild_id"], row["product_id"]))
+        f"updated_at={_now_sql()} WHERE guild_id=? AND product_id=? AND generation=?",
+        (str(message)[:500], STATE_RETRY, *_fence(row)))
     await db.commit()
+    return bool(cur.rowcount)
+
+
+async def still_current(db, row):
+    """Is this exact generation still the queued intent? (cheap pre-check)."""
+    cur = await db.execute(
+        "SELECT 1 FROM shop_emoji_queue WHERE guild_id=? AND product_id=? AND generation=?",
+        _fence(row))
+    return await cur.fetchone() is not None
 
 
 async def descriptor(db, guild_id, product_id):
-    """Return a canonicalized view of one queued row (test/report helper)."""
+    """Return a canonicalized view of one queued row (report/test helper)."""
     cur = await db.execute(
         f"SELECT {','.join(QUEUE_FIELDS)} FROM shop_emoji_queue "
         "WHERE guild_id=? AND product_id=?", (guild_id, product_id))
     return _row(await cur.fetchone())
 
 
-def name_preview(item_name, content_hash, current_name=None):
-    """What the emoji for this product *would* be called.
-
-    Pure function over the naming rules in ``utils.shop_emoji`` — used by
-    reports and tests so the rename policy has exactly one definition.
-    """
-    proposed = readable_emoji_name(item_name, content_hash)
-    return {"proposed": proposed,
-            "current": current_name or deterministic_emoji_name(content_hash),
-            "rename_needed": (current_name or deterministic_emoji_name(content_hash)) != proposed}
-
-
 __all__ = [
     "DEFAULT_BATCH_LIMIT", "MAX_BATCH_LIMIT", "DEFAULT_TIME_BUDGET_SECONDS",
     "RETRY_BACKOFF_SECONDS", "MAX_AUTO_ATTEMPTS", "SCHEMA",
+    "STATE_QUEUED", "STATE_RETRY", "STATE_PARKED", "STATE_DONE",
     "ensure_schema", "queue_source_url", "enqueue_product", "enqueue_guild_products",
-    "clear_product", "prune_orphans", "due", "stats", "next_attempt_at",
-    "record_attempt", "mark_done", "mark_failed", "defer_uncertain", "descriptor",
-    "name_preview", "content_identity",
+    "reactivate", "authorize_backfill", "is_authorized", "authorized_guilds",
+    "revoke_backfill", "record_sweep", "clear_product", "prune_orphans", "due",
+    "stats", "parked_rows", "next_attempt_at", "record_attempt", "mark_done",
+    "mark_failed", "defer_uncertain", "still_current", "descriptor",
 ]
