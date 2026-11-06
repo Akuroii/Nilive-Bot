@@ -784,6 +784,40 @@ async def attach_prepared_emojis(db, guild_id, products):
     return products
 
 
+async def find_listing_icon_urls(db, guild_id, names):
+    """Read-only lookup of shop listing icon URLs by exact product name.
+
+    Inventory rows are keyed by item name and carry no Shop product id. The
+    item_catalog row is written when a Shop item is SAVED, so a listing that
+    predates that write path has no catalog icon even though its emoji may
+    already be prepared against the listing's own icon_url.
+
+    Only an unambiguous, exact, guild-scoped match is accepted: one single
+    `shop_items` row for that exact name in this guild, carrying an
+    http(s) icon_url. Two listings sharing a name (or a blank match) return
+    nothing, so another product's emoji can never be attached to this item.
+    No writes, no preparation, no backfill.
+    """
+    names = sorted({n for n in names if isinstance(n, str) and n})
+    if not names:
+        return {}
+    marks = ",".join("?" for _ in names)
+    cur = await db.execute(
+        "SELECT name, MIN(icon_url), COUNT(*) FROM shop_items "
+        f"WHERE guild_id=? AND name IN ({marks}) GROUP BY name",
+        (guild_id, *names))
+    rows = await cur.fetchall()
+    found = {}
+    for name, icon_url, count in rows:
+        url = (icon_url or "").strip()
+        if count != 1 or not url:
+            continue
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        found[name] = url
+    return found
+
+
 def product_emoji_references(resolved):
     """Return only IDs emitted by product.emoji, not user-typed emoji text."""
     references, seen = [], set()

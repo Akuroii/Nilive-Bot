@@ -83,14 +83,19 @@ TAB_EQUIPPED = "equipped"
 TAB_HISTORY = "history"
 
 EQUIPPABLE_TYPES = ("role", "temp_role")
+TAB_ORDER = (TAB_ITEMS, TAB_COLORS, TAB_POTIONS, TAB_TITLES, TAB_EQUIPPED, TAB_HISTORY)
 
+# `label`  -- plain text (logs, accessibility, empty states).
+# `smallcaps` -- the stylized category label Discord buttons/embed
+# titles wear (the agreed Wallet design language).
+# `singular` -- used in the select placeholder.
 TAB_META = {
-    TAB_ITEMS:   {"label": "Items",   "emoji": "🎒"},
-    TAB_COLORS:  {"label": "Colors", "emoji": "🎨"},
-    TAB_EQUIPPED: {"label": "Equipped", "emoji": "✨"},
-    TAB_POTIONS: {"label": "Potions", "emoji": "🧪"},
-    TAB_TITLES:  {"label": "Titles",  "emoji": "🏷️"},
-    TAB_HISTORY: {"label": "History", "emoji": "📜"},
+    TAB_ITEMS:    {"label": "Items",    "smallcaps": "ɪᴛᴇᴍꜱ",   "singular": "item",  "emoji": "🎒"},
+    TAB_COLORS:   {"label": "Colors",   "smallcaps": "ᴄᴏʟᴏʀꜱ",  "singular": "color", "emoji": "🎨"},
+    TAB_POTIONS:  {"label": "Potions",  "smallcaps": "ᴘᴏᴛɪᴏɴꜱ", "singular": "potion","emoji": "🧪"},
+    TAB_TITLES:   {"label": "Titles",   "smallcaps": "ᴛɪᴛʟᴇꜱ",  "singular": "title", "emoji": "🏷️"},
+    TAB_EQUIPPED: {"label": "Equipped", "smallcaps": "ᴇǫᴜɪᴘᴘᴇᴅ", "singular": "entry", "emoji": "✨"},
+    TAB_HISTORY:  {"label": "History",  "smallcaps": "ʜɪꜱᴛᴏʀʏ", "singular": "event", "emoji": "📜"},
 }
 
 # Rarity glyphs used when an item has no custom emoji or http image,
@@ -179,33 +184,17 @@ async def _shop_icon_urls(guild_id: int,
     match) return nothing, so another product's emoji can never be
     attached to this item. No writes, no preparation, no backfill.
     """
-    names = sorted({n for n in item_names if isinstance(n, str) and n})
-    if not names:
-        return {}
-    marks = ",".join("?" for _ in names)
     try:
         import aiosqlite
 
         from database import DB_PATH
+        from utils.shop_emoji import find_listing_icon_urls
 
         async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT name, MIN(icon_url), COUNT(*) FROM shop_items "
-                f"WHERE guild_id=? AND name IN ({marks}) GROUP BY name",
-                (guild_id, *names))
-            rows = await cursor.fetchall()
+            return await find_listing_icon_urls(db, guild_id, item_names)
     except Exception:
         # No shop_items table / unreadable DB: behave exactly as before.
         return {}
-    found = {}
-    for name, icon_url, count in rows:
-        url = (icon_url or "").strip()
-        if count != 1 or not url:
-            continue
-        if not url.lower().startswith(("http://", "https://")):
-            continue
-        found[name] = url
-    return found
 
 
 async def _attach_prepared_app_emojis(guild_id: int,
@@ -645,8 +634,9 @@ def _brand_inventory(embed: discord.Embed, interaction, tab: str, footer: str) -
     bot_name = getattr(bot_user, "name", None) or "Nilive"
     user = getattr(interaction, "user", None)
     username = getattr(user, "display_name", None) or getattr(user, "name", None) or "Inventory"
+    meta = TAB_META[tab]
     embed.color = INVENTORY_COLOR
-    embed.set_author(name=f"{bot_name}: {TAB_META[tab]['label']} {username}"[:256],
+    embed.set_author(name=f"{bot_name} · {meta['smallcaps']} · {username}"[:256],
                      icon_url=INVENTORY_AUTHOR_ICON)
     embed.set_footer(text=f"{INVENTORY_FOOTER_TEXT} · {footer}"[:2048],
                      icon_url=INVENTORY_FOOTER_ICON)
@@ -660,65 +650,163 @@ def _role_entry_is_equipped(entry: dict, equipped_role: str | None) -> bool:
     return not entry.get("timed") and entry.get("item_name") == equipped_role
 
 
+def _code_name(name: str) -> str:
+    """Item name inside an inline code span (the agreed decorated-row style).
+
+    Discord renders inline code literally — markdown is inert there, so
+    markdown-escaping would only leak backslashes. Only the code-span
+    delimiters themselves need neutralising; mentions are likewise inert
+    inside code and are left untouched so copy/paste stays clean.
+    """
+    clean = (name or "").replace("\n", " ").replace("\\", "\\\\").replace("`", "'")
+    return clean[:100]
+
+
+def _expiry_dt(entry: dict):
+    if not entry.get("timed"):
+        return None
+    from utils.timed_ownership import parse_time
+    return parse_time(entry.get("expires_at"))
+
+
+def _entry_emoji(item: dict) -> str:
+    return _item_display(item, _rarity_glyph(item["rarity"]))
+
+
+def _is_equipped_entry(it: dict, equipped_role: str | None,
+                       equipped_title_name: str | None) -> bool:
+    if it["item_type"] in EQUIPPABLE_TYPES and _role_entry_is_equipped(it, equipped_role):
+        return True
+    return (it["item_type"] == TITLE_ITEM_TYPE and it["item_name"] == equipped_title_name)
+
+
+def _product_row(it: dict, tab: str, equipped_role: str | None,
+                 equipped_title_name: str | None) -> str:
+    """One decorated inventory line: prepared emoji + backticked name + tags."""
+    emoji = _entry_emoji(it)
+    name = _code_name(it["item_name"])
+    qty = int(it["quantity"] or 0)
+    line = f"{emoji} `{name}`"
+    if qty > 1:
+        line += f" **×{qty}**"
+
+    tags = []
+    if tab == TAB_POTIONS:
+        tags.append(describe_potion(it.get("metadata")))
+        if not potion_is_usable(it.get("metadata")):
+            tags.append("*Setup needed*")
+    else:
+        if _is_equipped_entry(it, equipped_role, equipped_title_name):
+            tags.append("*✅ Equipped*")
+    tags.append(f"*{_rarity_label(it['rarity'])}*")
+    expiry = _expiry_dt(it)
+    if expiry is not None:
+        tags.append(f"expires {discord.utils.format_dt(expiry, 'R')}")
+    elif it.get("timed"):
+        tags.append("expires *unknown*")
+    return line + " — " + " · ".join(tags)
+
+
+def _thumbnail_for(entries: list[dict]) -> str | None:
+    # The first (highest rarity) item with an http image is promoted to
+    # the thumbnail so the panel isn't just text. Discord only allows
+    # one thumbnail per embed, so this is a "featured item" treatment
+    # rather than a per-line image (which is not possible in field text).
+    return next((u for u in (_item_thumbnail_url(it) for it in entries) if u), None)
+
+
 def build_inventory_embed(tab: str, entries: list[dict],
                           equipped_role: str | None,
-                          equipped_title_name: str | None) -> discord.Embed:
+                          equipped_title_name: str | None,
+                          *, slots: dict | None = None) -> discord.Embed:
     meta = TAB_META[tab]
     embed = discord.Embed(
-        title=f"{meta['emoji']} {meta['label']}", color=WALLET_COLOR)
+        title=f"{meta['emoji']} {meta['smallcaps']}", color=INVENTORY_COLOR)
+
+    if tab == TAB_EQUIPPED:
+        return _build_equipped_embed(embed, entries, equipped_role,
+                                     equipped_title_name, slots)
 
     if not entries:
         empty = {
             TAB_ITEMS: "No items yet — get one from `/shop`.",
             TAB_COLORS: "No colors yet — find one in `/shop`.",
-            TAB_EQUIPPED: "No owned items equipped yet.",
             TAB_POTIONS: "No potions yet — get one from `/shop`.",
             TAB_TITLES: "No titles yet — get one from `/shop`.",
         }[tab]
         embed.description = empty
         return embed
 
-    # The first (highest rarity) item with an http image is promoted
-    # to the thumbnail so the panel isn't just text. Discord only
-    # allows one thumbnail per embed, so this is a "featured item"
-    # treatment rather than a per-line image (which is not possible
-    # in field text).
-    thumb = next(
-        (_item_thumbnail_url(it) for it in entries if _item_thumbnail_url(it)),
-        None)
+    thumb = _thumbnail_for(entries)
     if thumb:
         embed.set_thumbnail(url=thumb)
 
     lines = []
-    for it in entries:
-        glyph = _rarity_glyph(it["rarity"])
-        emoji = _item_display(it, glyph)
-        name = it["item_name"]
-        qty = int(it["quantity"] or 0)
-        name = discord.utils.escape_mentions(discord.utils.escape_markdown(name.replace("\n", " ")))[:100]
-        line_parts = [f"{emoji} **{name}**"]
-        if it.get("timed"):
-            from utils.timed_ownership import parse_time
-            expiry = parse_time(it.get("expires_at"))
-            line_parts[0] += f" · expires {discord.utils.format_dt(expiry, 'R') if expiry else 'unknown'}"
-        if qty > 1:
-            line_parts[0] += f" ×{qty}"
-
-        tags = []
-        if it["item_type"] in EQUIPPABLE_TYPES and _role_entry_is_equipped(it, equipped_role):
-            tags.append("Equipped")
-        elif tab == TAB_TITLES and name == equipped_title_name:
-            tags.append("Equipped")
-        elif tab == TAB_POTIONS and not potion_is_usable(it.get("metadata")):
-            tags.append("Setup needed")
-        tags.append(_rarity_label(it["rarity"]))
-        line_parts.append(" · ".join(f"*{t}*" for t in tags))
-
-        lines.append("  ".join(line_parts))
-
+    if tab == TAB_COLORS:
+        lines.append("-# Color roles are worn from this panel — one equipped at a time.")
+    lines.extend(_product_row(it, tab, equipped_role, equipped_title_name)
+                 for it in entries)
     embed.description = "\n".join(lines)
-    embed.set_footer(text="Select an item to manage it")
     return embed
+
+
+def _slot_value(slot: dict | None) -> str:
+    if not slot:
+        return "*Nothing equipped*"
+    emoji = slot.get("emoji") or _rarity_glyph(slot.get("rarity") or "common")
+    name = _code_name(slot["name"])
+    lines = [f"{emoji} `{name}`"]
+    bits = []
+    if slot.get("rarity"):
+        bits.append(f"*{_rarity_label(slot['rarity'])}*")
+    if slot.get("mention"):
+        bits.append(slot["mention"])
+    if bits:
+        lines.append(" · ".join(bits))
+    if slot.get("expires") is not None:
+        lines.append(f"expires {discord.utils.format_dt(slot['expires'], 'R')}")
+    elif slot.get("timed"):
+        lines.append("expires *unknown*")
+    return "\n".join(lines)
+
+
+def _build_equipped_embed(embed: discord.Embed, entries: list[dict],
+                          equipped_role: str | None,
+                          equipped_title_name: str | None,
+                          slots: dict | None) -> discord.Embed:
+    slots = slots or {"role": None, "title": None}
+    role_slot, title_slot = slots.get("role"), slots.get("title")
+
+    if not role_slot and not title_slot:
+        embed.description = (
+            "Nothing equipped right now.\n"
+            "Equip a role, a color or a title and it will appear here.")
+        return embed
+
+    thumb = _thumbnail_for(entries)
+    if thumb:
+        embed.set_thumbnail(url=thumb)
+    embed.description = (
+        "-# What you're wearing right now — your full collection lives in the other tabs.")
+    embed.add_field(name="🎭 Role", value=_slot_value(role_slot),
+                    inline=True)
+    embed.add_field(name="🏷️ Title", value=_slot_value(title_slot),
+                    inline=True)
+    return embed
+
+
+def _select_description(it: dict, equipped: bool) -> str:
+    bits = [f"×{int(it['quantity'] or 0)}", _rarity_label(it["rarity"])]
+    expiry = _expiry_dt(it)
+    if expiry is not None:
+        bits.append(f"until {expiry.strftime('%Y-%m-%d')}")
+    elif it.get("timed"):
+        bits.append("timed")
+    else:
+        bits.append("Permanent")
+    if equipped:
+        bits.append("Equipped")
+    return " · ".join(bits)[:100]
 
 
 class InventoryItemSelect(discord.ui.Select):
@@ -728,19 +816,17 @@ class InventoryItemSelect(discord.ui.Select):
         options = []
         for it in entries[:25]:
             name = it["item_name"]
-            equipped = (
-                (it["item_type"] in EQUIPPABLE_TYPES and _role_entry_is_equipped(it, equipped_role))
-                or (it["item_type"] == TITLE_ITEM_TYPE and name == equipped_title_name))
+            equipped = _is_equipped_entry(it, equipped_role, equipped_title_name)
             options.append(discord.SelectOption(
                 label=name[:100],
-                description=(
-                    f"×{it['quantity']} · {_rarity_label(it['rarity'])} · "
-                    + (f"expires {it.get('expires_at')}" if it.get("timed") else "Permanent")
-                    + f" · {it.get('entry_key', '')}"
-                    + (" · Equipped" if equipped else ""))[:100],
-                value=it.get("entry_key") or name[:100]))
+                description=_select_description(it, equipped),
+                value=it.get("entry_key") or name[:100],
+                # The product's OWN prepared emoji, the same one the
+                # action entries of a published Shop use. Empty until
+                # prepared — never a substituted stand-in.
+                emoji=as_partial_emoji(it.get("app_emoji") or "")))
         super().__init__(
-            placeholder=f"Select a {TAB_META[tab]['label'].rstrip('s').lower()}…",
+            placeholder=f"Select a {TAB_META[tab]['singular']}…",
             options=options or [discord.SelectOption(label="—", value="—")],
             disabled=not options)
         self.guild_id = guild_id
@@ -779,7 +865,7 @@ class InventoryTabButton(discord.ui.Button):
     def __init__(self, tab: str, active: bool):
         meta = TAB_META[tab]
         super().__init__(
-            label=meta["label"], emoji=meta["emoji"],
+            label=meta["smallcaps"], emoji=meta["emoji"],
             row=1 if tab in (TAB_ITEMS, TAB_COLORS, TAB_POTIONS) else 2,
             style=(discord.ButtonStyle.primary if active
                    else discord.ButtonStyle.secondary),
@@ -814,6 +900,126 @@ class InventoryBackButton(discord.ui.Button):
         await render_hub(interaction, view.guild_id, view.user_id)
 
 
+
+# Arrows/moves shown in the History tab. Maps only KNOWN event types —
+# anything else falls back to a neutral glyph rather than being hidden.
+EVENT_GLYPHS = {
+    "acquired": "📥",
+    "equipped": "✨",
+    "unequipped": "✖",
+    "used": "🧪",
+    "dropped": "🗑️",
+    "expired": "⏳",
+    "reversed": "↩️",
+    "ownership_reversed": "↩️",
+    "restored": "♻️",
+}
+
+
+def _event_time(raw):
+    """SQLite CURRENT_TIMESTAMP ('YYYY-MM-DD HH:MM:SS', UTC) → Discord relative
+    timestamp; unparseable input is shown verbatim (never dropped)."""
+    if not raw:
+        return "unknown time"
+    from datetime import datetime, timezone
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            parsed = datetime.strptime(str(raw)[:26], fmt)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return discord.utils.format_dt(parsed, "R")
+        except ValueError:
+            continue
+    return discord.utils.escape_markdown(str(raw))[:40]
+
+
+def build_history_embed(events, started):
+    """Append-only activity log — reads as an audit trail, not as money.
+
+    Only real, recorded events are rendered; unknown event types are shown
+    with their raw (escaped) name rather than hidden or reinterpreted.
+    """
+    meta = TAB_META[TAB_HISTORY]
+    embed = discord.Embed(
+        title=f"{meta['emoji']} {meta['smallcaps']}", color=INVENTORY_COLOR)
+    lines = []
+    for event in events:
+        raw_type = str(event.get("event_type") or "event").lower()
+        glyph = EVENT_GLYPHS.get(raw_type, "•")
+        name = _code_name(event.get("item_name") or "?")
+        source = discord.utils.escape_mentions(discord.utils.escape_markdown(
+            str(event.get("source") or "system")))[:40]
+        kind = raw_type.replace("_", " ").title()[:40]
+        qty = int(event.get("quantity") or 1)
+        head = f"{glyph} **{kind}** · `{name}`"
+        if qty > 1:
+            head += f" **×{qty}**"
+        head += f" · {source}"
+        lines.append(f"{head}\n*{_event_time(event.get('created_at'))}*")
+    embed.description = ("\n\n".join(lines) if lines
+                         else "No recorded inventory activity yet.")
+    return embed
+
+
+def _equipped_slots(decorated_all, equipped, equipped_title_name):
+    """Resolve the Role and Title equip slots against the FULL decorated
+    inventory (not the page slice), so the Equipped view shows the truth
+    even when the equipped entry is paged out."""
+    role_slot = None
+    if equipped:
+        match = None
+        role_key = equipped.get("entry_key")
+        for it in decorated_all:
+            if it["item_type"] not in EQUIPPABLE_TYPES:
+                continue
+            if role_key:
+                if it.get("entry_key") == role_key:
+                    match = it
+                    break
+            elif not it.get("timed") and it["item_name"] == equipped.get("item_name"):
+                match = it
+                break
+        if match is not None:
+            role_slot = {
+                "name": match["item_name"],
+                "emoji": _entry_emoji(match),
+                "rarity": match.get("rarity"),
+                "expires": _expiry_dt(match),
+                "timed": bool(match.get("timed")),
+                "mention": None,
+            }
+        else:
+            # Equipped but not present in inventory (e.g. an admin removed
+            # the stack) — still tell the truth about what is worn.
+            role_slot = {
+                "name": equipped.get("item_name") or "?",
+                "emoji": None,
+                "rarity": None,
+                "expires": None,
+                "timed": False,
+                "mention": None,
+            }
+        role_id = equipped.get("role_id")
+        if role_id:
+            role_slot["mention"] = f"<@&{int(role_id)}>"
+    title_slot = None
+    if equipped_title_name:
+        match = next(
+            (it for it in decorated_all
+             if it["item_type"] == TITLE_ITEM_TYPE
+             and it["item_name"] == equipped_title_name), None)
+        title_slot = {
+            "name": equipped_title_name,
+            "emoji": _entry_emoji(match) if match else None,
+            "rarity": match.get("rarity") if match else None,
+            "expires": None,
+            "timed": False,
+            "mention": None,
+        }
+    return {"role": role_slot, "title": title_slot}
+
+
 async def open_inventory_panel(interaction: discord.Interaction,
                                guild_id: int, user_id: int, tab: str,
                                *, first: bool = False, page: int = 0):
@@ -824,14 +1030,7 @@ async def open_inventory_panel(interaction: discord.Interaction,
         page = max(0, min(page, pages - 1))
         events = await get_activity_page(guild_id, user_id, offset=page * 15, limit=15)
         started = await get_activity_start()
-        embed = discord.Embed(title="📜 Inventory History", color=WALLET_COLOR)
-        lines = []
-        for event in events:
-            name = discord.utils.escape_mentions(discord.utils.escape_markdown(event['item_name']))[:100]
-            source = discord.utils.escape_mentions(discord.utils.escape_markdown(event.get('source') or 'system'))[:40]
-            kind = event['event_type'].replace('_', ' ').title()
-            lines.append(f"**{kind}** · {name} ×{event['quantity']} · {source}\n{event['created_at']}")
-        embed.description = "\n".join(lines) if lines else "No recorded inventory activity yet."
+        embed = build_history_embed(events, started)
         _brand_inventory(embed, interaction, tab,
                          f"Partial coverage · Recording started {started or 'unknown'} UTC · Page {page + 1}/{pages}")
         view = InventoryView(guild_id, user_id, tab, [], None, None, page, pages)
@@ -851,21 +1050,24 @@ async def open_inventory_panel(interaction: discord.Interaction,
     equipped_title_name = (equipped_title["item_name"]
                            if equipped_title else None)
 
+    decorated_all = await _decorate(guild_id, items)
     if tab == TAB_EQUIPPED:
         role_key = equipped.get("entry_key") if equipped else None
-        entries = [it for it in items if
+        entries = [it for it in decorated_all if
                    (equipped and (it.get("entry_key") == role_key if role_key else
                     not it.get("timed") and it["item_name"] == equipped_role_name)) or
                    (it["item_type"] == TITLE_ITEM_TYPE and it["item_name"] == equipped_title_name)]
     else:
-        entries = split_by_tab(items)[tab]
-    entries = await _decorate(guild_id, entries)
+        entries = split_by_tab(decorated_all)[tab]
+    slots = (_equipped_slots(decorated_all, equipped, equipped_title_name)
+             if tab == TAB_EQUIPPED else None)
     pages = max(1, (len(entries) + 14) // 15)
     page = max(0, min(page, pages - 1))
     entries = entries[page * 15:(page + 1) * 15]
     view = InventoryView(guild_id, user_id, tab, entries,
                          equipped_role, equipped_title_name, page, pages)
-    embed = build_inventory_embed(tab, entries, equipped_role, equipped_title_name)
+    embed = build_inventory_embed(tab, entries, equipped_role, equipped_title_name,
+                                  slots=slots)
     if tab == TAB_ITEMS:
         config = await get_currency_config(guild_id)
         balances = []
@@ -891,7 +1093,8 @@ def build_item_embed(guild: discord.Guild, tab: str, item: dict,
     glyph = _rarity_glyph(item["rarity"])
     emoji = _item_display(item, glyph)
     embed = discord.Embed(
-        title=f"{emoji} {item['item_name']}", color=WALLET_COLOR)
+        title=f"{emoji} `{_code_name(item['item_name'])}`",
+        color=INVENTORY_COLOR)
 
     embed.add_field(name="Quantity",
                     value=f"×{int(item['quantity'] or 0)}", inline=True)
@@ -1072,7 +1275,7 @@ def build_drop_confirm_embed(tab: str, item_name: str,
     emoji = _item_display(item, glyph)
     thumb = _item_thumbnail_url(item)
     embed = discord.Embed(
-        title=f"{emoji} {item_name}",
+        title=f"{emoji} `{_code_name(item['item_name'])}`",
         description=(
             "Are you sure you want to drop this item?\n"
             "*This cannot be undone.*"),

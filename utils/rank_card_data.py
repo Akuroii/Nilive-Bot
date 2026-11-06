@@ -140,7 +140,7 @@ async def get_rank_card_data(guild_id: int, user_id: int,
         catalog = await get_catalog_entry(guild_id, it["item_name"])
         grid_candidates.append({
             **it,
-            "icon_url": catalog["icon_url"],
+            "icon_url": (catalog["icon_url"] or "").strip(),
             "rarity": catalog["rarity"],
             "value_currency": catalog["value_currency"],
             "value_amount": catalog["value_amount"],
@@ -148,6 +148,33 @@ async def get_rank_card_data(guild_id: int, user_id: int,
                 catalog["rarity"], catalog["value_currency"],
                 catalog["value_amount"]),
         })
+
+    # The Rank card's icon source is the SAME already-prepared application
+    # emoji the published Shop uses (Discord CDN), not a live fetch of the
+    # storefront's source URL -- that link is allowed to rot, move or
+    # require auth, and the card was rendering owned items with no icon
+    # whenever it did. Resolve read-only only: no downloads, no uploads,
+    # no recovery, no backfill. A listing whose catalog row predates the
+    # catalog write path may carry no icon_url at all, so the exact,
+    # unique, guild-scoped listing URL is used as the source to match the
+    # prepared alias against (never guessed, never written).
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            missing = [it for it in grid_candidates if not it["icon_url"]]
+            if missing:
+                from utils.shop_emoji import find_listing_icon_urls
+                found = await find_listing_icon_urls(
+                    db, guild_id, [it["item_name"] for it in missing])
+                for it in missing:
+                    it["icon_url"] = found.get(it["item_name"], "")
+            from utils.shop_emoji import attach_prepared_emojis
+            await attach_prepared_emojis(db, guild_id, grid_candidates)
+    except Exception:
+        # A missing/unreadable emoji mapping is an ordinary state, never a
+        # reason to fail the whole card. Icons degrade to the placeholder.
+        for it in grid_candidates:
+            it.setdefault("app_emoji", "")
+
     grid_candidates.sort(key=lambda x: x["_sort"], reverse=True)
     # Actual owned count (role/temp_role excluded, matches what the grid
     # draws from) -- available for internal use; not required to be shown.
