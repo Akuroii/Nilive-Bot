@@ -37,12 +37,18 @@ def _avatar_url(member) -> str:
 
 async def get_rank_card_data(guild_id: int, user_id: int,
                               member=None,
-                              max_grid_items: int = 12) -> dict:
+                              max_grid_items: int = 12,
+                              *, application_id=None) -> dict:
     """
     member: the live discord.Member, when the caller has one (e.g. the
     /rank command). Supplies username/avatar/join-date/booster-status --
     none of that lives in the DB. When omitted, those fields come back
     None and is_booster is treated as False (permanent prestige only).
+
+    application_id: the authenticated bot client's application ID. Bot
+    callers pass it so prepared-emoji reads do not depend on the dashboard's
+    DISCORD_CLIENT_ID variable. Omitted by previews/tests, which use the
+    shared helper's existing environment default. Read-only in either case.
     """
     from utils.xp_calculator import xp_progress
     from utils.economy_safe import get_balance
@@ -168,7 +174,8 @@ async def get_rank_card_data(guild_id: int, user_id: int,
             from utils.shop_emoji import attach_prepared_emojis, find_listing_icon_urls
             # Pass 1: the catalog row's own icon_url — the URL Shop
             # preparation aliased — when that row exists and is current.
-            await attach_prepared_emojis(db, guild_id, grid_candidates)
+            await attach_prepared_emojis(db, guild_id, grid_candidates,
+                                         application_id=application_id)
             # Pass 2: a NON-EMPTY but stale catalog icon_url must not hide a
             # prepared emoji that was aliased against the listing's current
             # URL. `item_catalog` is written when a Shop item is SAVED, so a
@@ -204,7 +211,8 @@ async def get_rank_card_data(guild_id: int, user_id: int,
             if unresolved:
                 listing_candidates = [
                     {"icon_url": it["listing_icon_url"]} for it in unresolved]
-                await attach_prepared_emojis(db, guild_id, listing_candidates)
+                await attach_prepared_emojis(db, guild_id, listing_candidates,
+                                             application_id=application_id)
                 for it, candidate in zip(unresolved, listing_candidates):
                     it["app_emoji"] = candidate.get("app_emoji") or ""
     except Exception:

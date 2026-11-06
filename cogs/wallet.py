@@ -184,7 +184,8 @@ def _item_thumbnail_url(catalog: dict) -> str | None:
 
 
 async def _attach_prepared_app_emojis(guild_id: int,
-                                      entries: list[dict]) -> None:
+                                      entries: list[dict], *,
+                                      application_id=None) -> None:
     """Resolve already-prepared Shop emoji for owned entries. READ-ONLY.
 
     Inventory rows are keyed by item_name and carry no Shop product id,
@@ -203,6 +204,8 @@ async def _attach_prepared_app_emojis(guild_id: int,
     Both passes go through attach_prepared_emojis(), so the lookup uses
     the same canonicalisation, guild alias and `ready` asset the Shop
     preview uses — no second emoji mechanism, no guessed emoji name/ID.
+    The interaction client's authenticated application_id scopes the read;
+    the shared helper falls back to DISCORD_CLIENT_ID for non-bot callers.
 
     Only batched SELECTs run here. No image download, no upload, no
     delete, no recovery/preparation, no DDL: if the tables are missing
@@ -221,7 +224,8 @@ async def _attach_prepared_app_emojis(guild_id: int,
         from utils.shop_emoji import attach_prepared_emojis, find_listing_icon_urls
 
         async with aiosqlite.connect(DB_PATH) as db:
-            await attach_prepared_emojis(db, guild_id, products)
+            await attach_prepared_emojis(db, guild_id, products,
+                                         application_id=application_id)
             unresolved = [index for index, product in enumerate(products)
                           if not (product.get("app_emoji") or "").strip()]
             if unresolved:
@@ -230,7 +234,8 @@ async def _attach_prepared_app_emojis(guild_id: int,
                 listing_products = [
                     {"icon_url": found.get(entries[index]["item_name"], "")}
                     for index in unresolved]
-                await attach_prepared_emojis(db, guild_id, listing_products)
+                await attach_prepared_emojis(db, guild_id, listing_products,
+                                             application_id=application_id)
                 for index, product in zip(unresolved, listing_products):
                     products[index]["app_emoji"] = product.get("app_emoji") or ""
     except Exception:
@@ -241,7 +246,8 @@ async def _attach_prepared_app_emojis(guild_id: int,
         entry["app_emoji"] = (product.get("app_emoji") or "").strip()
 
 
-async def _decorate(guild_id: int, items: list[dict]) -> list[dict]:
+async def _decorate(guild_id: int, items: list[dict], *,
+                    application_id=None) -> list[dict]:
     """Attach catalog metadata + sort rarity-first."""
     out = []
     for it in items:
@@ -254,7 +260,7 @@ async def _decorate(guild_id: int, items: list[dict]) -> list[dict]:
                 catalog["rarity"], catalog["value_currency"],
                 catalog["value_amount"]),
         })
-    await _attach_prepared_app_emojis(guild_id, out)
+    await _attach_prepared_app_emojis(guild_id, out, application_id=application_id)
     out.sort(key=lambda x: (x["_sort"], x["item_name"]), reverse=True)
     return out
 
@@ -1174,7 +1180,9 @@ async def open_inventory_panel(interaction: discord.Interaction,
     equipped_title_name = (equipped_title["item_name"]
                            if equipped_title else None)
 
-    decorated_all = await _decorate(guild_id, items)
+    application_id = (getattr(interaction, "application_id", None)
+                      or getattr(getattr(interaction, "client", None), "application_id", None))
+    decorated_all = await _decorate(guild_id, items, application_id=application_id)
     if tab == TAB_EQUIPPED:
         role_key = equipped.get("entry_key") if equipped else None
         entries = [it for it in decorated_all if
@@ -1504,7 +1512,9 @@ async def open_drop_confirm(interaction: discord.Interaction,
         await interaction.response.send_message(
             "Timed holdings cannot be dropped.", ephemeral=True)
         return
-    item = (await _decorate(guild_id, [item]))[0]
+    application_id = (getattr(interaction, "application_id", None)
+                      or getattr(getattr(interaction, "client", None), "application_id", None))
+    item = (await _decorate(guild_id, [item], application_id=application_id))[0]
     view = DropConfirmView(guild_id, user_id, tab, item["item_name"],
                            item_id=item["id"], item_type=item["item_type"], page=page,
                            quantity=item["quantity"], metadata=item.get("metadata") or {})
@@ -1522,7 +1532,9 @@ async def open_item_panel(interaction: discord.Interaction, guild_id: int,
     if not item or (tab != TAB_EQUIPPED and item not in split_by_tab(items).get(tab, [])):
         await interaction.response.send_message("That inventory entry is no longer available.", ephemeral=True)
         return
-    item = (await _decorate(guild_id, [item]))[0]
+    application_id = (getattr(interaction, "application_id", None)
+                      or getattr(getattr(interaction, "client", None), "application_id", None))
+    item = (await _decorate(guild_id, [item], application_id=application_id))[0]
     item["_page"] = page
     if item["item_type"] == TITLE_ITEM_TYPE:
         current = await get_equipped_title(guild_id, user_id)

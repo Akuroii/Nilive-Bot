@@ -376,7 +376,7 @@ class FooterContractTests(unittest.IsolatedAsyncioTestCase):
         items = [entry(f"Item {n:02}", f"i:{n+1}") for n in range(31)]
         with patch.object(wallet, "get_inventory_entries", AsyncMock(return_value=items)), \
              patch.object(wallet, "cleanup_unowned_title", AsyncMock()), \
-             patch.object(wallet, "_decorate", AsyncMock(side_effect=lambda gid, e: e)), \
+             patch.object(wallet, "_decorate", AsyncMock(side_effect=lambda gid, e, **kwargs: e)), \
              patch.object(wallet, "_attach_prepared_app_emojis", AsyncMock()), \
              patch.object(wallet, "get_currency_config", AsyncMock(
                  return_value={"coins": {"name": "Coins", "emoji": "🪙"},
