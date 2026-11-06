@@ -135,14 +135,18 @@ def api_shop_emoji_backfill():
         async with aiosqlite.connect(DB_PATH) as db:
             await queue.authorize_backfill(db, guild_id,
                                           actor=data.get("actor") or "dashboard-owner")
-            queued = await queue.enqueue_guild_products(
+            result = await queue.enqueue_guild_products(
                 db, guild_id,
                 reason=str(data.get("reason") or "backfill"),
                 only_unprepared=data.get("include_prepared") is not True,
                 reactivate_parked=data.get("retry_parked") is True)
             report = await queue.stats(db, guild_id=guild_id)
             report["authorized"] = await queue.is_authorized(db, guild_id)
-            return {"success": True, "queued": queued, "queue": report}
+            # `queued` is NEW intent; `reactivated` is parked rows the owner's
+            # retry_parked switch genuinely revived. Reporting them separately is
+            # what makes the numbers checkable against the rows.
+            return {"success": True, "queued": result["queued"],
+                    "reactivated": result["reactivated"], "queue": report}
 
     try:
         return jsonify(run_async(run()))

@@ -128,9 +128,19 @@ async def _rename_or_defer(db, discord, asset, target, report):
         if exc.uncertain:
             # Cosmetic and identity-preserving: the next refresh accepts either
             # name for a managed asset, so this needs no repair.
-            report["results"].append({"code": "rename_uncertain", "message": str(exc)})
+            report["results"].append({"code": "rename_uncertain", "message": str(exc),
+                                      "content_hash": asset["content_hash"],
+                                      "emoji_id": str(asset["emoji_id"]),
+                                      "guild_id": asset.get("creator_guild_id"),
+                                      "current_name": asset.get("emoji_name"),
+                                      "proposed_name": target})
             return await SE._get_asset(db, asset["application_id"], asset["content_hash"])
-        report["results"].append({"code": "rename_rejected", "message": str(exc)})
+        report["results"].append({"code": "rename_rejected", "message": str(exc),
+                                  "content_hash": asset["content_hash"],
+                                  "emoji_id": str(asset["emoji_id"]),
+                                  "guild_id": asset.get("creator_guild_id"),
+                                  "current_name": asset.get("emoji_name"),
+                                  "proposed_name": target})
         await db.execute(
             "UPDATE shop_emoji_assets SET managed_name=0, updated_at=? "
             "WHERE application_id=? AND content_hash=?",
@@ -144,6 +154,13 @@ async def _rename_or_defer(db, discord, asset, target, report):
          asset["emoji_id"]))
     await db.commit()
     report["renamed"] += 1
+    report["results"].append({"code": "renamed",
+                              "content_hash": asset["content_hash"],
+                              "emoji_id": str(asset["emoji_id"]),
+                              "guild_id": asset.get("creator_guild_id"),
+                              "current_name": asset.get("emoji_name"),
+                              "proposed_name": target,
+                              "renamed": True})
     return await SE._get_asset(db, asset["application_id"], asset["content_hash"])
 
 
@@ -283,12 +300,16 @@ async def _labels_for(db, guild_id, source_url, fallback_name):
     """Every product name bound to this URL in this guild (plus the current one).
 
     The canonical label must not depend on which row triggered the work, so the
-    full bound set is resolved before the name is chosen.
+    full bound set is resolved before the name is chosen. Matching goes through
+    the SAME canonicalization the alias table uses (``SE._canonical_or_raw``):
+    ``shop_items.icon_url`` keeps whatever the owner typed, so raw string
+    equality would miss an uppercase host or an explicit ``:443``.
     """
     cur = await db.execute(
-        "SELECT name FROM shop_items WHERE guild_id=? AND icon_url=?",
-        (guild_id, source_url))
-    names = [row[0] for row in await cur.fetchall()]
+        "SELECT name, icon_url FROM shop_items WHERE guild_id=?", (guild_id,))
+    wanted = SE._canonical_or_raw(source_url)
+    names = [name for name, icon_url in await cur.fetchall()
+             if SE._canonical_or_raw(icon_url) == wanted]
     if fallback_name and fallback_name not in names:
         names.append(fallback_name)
     return names
@@ -477,12 +498,22 @@ async def rename_all(*, guild_id=None, apply=False, limit=None,
                                             after=after, limit=page_size)
             # Advance the cursor on the RAW page, not only on renamed rows:
             # already-correct assets must still move the cursor forward.
-            cur = await db.execute(
+            # The cursor must use EXACTLY the same scope as _rename_candidates().
+            # Without the guild filter, another guild's interleaved hashes would
+            # advance this cursor past the target guild's own assets and skip
+            # them permanently.
+            cursor_sql = (
                 "SELECT MAX(content_hash) FROM ("
-                f"  SELECT content_hash FROM shop_emoji_assets WHERE application_id=? "
-                "  AND status='ready' AND emoji_id IS NOT NULL AND emoji_id<>'' "
-                "  AND content_hash > ? ORDER BY content_hash ASC LIMIT ?)",
-                (app_id, after or "", int(page_size)))
+                "  SELECT content_hash FROM shop_emoji_assets WHERE application_id=? "
+                "  AND status='ready' AND emoji_id IS NOT NULL AND emoji_id<>'' ")
+            cursor_params = [app_id]
+            if guild_id is not None:
+                cursor_sql += "  AND creator_guild_id=? "
+                cursor_params.append(guild_id)
+            cursor_sql += (
+                "  AND content_hash > ? ORDER BY content_hash ASC LIMIT ?)")
+            cursor_params += [after or "", int(page_size)]
+            cur = await db.execute(cursor_sql, tuple(cursor_params))
             row = await cur.fetchone()
             if not row or row[0] is None:
                 break
@@ -515,7 +546,9 @@ async def rename_all(*, guild_id=None, apply=False, limit=None,
                             # Never rename what Discord no longer confirms is ours.
                             continue
                         report["patch_requests"] += 1
-                        await _rename_or_defer(db, discord, asset, target, report)
+                        updated = await _rename_or_defer(db, discord, asset, target, report)
+                        if updated is None:  # pragma: no cover - defensive
+                            continue
             if limit and report["renamed"] >= limit:
                 break
     return report

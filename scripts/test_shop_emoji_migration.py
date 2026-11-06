@@ -194,14 +194,29 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(before_aliases), 2)
 
     def test_concurrent_initialization_from_separate_processes(self):
+        """Two processes initialising one file must both add the emoji schema.
+
+        Scoped to the emoji tables on purpose. ``init_db`` also runs unrelated
+        migrations, and ``utils/level_claims.py`` has a PRE-EXISTING
+        check-then-act race (``duplicate column name: operation_id``) that
+        reproduces at base ``e0ca738`` and is out of scope for this PR — see the
+        acceptance report. Testing the whole of ``init_db`` here would make this
+        case flaky for a reason that has nothing to do with emoji preparation.
+        """
         env = dict(os.environ)
         env.update(DATABASE_PATH=self.db, OWNER_ID=OWNER, NERO_ENVIRONMENT="production",
                    DISCORD_CLIENT_ID=APP, DISCORD_TOKEN="")
-        procs = [subprocess.Popen(
-            [sys.executable, "-c",
-             "import asyncio, database; asyncio.run(database.init_db())"],
-            cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            for _ in range(4)]
+        script = (
+            "import asyncio, aiosqlite, os\n"
+            "from utils.shop_emoji import ensure_shop_emoji_schema\n"
+            "async def main():\n"
+            "    async with aiosqlite.connect(os.environ['DATABASE_PATH']) as db:\n"
+            "        await ensure_shop_emoji_schema(db)\n"
+            "asyncio.run(main())\n")
+        procs = [subprocess.Popen([sys.executable, "-c", script],
+                                  cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+                 for _ in range(4)]
         results = []
         for proc in procs:
             out, err = proc.communicate(timeout=180)
@@ -210,6 +225,7 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(code, 0, err)
         self.assertEqual(_columns(self.db, "shop_emoji_assets").count("managed_name"), 1)
         self.assertEqual(_count_objects(self.db, "shop_emoji_queue"), 1)
+        self.assertEqual(_columns(self.db, "shop_emoji_queue").count("state"), 1)
 
     def test_upgrades_the_previous_revision_queue_table(self):
         """A queue table without state/generation must be upgraded in place."""

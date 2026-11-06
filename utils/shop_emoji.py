@@ -135,6 +135,27 @@ _startup_tasks: set[asyncio.Task] = set()
 _preparation_locks: dict[str, asyncio.Lock] = {}
 
 
+async def _add_column(db, table, column, ddl, known_columns):
+    """Add a column once, tolerating a concurrent initialiser winning the race.
+
+    ``PRAGMA table_info`` + ``ALTER TABLE`` is check-then-act: the Bot and the
+    Dashboard can start together against one SQLite file, both observe the
+    column as missing, and both issue the ALTER — the loser raises
+    ``duplicate column name``. Re-checking on failure makes the migration safe
+    for every process, and the outcome is identical either way.
+    """
+    if column in known_columns:
+        return False
+    try:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        return True
+    except Exception:  # noqa: BLE001 - another process may have just added it
+        cur = await db.execute(f"PRAGMA table_info({table})")
+        if column in {row[1] for row in await cur.fetchall()}:
+            return False
+        raise
+
+
 async def ensure_shop_emoji_schema(db):
     """Initialize and additively migrate emoji accounting during normal init_db."""
     for statement in SHOP_EMOJI_SCHEMA:
@@ -145,18 +166,15 @@ async def ensure_shop_emoji_schema(db):
     await _ensure_queue_schema(db)
     cur = await db.execute("PRAGMA table_info(shop_emoji_assets)")
     columns = {row[1] for row in await cur.fetchall()}
-    if "creator_guild_id" not in columns:
-        await db.execute("ALTER TABLE shop_emoji_assets ADD COLUMN creator_guild_id INTEGER")
-    if "managed_name" not in columns:
-        await db.execute("ALTER TABLE shop_emoji_assets ADD COLUMN managed_name INTEGER NOT NULL DEFAULT 0")
+    await _add_column(db, "shop_emoji_assets", "creator_guild_id", "INTEGER", columns)
+    await _add_column(db, "shop_emoji_assets", "managed_name",
+                      "INTEGER NOT NULL DEFAULT 0", columns)
     cur = await db.execute("PRAGMA table_info(shop_emoji_url_aliases)")
     alias_columns = {row[1] for row in await cur.fetchall()}
-    if "recovery_ack_required" not in alias_columns:
-        await db.execute(
-            "ALTER TABLE shop_emoji_url_aliases "
-            "ADD COLUMN recovery_ack_required INTEGER NOT NULL DEFAULT 0")
-    if "recovery_not_before" not in alias_columns:
-        await db.execute("ALTER TABLE shop_emoji_url_aliases ADD COLUMN recovery_not_before TEXT")
+    await _add_column(db, "shop_emoji_url_aliases", "recovery_ack_required",
+                      "INTEGER NOT NULL DEFAULT 0", alias_columns)
+    await _add_column(db, "shop_emoji_url_aliases", "recovery_not_before",
+                      "TEXT", alias_columns)
     # Existing aliased rows retain their original guild where possible. A
     # legacy unaliased NULL remains unattributed and cannot claim a new POST.
     await db.execute(
@@ -383,15 +401,58 @@ async def canonical_label_for_asset(db, application_id, content_hash) -> str | N
     """
     if not content_hash:
         return None
+    return canonical_product_label(
+        await product_names_for_asset(db, application_id, content_hash))
+
+
+def _canonical_or_raw(raw):
+    """Canonicalize when possible; otherwise keep the raw string for comparison.
+
+    ``shop_items.icon_url`` is stored exactly as the owner wrote it, while
+    ``shop_emoji_url_aliases.source_url`` is canonicalized. Comparing the two
+    with SQL string equality therefore misses legitimate matches (an uppercase
+    host, an explicit ``:443``). Both sides go through the same function here.
+    """
+    try:
+        return canonicalize_url(raw) if isinstance(raw, str) else None
+    except SourceImageError:
+        return raw if isinstance(raw, str) and raw else None
+
+
+async def product_names_for_asset(db, application_id, content_hash) -> list[str]:
+    """Every listing name this asset's content is bound to, canonically matched.
+
+    The alias table gives the (guild, canonical URL) pairs the asset serves; the
+    listing names are then resolved by canonicalizing ``shop_items.icon_url`` in
+    Python, so a stored URL that differs only in host case or an explicit
+    default port still contributes its product name. This is what keeps the
+    readable name independent of which product happened to be processed first.
+    """
+    if not content_hash:
+        return []
     cur = await db.execute(
-        "SELECT DISTINCT s.name FROM shop_emoji_url_aliases a "
+        "SELECT a.guild_id, a.source_url, e.creator_guild_id "
+        "FROM shop_emoji_url_aliases a "
         "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
         "  AND e.content_hash=a.content_hash "
-        "JOIN shop_items s ON s.guild_id=a.guild_id AND s.icon_url=a.source_url "
         "WHERE a.application_id=? AND a.content_hash=?",
         (application_id, content_hash))
-    names = [row[0] for row in await cur.fetchall()]
-    return canonical_product_label(names)
+    aliases = await cur.fetchall()
+    if not aliases:
+        return []
+    wanted = {(int(gid), _canonical_or_raw(url)) for gid, url, _owner in aliases
+              if gid is not None}
+    if not wanted:
+        return []
+    cur = await db.execute(
+        "SELECT guild_id, name, icon_url FROM shop_items "
+        "WHERE guild_id IN (" + ",".join("?" for _ in {g for g, _ in wanted}) + ")",
+        tuple({g for g, _ in wanted}))
+    names = set()
+    for gid, name, icon_url in await cur.fetchall():
+        if (int(gid), _canonical_or_raw(icon_url)) in wanted and isinstance(name, str):
+            names.add(name)
+    return sorted(names)
 
 
 async def resolve_asset_name(db, asset) -> str:

@@ -100,12 +100,16 @@ class FakeDiscord:
         self.remote = []
         self.creates = 0
         self.renames = 0
+        self.patch_requests = 0
+        self.patched_emoji_ids = []
         self.deletes = 0
         self.lists = 0
         self.create_failures = set(create_failures or ())
         self.create_timeout_indexes = set(create_timeout_indexes or ())
         self.rename_failures = dict(rename_failures or {})
-        # Index of creates whose response omits application_id/user (ambiguous).
+        # Indexes of creates whose 2xx response omits application_id/user — the
+        # "ambiguous reply" hypothesis. Not a claim about what Discord really
+        # sent in production; the historical body was never captured.
         self.omit_metadata_on_create = set(omit_metadata_on_create or ())
         # When True, list_emojis() returns entries without ownership metadata.
         self.omit_metadata_in_list = omit_metadata_in_list
@@ -173,6 +177,8 @@ class FakeDiscord:
 
     async def rename_emoji(self, emoji_id, name):
         self.renames += 1
+        self.patch_requests += 1
+        self.patched_emoji_ids.append(str(emoji_id))
         if self.rename_failures.get(str(emoji_id)) == "uncertain":
             raise SE.DiscordAPIError("rename unconfirmed", code="rename_uncertain",
                                      uncertain=True)
@@ -406,7 +412,7 @@ class BulkBackfillTests(AutomationTestBase):
 
         # Startup discovery re-runs; finished work must not be re-queued.
         async with aiosqlite.connect(DB_PATH) as db:
-            requeued = await Q.enqueue_guild_products(db, GUILD, reason="restart")
+            requeued = (await Q.enqueue_guild_products(db, GUILD, reason="restart"))["queued"]
         self.assertEqual(requeued, 0)
 
         reports = await self._drain()
@@ -420,7 +426,7 @@ class BulkBackfillTests(AutomationTestBase):
         await self._seed_products(12)
         await self._exec("DELETE FROM shop_emoji_queue")
         async with aiosqlite.connect(DB_PATH) as db:
-            queued = await Q.enqueue_guild_products(db, GUILD)
+            queued = (await Q.enqueue_guild_products(db, GUILD))["queued"]
         self.assertEqual(queued, 12)
         await self._drain()
         self.assertEqual(len(self.fake.remote), 12)
@@ -433,7 +439,7 @@ class BulkBackfillTests(AutomationTestBase):
         self._set_icon(pid, url_for(0))
         await self._exec("UPDATE shop_items SET enabled=0 WHERE id=?", (pid,))
         async with aiosqlite.connect(DB_PATH) as db:
-            queued = await Q.enqueue_guild_products(db, GUILD)
+            queued = (await Q.enqueue_guild_products(db, GUILD))["queued"]
         self.assertEqual(queued, 0)
 
     async def test_guild_isolation(self):
@@ -443,7 +449,7 @@ class BulkBackfillTests(AutomationTestBase):
                          "VALUES (?,?,?,?,?)",
                          (OTHER_GUILD, "Other Guild Item", 10, "custom", url_for(50)))
         async with aiosqlite.connect(DB_PATH) as db:
-            queued = await Q.enqueue_guild_products(db, OTHER_GUILD)
+            queued = (await Q.enqueue_guild_products(db, OTHER_GUILD))["queued"]
         self.assertEqual(queued, 1)
         reports = await self._drain()
         self.assertTrue(any(r["created"] for r in reports))
@@ -654,7 +660,7 @@ class BackfillScopeTests(AutomationTestBase):
         await self._seed_products(1)
         await self._drain()
         async with aiosqlite.connect(DB_PATH) as db:
-            queued = await Q.enqueue_guild_products(db, GUILD, application_id=APP)
+            queued = (await Q.enqueue_guild_products(db, GUILD, application_id=APP))["queued"]
         self.assertEqual(queued, 0, "a genuinely prepared product must not be re-queued")
 
     async def test_changed_url_is_queued_even_when_the_old_url_is_ready(self):
@@ -668,7 +674,7 @@ class BackfillScopeTests(AutomationTestBase):
         self.images.put(url_for(5), (5, 100, 5, 255))
         await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?", (url_for(5), pid))
         async with aiosqlite.connect(DB_PATH) as db:
-            queued = await Q.enqueue_guild_products(db, GUILD, application_id=APP)
+            queued = (await Q.enqueue_guild_products(db, GUILD, application_id=APP))["queued"]
         self.assertEqual(queued, 1, "the CURRENT url is unprepared and must be queued")
         await self._drain()
         ready = await self._one(
@@ -696,7 +702,7 @@ class BackfillScopeTests(AutomationTestBase):
                 "VALUES (?,?,?,?)", (OTHER_APP, GUILD, url, "a" * 64))
             await db.commit()
             # A backfill for the ACTIVE application must not be suppressed.
-            queued = await Q.enqueue_guild_products(db, GUILD, application_id=APP)
+            queued = (await Q.enqueue_guild_products(db, GUILD, application_id=APP))["queued"]
         self.assertEqual(queued, 1, "another application's ready alias is not ours")
         await self._drain()
         mine = await self._one(
@@ -721,7 +727,7 @@ class BackfillScopeTests(AutomationTestBase):
                 "INSERT INTO shop_emoji_url_aliases (application_id,guild_id,source_url,content_hash) "
                 "VALUES (?,?,?,?)", (APP, OTHER_GUILD, url, "b" * 64))
             await db.commit()
-            queued = await Q.enqueue_guild_products(db, GUILD, application_id=APP)
+            queued = (await Q.enqueue_guild_products(db, GUILD, application_id=APP))["queued"]
         self.assertEqual(queued, 1, "another guild's alias must not suppress or be reused")
         self.assertEqual(self.fake.creates, 0)
 
@@ -740,7 +746,7 @@ class BackfillScopeTests(AutomationTestBase):
                 "INSERT INTO shop_emoji_url_aliases (application_id,guild_id,source_url,content_hash) "
                 "VALUES (?,?,?,?)", (APP, GUILD, url, "c" * 64))
             await db.commit()
-            queued = await Q.enqueue_guild_products(db, GUILD, application_id=APP)
+            queued = (await Q.enqueue_guild_products(db, GUILD, application_id=APP))["queued"]
         self.assertEqual(queued, 1, "a non-ready alias means 'not done', so it is queued")
 
     async def test_duplicate_listings_are_never_guessed(self):
@@ -940,13 +946,31 @@ class DiscordFailureTests(AutomationTestBase):
 
 # ── 4b. the real production uncertain-create case (#7) ─────────────────────
 class ProductionUncertainCreateTests(AutomationTestBase):
-    """The exact production shape: ``عصير المجرات: uncertain`` /
+    """The historical production outcome: ``عصير المجرات: uncertain`` /
     "Discord's create response did not confirm the expected emoji."
 
-    Discord created the emoji but the POST body lacked ``application_id``/``user``,
-    so the local asset could not be confirmed. Reconciliation must then list the
-    emoji, and if the LIST carries ownership proof, adopt it — without a second
-    POST.
+    WHAT IS KNOWN (observed, not inferred):
+      * production stored the asset as ``uncertain`` with no ``emoji_id``;
+      * the recorded message was "Discord's create response did not confirm the
+        expected emoji.";
+      * the product was in Arabic, and no readable name was produced.
+
+    WHAT THIS DOUBLE SIMULATES (a hypothesis about the cause, deliberately
+    narrower than the observed outcome):
+      * Discord's POST reply was a 2xx body whose ``application_id``/``user``
+        keys were absent, so ``_ownership_supported()`` could not accept it.
+
+    WHAT DISCORD DOCUMENTS: Create Guild/Application Emoji returns the emoji
+    object (id, name, animated, and — for application emojis — the owning
+    ``user``/``application_id`` metadata). List Application Emojis returns
+    ``{items: [...]}`` of the same object shape. Both the create body and the
+    list entry are therefore expected to carry ownership metadata, which is why
+    a MISSING field is treated as "ambiguous", never as "not ours".
+
+    WHAT IS NOT CLAIMED: that the fake reproduces the exact historical response.
+    The real historical body was never captured. The test proves the SAFETY
+    BEHAVIOUR for that class of response — reconcile read-only, adopt only with
+    ownership proof, and never POST a second time.
     """
 
     async def test_uncertain_then_reconciled_by_listing(self):
@@ -1274,6 +1298,617 @@ class SharedHashScaleTests(AutomationTestBase):
         self.assertTrue(self.fake.remote[0]["name"].startswith("bulk_000_"),
                         self.fake.remote[0]["name"])
         self.assertEqual(self.fake.renames, 0, "the create-time name never needed fixing")
+
+
+# ── 4g. review round 2, item 2: retry_parked must actually reactivate ─────
+class BackfillReactivationTests(AutomationTestBase):
+    async def _park(self, product_id, url):
+        """Drive a product to state='parked' the way the worker really does."""
+        self.images.kill(url)
+        for _ in range(Q.MAX_AUTO_ATTEMPTS + 3):
+            await self._run_pass()
+            row = await self._one(
+                "SELECT state FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
+                (GUILD, product_id))
+            if row and row[0] == Q.STATE_PARKED:
+                break
+            # Clear the backoff so the next attempt actually happens.
+            await self._exec(
+                "UPDATE shop_emoji_queue SET next_attempt_at=NULL "
+                "WHERE guild_id=? AND product_id=?", (GUILD, product_id))
+        row = await self._one(
+            "SELECT state, attempts, last_error FROM shop_emoji_queue "
+            "WHERE guild_id=? AND product_id=?", (GUILD, product_id))
+        self.assertEqual(row[0], Q.STATE_PARKED, f"expected parked, got {row}")
+        return row
+
+    async def test_same_url_stays_parked_during_ordinary_discovery(self):
+        self._add_product("Parked Same")
+        pid = await self._product_id("Parked Same")
+        self.images.put(url_for(70), (70, 70, 70, 255))
+        self._set_icon(pid, url_for(70))
+        await self._park(pid, url_for(70))
+        before = await self._one(
+            "SELECT state, attempts, generation FROM shop_emoji_queue "
+            "WHERE guild_id=? AND product_id=?", (GUILD, pid))
+
+        # Ordinary discovery (no retry_parked) must not resurrect it.
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.authorize_backfill(db, GUILD, actor="owner")
+            result = await Q.enqueue_guild_products(db, GUILD)
+        self.assertEqual(result["queued"], 0, "a parked product is not new work")
+        self.assertEqual(result["reactivated"], 0, "discovery revives nothing")
+        after = await self._one(
+            "SELECT state, attempts, generation FROM shop_emoji_queue "
+            "WHERE guild_id=? AND product_id=?", (GUILD, pid))
+        self.assertEqual(tuple(after), tuple(before),
+                         "discovery must leave a parked row byte-identical")
+
+    async def test_owner_backfill_with_retry_parked_reactivates_and_completes(self):
+        self._add_product("Parked Retry")
+        pid = await self._product_id("Parked Retry")
+        self.images.put(url_for(71), (71, 71, 71, 255))
+        self._set_icon(pid, url_for(71))
+        parked = await self._park(pid, url_for(71))
+        attempts_before = parked[1]
+        self.assertGreater(attempts_before, 0)
+        gen_before = (await self._one(
+            "SELECT generation FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
+            (GUILD, pid)))[0]
+
+        # The image is replaced at the SAME canonical URL (bytes change, URL does
+        # not) — the hardest case: only an explicit owner retry may revive it.
+        self.images.dead.discard(url_for(71))
+        self.images.put(url_for(71), (11, 22, 33, 255))
+        r = self.client.post("/api/shop-publisher/emojis/backfill",
+                             json={"retry_parked": True},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        payload = r.get_json()
+        self.assertEqual(payload["reactivated"], 1,
+                         "the API must report the product it revived")
+        self.assertEqual(payload["queued"], 0,
+                         "a revived row is not NEW intent and must not be double-counted")
+        self.assertEqual(payload["queue"]["parked"], 0)
+
+        row = await self._one(
+            "SELECT state, attempts, generation, next_attempt_at, last_error "
+            "FROM shop_emoji_queue WHERE guild_id=? AND product_id=?", (GUILD, pid))
+        self.assertEqual(row[0], Q.STATE_QUEUED, "parked -> queued")
+        self.assertEqual(row[1], 0, "retry budget reset")
+        self.assertGreater(row[2], gen_before, "new generation invalidates stale work")
+        self.assertIsNone(row[3], "immediately eligible")
+        self.assertIsNone(row[4], "the old failure is cleared")
+
+        # And the worker actually processes it.
+        report = await self._run_pass()
+        self.assertEqual(report["created"], 1, report)
+        ready = await self._one(
+            "SELECT e.status FROM shop_emoji_url_aliases a "
+            "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
+            "  AND e.content_hash=a.content_hash WHERE a.source_url=? AND a.guild_id=?",
+            (url_for(71), GUILD))
+        self.assertIsNotNone(ready)
+        self.assertEqual(ready[0], "ready")
+        self.assertEqual(self.fake.deletes, 0)
+
+    async def test_retry_endpoint_still_reactivates_a_parked_product(self):
+        """#2 must not break the existing /emojis/retry behaviour."""
+        self._add_product("Parked Endpoint")
+        pid = await self._product_id("Parked Endpoint")
+        self.images.put(url_for(72), (72, 72, 72, 255))
+        self._set_icon(pid, url_for(72))
+        await self._park(pid, url_for(72))
+        r = self.client.post("/api/shop-publisher/emojis/retry",
+                             json={"product_ids": [pid]},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        row = await self._one(
+            "SELECT state, attempts FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
+            (GUILD, pid))
+        self.assertEqual(row[0], Q.STATE_QUEUED)
+        self.assertEqual(row[1], 0)
+        self.images.dead.discard(url_for(72))
+        self.images.put(url_for(72), (7, 7, 99, 255))
+        report = await self._run_pass()
+        self.assertEqual(report["created"], 1)
+
+
+# ── 4h. review round 2, item 3: same-URL discovery must be a true no-op ────
+class BackfillIdempotenceTests(AutomationTestBase):
+    async def _row(self, pid):
+        return await self._one(
+            "SELECT state,generation,attempts,next_attempt_at,last_error,source_url,"
+            "updated_at FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
+            (GUILD, pid))
+
+    async def test_repeated_backfill_leaves_a_queued_row_untouched(self):
+        self._add_product("Idem Queued")
+        pid = await self._product_id("Idem Queued")
+        self.images.put(url_for(73), (73, 73, 73, 255))
+        self._set_icon(pid, url_for(73))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        before = await self._row(pid)
+        self.assertEqual(before[1], 1, "first enqueue is generation 1")
+
+        for _ in range(3):
+            async with aiosqlite.connect(DB_PATH) as db:
+                result = await Q.enqueue_guild_products(db, GUILD)
+            self.assertEqual(result["queued"], 0, "no new intent")
+            self.assertEqual(result["reactivated"], 0)
+        after = await self._row(pid)
+        self.assertEqual(tuple(after), tuple(before),
+                         "same URL + queued intent must be a byte-identical no-op")
+        self.assertEqual(after[1], 1, "generation must NOT be incremented")
+
+    async def test_repeated_backfill_leaves_a_retry_row_in_backoff(self):
+        self._add_product("Idem Retry")
+        pid = await self._product_id("Idem Retry")
+        self.images.put(url_for(74), (74, 74, 74, 255))
+        self._set_icon(pid, url_for(74))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        # Make it a retry row in the future, as mark_failed would.
+        await self._exec(
+            "UPDATE shop_emoji_queue SET state=?, attempts=2, last_error='boom', "
+            "next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','+900 seconds') "
+            "WHERE guild_id=? AND product_id=?", (Q.STATE_RETRY, GUILD, pid))
+        before = await self._row(pid)
+        self.assertEqual(before[0], Q.STATE_RETRY)
+
+        for _ in range(3):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await Q.enqueue_guild_products(db, GUILD)
+        after = await self._row(pid)
+        self.assertEqual(tuple(after), tuple(before),
+                         "state, attempts, error and retry time must all survive")
+        self.assertEqual(after[0], Q.STATE_RETRY, "must not silently become 'queued'")
+        self.assertEqual(after[2], 2)
+        self.assertEqual(after[3], before[3], "backoff timestamp preserved")
+
+    async def test_same_url_discovery_cannot_invalidate_an_in_flight_pass(self):
+        self._add_product("Idem Inflight")
+        pid = await self._product_id("Idem Inflight")
+        self.images.put(url_for(75), (75, 75, 75, 255))
+        self._set_icon(pid, url_for(75))
+        gate = self.images.gate(url_for(75))
+        task = asyncio.create_task(self._run_pass())
+        for _ in range(300):
+            if url_for(75) in self.images.fetches:
+                break
+            await asyncio.sleep(0.01)
+        self.assertIn(url_for(75), self.images.fetches, "download never started")
+
+        # Periodic discovery runs WHILE the worker is mid-flight.
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.authorize_backfill(db, GUILD, actor="owner")
+            await Q.enqueue_guild_products(db, GUILD)      # same URL
+            # The row the worker claimed is still the current generation.
+            still = await Q.still_current(db, {
+                "guild_id": GUILD, "product_id": pid,
+                "generation": (await self._row(pid))[1]})
+        self.assertTrue(still, "discovery must not invalidate the claimed generation")
+
+        gate.set()
+        report = await asyncio.wait_for(task, timeout=60)
+        self.assertEqual(report.get("stale", 0), 0, f"work was wrongly invalidated: {report}")
+        self.assertEqual(report["created"], 1, report)
+        self.assertIsNone(await self._queue_state(pid),
+                          "mark_done removes the finished row")
+        self.assertEqual(self.fake.creates, 1, "exactly one create, no duplicate")
+
+    async def test_changed_url_still_bumps_the_generation(self):
+        self._add_product("Idem Change")
+        pid = await self._product_id("Idem Change")
+        self.images.put(url_for(76), (76, 76, 76, 255))
+        self._set_icon(pid, url_for(76))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        before = await self._row(pid)
+        self.images.put(url_for(77), (77, 77, 77, 255))
+        self._set_icon(pid, url_for(77))
+        after = await self._row(pid)
+        self.assertGreater(after[1], before[1], "a REAL change must bump generations")
+        self.assertEqual(after[5], url_for(77))
+        self.assertEqual(after[0], Q.STATE_QUEUED)
+
+
+# ── 4i. review round 2, item 4: one definition of "ready" ──────────────────
+class ReadyDefinitionTests(AutomationTestBase):
+    async def _plant(self, canon, emoji_id, *, status="ready", guild=GUILD):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO shop_emoji_assets (application_id,content_hash,"
+                "emoji_name,emoji_id,animated,creator_guild_id,pipeline_version,status) "
+                "VALUES (?,?,?,?,0,?,?,?)",
+                (APP, "f" * 64, "shop_planted12345678", emoji_id, guild,
+                 "rgba-128-png-v1", status))
+            await db.execute(
+                "INSERT OR REPLACE INTO shop_emoji_url_aliases "
+                "(application_id,guild_id,source_url,content_hash) VALUES (?,?,?,?)",
+                (APP, guild, canon, "f" * 64))
+            await db.commit()
+
+    async def _assert_unusable_id_does_not_suppress(self, label, value, index):
+        name = f"Ready {label}"
+        self._add_product(name)
+        pid = await self._product_id(name)
+        canon = url_for(80 + index)
+        self.images.put(canon, (80 + index, 80, 80, 255))
+        self._set_icon(pid, canon)
+        await self._exec("DELETE FROM shop_emoji_queue")
+        await self._plant(canon, value)
+        async with aiosqlite.connect(DB_PATH) as db:
+            result = await Q.enqueue_guild_products(db, GUILD)
+        self.assertEqual(
+            result["queued"], 1,
+            f"a {label} emoji_id cannot render in Inventory/Rank, so it must not "
+            "suppress backfill")
+
+    async def test_invalid_emoji_id_empty_string(self):
+        await self._assert_unusable_id_does_not_suppress("empty string", "", 0)
+
+    async def test_invalid_emoji_id_non_numeric(self):
+        await self._assert_unusable_id_does_not_suppress("non-numeric", "not-an-id", 1)
+
+    async def test_invalid_emoji_id_zero(self):
+        await self._assert_unusable_id_does_not_suppress("zero", 0, 2)
+
+    async def test_invalid_emoji_id_null(self):
+        await self._assert_unusable_id_does_not_suppress("null", None, 3)
+
+    async def test_valid_positive_id_is_recognised_as_ready(self):
+        self._add_product("Ready Valid")
+        pid = await self._product_id("Ready Valid")
+        canon = url_for(81)
+        self.images.put(canon, (81, 81, 81, 255))
+        self._set_icon(pid, canon)
+        await self._exec("DELETE FROM shop_emoji_queue")
+        await self._plant(canon, "950000000000000001")
+        async with aiosqlite.connect(DB_PATH) as db:
+            result = await Q.enqueue_guild_products(db, GUILD)
+        self.assertEqual(result["queued"], 0,
+                         "a genuinely ready asset suppresses duplicate work")
+
+    async def test_not_ready_status_is_never_prepared_even_with_a_valid_id(self):
+        self._add_product("Ready Status")
+        pid = await self._product_id("Ready Status")
+        canon = url_for(82)
+        self.images.put(canon, (82, 82, 82, 255))
+        self._set_icon(pid, canon)
+        await self._exec("DELETE FROM shop_emoji_queue")
+        await self._plant(canon, "950000000000000002", status="uncertain")
+        async with aiosqlite.connect(DB_PATH) as db:
+            result = await Q.enqueue_guild_products(db, GUILD)
+        self.assertEqual(result["queued"], 1, "only status='ready' counts")
+
+
+# ── 4j. review round 2, item 5: canonicalisation in the NAME lookup ────────
+class CanonicalNameLookupTests(AutomationTestBase):
+    """A stored URL and its canonical alias must agree for naming.
+
+    ``shop_emoji_url_aliases.source_url`` is canonicalized; ``shop_items.icon_url``
+    is stored as the owner typed it. Raw string equality between the two is
+    therefore wrong, and it silently made the readable name depend on which
+    product happened to be processed first.
+    """
+
+    def _upper_host(self, index):
+        return f"https://ASSETS.Example.COM/item-{index}.png?v=1"
+
+    def _explicit_port(self, index):
+        return f"https://assets.example.com:443/item-{index}.png?v=1"
+
+    async def test_hostname_case_does_not_hide_the_label(self):
+        colour = (101, 102, 103, 255)
+        self._add_product("Zebra Item")          # lexicographically LAST
+        self._add_product("Alpha Item")          # should win, but is stored oddly
+        alpha = await self._product_id("Alpha Item")
+        zebra = await self._product_id("Zebra Item")
+        self.images.put(url_for(90), colour)
+        # Alpha and Zebra share identical bytes; Alpha's URL is written with an
+        # uppercase host so raw equality with the canonical alias fails.
+        self._set_icon(alpha, self._upper_host(90))
+        self._set_icon(zebra, url_for(90))
+        self.assertEqual(SE.canonicalize_url(self._upper_host(90)),
+                         SE.canonicalize_url(url_for(90)),
+                         "the two strings must be the same URL to this pipeline")
+
+        await self._drain()
+        self.assertEqual(len(self.fake.remote), 1, "identical bytes -> one emoji")
+        self.assertTrue(self.fake.remote[0]["name"].startswith("alpha_item_"),
+                        f"label lookup lost the canonical name: {self.fake.remote[0]['name']}")
+
+    async def test_explicit_default_port_does_not_hide_the_label(self):
+        colour = (201, 202, 203, 255)
+        self._add_product("Beta Item")
+        self._add_product("Zeta Item")
+        beta = await self._product_id("Beta Item")
+        zeta = await self._product_id("Zeta Item")
+        self.images.put(url_for(91), colour)
+        self._set_icon(beta, self._explicit_port(91))
+        self._set_icon(zeta, url_for(91))
+        await self._drain()
+        self.assertEqual(len(self.fake.remote), 1)
+        self.assertTrue(self.fake.remote[0]["name"].startswith("beta_item_"),
+                        self.fake.remote[0]["name"])
+
+    async def test_order_and_restart_do_not_change_the_name(self):
+        colour = (31, 32, 33, 255)
+        names = ["Mike Item", "Alpha Item", "Charlie Item"]
+        variants = [url_for(92), self._upper_host(92), self._explicit_port(92)]
+        ids = []
+        for name, url in zip(names, variants):
+            self._add_product(name)
+            pid = await self._product_id(name)
+            self.images.put(url_for(92), colour)
+            self._set_icon(pid, url)
+            ids.append(pid)
+        await self._drain()
+        first = [e["name"] for e in self.fake.remote]
+        self.assertEqual(len(first), 1)
+        self.assertTrue(first[0].startswith("alpha_item_"), first)
+
+        # Restart and process again in the opposite order.
+        SE._preparation_locks.clear()
+        W._pass_lock = None
+        await self._exec("DELETE FROM shop_emoji_queue")
+        await self._exec("UPDATE shop_items SET icon_url=icon_url")   # keep URLs
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD, only_unprepared=False)
+        await self._drain()
+        self.assertEqual([e["name"] for e in self.fake.remote], first,
+                         "the readable name must not depend on processing order")
+
+    async def test_repeated_passes_issue_no_extra_patches(self):
+        colour = (51, 52, 53, 255)
+        self._add_product("Nova Item")
+        self._add_product("Atlas Item")
+        nova = await self._product_id("Nova Item")
+        atlas = await self._product_id("Atlas Item")
+        self.images.put(url_for(93), colour)
+        self._set_icon(nova, self._upper_host(93))
+        self._set_icon(atlas, url_for(93))
+        await self._drain()
+        renames_before = self.fake.renames
+        for _ in range(3):
+            await self._exec("UPDATE shop_emoji_queue SET next_attempt_at=NULL")
+            await self._drain(max_passes=3)
+            r = await self._names_pass()
+            self.assertEqual(r["renamed"], 0, f"unnecessary rename: {r['preview']}")
+        self.assertEqual(self.fake.renames, renames_before)
+
+    async def _names_pass(self):
+        return await W.rename_all(apply=True)
+
+
+# ── 4k. review round 2, item 6: guild-scoped rename cursor ─────────────────
+class RenameCursorScopeTests(AutomationTestBase):
+    """`rename_all(guild_id=…)` must not let another guild's hashes advance it.
+
+    Assets are created through the real pipeline, so each one has a bound
+    listing and therefore a real readable label. Their names are then rewound to
+    the legacy hash-only form, and every other asset (in content_hash order) is
+    reassigned to the other guild. The two guilds' hashes therefore INTERLEAVE,
+    which is exactly the case where an unscoped MAX(content_hash) cursor skips
+    the target guild's rows.
+    """
+
+    async def _seed_interleaved(self, count=8):
+        await self._seed_products(count)
+        await self._drain()
+        self.assertEqual(len(self.fake.remote), count)
+        async with aiosqlite.connect(DB_PATH) as db:
+            rows = await (await db.execute(
+                "SELECT content_hash FROM shop_emoji_assets ORDER BY content_hash")).fetchall()
+            target, other = [], []
+            legacy_names = {}
+            for index, (chash,) in enumerate(rows):
+                legacy = SE.deterministic_emoji_name(chash)
+                legacy_names[chash] = legacy
+                await db.execute(
+                    "UPDATE shop_emoji_assets SET emoji_name=?,managed_name=0 "
+                    "WHERE content_hash=?", (legacy, chash))
+                guild = OTHER_GUILD if index % 2 else GUILD
+                await db.execute(
+                    "UPDATE shop_emoji_assets SET creator_guild_id=? "
+                    "WHERE content_hash=?", (guild, chash))
+                (target if guild == GUILD else other).append(chash)
+            await db.commit()
+        for emoji in self.fake.remote:
+            emoji["name"] = "shop_legacy_" + emoji["id"][-6:]
+        ids_before = {e["id"]: e["name"] for e in self.fake.remote}
+        self.assertTrue(target and other, "both guilds must have assets")
+        self.legacy_names = legacy_names
+        # Prove the interleaving the reviewer described.
+        ordered = sorted(target + other)
+        self.assertNotEqual(ordered[:2], sorted(target)[:2],
+                            "hashes must be interleaved for this test to mean anything")
+        return target, other, ids_before
+
+    async def test_interleaved_guilds_do_not_skip_the_target_guild(self):
+        target, other, ids_before = await self._seed_interleaved()
+        report = await W.rename_all(guild_id=GUILD, apply=True, page_size=2)
+        self.assertFalse(report["skipped_no_credentials"], report)
+        renamed = {r["content_hash"] for r in report["results"] if r.get("renamed")}
+        self.assertEqual(renamed, set(target),
+                         "every eligible target-guild asset must be renamed, and "
+                         "no other-guild asset")
+        self.assertEqual(report["renamed"], len(target))
+        for row in report["results"]:
+            if row.get("renamed"):
+                self.assertEqual(row["guild_id"], GUILD)
+
+        rows = await self._all(
+            "SELECT content_hash,emoji_id,creator_guild_id,emoji_name,managed_name "
+            "FROM shop_emoji_assets ORDER BY content_hash")
+        self.assertEqual({r[0]: r[1] for r in rows},
+                         {r[0]: r[1] for r in rows}, "ids stable")
+        for chash, _eid, guild, name, managed in rows:
+            if chash in other:
+                self.assertEqual(guild, OTHER_GUILD)
+                self.assertEqual(name, self.legacy_names[chash],
+                                 "another guild's asset must NOT be renamed")
+                self.assertEqual(managed, 0)
+        self.assertEqual({e["id"] for e in self.fake.remote}, set(ids_before),
+                         "no emoji was recreated or deleted")
+        self.assertEqual(self.fake.deletes, 0)
+
+    async def test_second_scoped_run_issues_zero_patches(self):
+        target, other, ids_before = await self._seed_interleaved(6)
+        first = await W.rename_all(guild_id=GUILD, apply=True, page_size=2)
+        self.assertEqual(first["renamed"], len(target), first)
+        before = self.fake.patch_requests
+        second = await W.rename_all(guild_id=GUILD, apply=True, page_size=2)
+        self.assertEqual(second["renamed"], 0, second)
+        self.assertEqual(self.fake.patch_requests, before,
+                         "a second scoped run must issue no PATCH")
+        # IDs, hashes and aliases are all preserved.
+        aliases_before = await self._all(
+            "SELECT guild_id,source_url,content_hash FROM shop_emoji_url_aliases "
+            "ORDER BY content_hash")
+        self.assertTrue(aliases_before)
+        self.assertEqual({e["id"] for e in self.fake.remote}, set(ids_before))
+
+
+# ── 4l. review round 2, item 1: the Dashboard bulk action ──────────────────
+class DashboardBulkActionTests(AutomationTestBase):
+    """The owner button must cover the whole `shop_items` catalog.
+
+    None of these products are ever added to a Shop Designer roster: they are
+    created straight against the Shop database, which is exactly the case the
+    reviewer called out (``draft.products.slice()`` would have sent none).
+    """
+
+    async def _catalog_product(self, name, index, guild=GUILD):
+        url = url_for(index)
+        self.images.put(url, ((index * 17) % 256, (index * 31) % 256, 90, 255))
+        await self._exec(
+            "INSERT INTO shop_items (guild_id,name,price,type,icon_url,enabled) "
+            "VALUES (?,?,?,?,?,1)", (guild, name, 100, "custom", url))
+        return await self._one(
+            "SELECT id FROM shop_items WHERE guild_id=? AND name=?", (guild, name))
+
+    async def test_one_action_queues_the_whole_catalog_without_a_roster(self):
+        rows = [await self._catalog_product(f"Catalog {i:02d}", i) for i in range(5)]
+        ids = [r[0] for r in rows]
+        # Nothing was added to the Shop Designer; the queue starts empty because
+        # these rows were inserted directly rather than through the save path.
+        await self._exec("DELETE FROM shop_emoji_queue")
+        self.assertEqual((await self._one("SELECT COUNT(*) FROM shop_emoji_queue"))[0], 0)
+
+        r = self.client.post("/api/shop-publisher/emojis/backfill", json={},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        payload = r.get_json()
+        self.assertEqual(payload["queued"], 5, "one action, the entire catalog")
+        queued = await self._all(
+            "SELECT product_id, guild_id FROM shop_emoji_queue ORDER BY product_id")
+        self.assertEqual([q[0] for q in queued], sorted(ids),
+                         "every eligible product entered the queue")
+        self.assertEqual({q[1] for q in queued}, {GUILD})
+        self.assertTrue(payload["queue"]["authorized"])
+
+        await self._drain()
+        self.assertEqual(len(self.fake.remote), 5)
+        self.assertEqual(self.fake.deletes, 0)
+
+    async def test_action_ignores_the_designer_roster_entirely(self):
+        await self._catalog_product("Not Rostered A", 10)
+        await self._catalog_product("Not Rostered B", 11)
+        await self._exec("DELETE FROM shop_emoji_queue")
+        # The roster is irrelevant to this endpoint: it is never consulted.
+        r = self.client.post("/api/shop-publisher/emojis/backfill", json={},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.get_json()["queued"], 2)
+
+    async def test_another_guild_is_untouched_and_unauthorised(self):
+        await self._catalog_product("Mine", 20)
+        rows = await self._catalog_product("Theirs", 21, guild=OTHER_GUILD)
+        await self._exec("DELETE FROM shop_emoji_queue")
+        r = self.client.post("/api/shop-publisher/emojis/backfill", json={},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(r.get_json()["queued"], 1)
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertFalse(await Q.is_authorized(db, OTHER_GUILD),
+                             "advertising one guild must not authorise another")
+        await self._drain()
+        self.assertEqual(len(self.fake.remote), 1)
+
+    async def test_excluded_products_are_not_queued(self):
+        await self._catalog_product("Enabled Product", 30)
+        await self._exec(
+            "INSERT INTO shop_items (guild_id,name,price,type,icon_url,enabled) "
+            "VALUES (?,?,?,?,?,0)", (GUILD, "Disabled Product", 5, "custom", url_for(31)))
+        await self._exec(
+            "INSERT INTO shop_items (guild_id,name,price,type,icon_url,enabled) "
+            "VALUES (?,?,?,?,'',1)", (GUILD, "No Image Product", 5, "custom"))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        r = self.client.post("/api/shop-publisher/emojis/backfill", json={},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.get_json()["queued"], 1,
+                         "disabled and image-less products are not eligible")
+
+    async def test_the_action_reports_meaningful_progress_numbers(self):
+        for index in range(3):
+            await self._catalog_product(f"Progress {index}", 40 + index)
+        await self._exec("DELETE FROM shop_emoji_queue")
+        self.client.post("/api/shop-publisher/emojis/backfill", json={},
+                         headers={"X-CSRF-Token": CSRF})
+        await self._drain()
+        report = self.client.get("/api/shop-publisher/emojis/report",
+                                 headers={"X-CSRF-Token": CSRF}).get_json()
+        self.assertEqual(report["eligible_products"], 3)
+        self.assertEqual(report["already_ready"], 3, "the same fields the UI renders")
+        self.assertEqual(report["unprepared_products"], 0)
+        self.assertEqual(report["quota"]["used"], 3)
+        self.assertEqual(report["queue"]["total"], 0)
+        self.assertEqual(report["parked"], [])
+
+
+# ── 4m. review round 2, item 1: the control actually exists in the page ────
+class DashboardControlPresenceTests(unittest.TestCase):
+    """Static check that the owner action is really rendered and wired.
+
+    A backend endpoint nobody can reach is not a feature, so this asserts on the
+    shipped template and script rather than on the API alone.
+    """
+
+    def setUp(self):
+        self.template = (ROOT / "dashboard/templates/manage/shopdesigner.html").read_text(encoding="utf-8")
+        self.script = (ROOT / "dashboard/static/js/shop-designer.js").read_text(encoding="utf-8")
+
+    def test_the_owner_action_is_present_in_the_page(self):
+        self.assertIn('id="sd-catalog-emoji-backfill"', self.template)
+        self.assertIn("Prepare all Shop product icons", self.template)
+        for element in ("sd-catalog-emoji-refresh", "sd-catalog-emoji-retry-parked",
+                        "sd-catalog-emoji-status", "sd-catalog-emoji-report"):
+            self.assertIn(f'id="{element}"', self.template, element)
+
+    def test_the_control_calls_the_backfill_endpoint(self):
+        self.assertIn("/api/shop-publisher/emojis/backfill", self.script)
+        self.assertIn("EMOJI_BACKFILL_URL", self.script)
+        self.assertIn("runCatalogBackfill", self.script)
+        self.assertIn("ctx.on(catalogEmojiBackfill, 'click', runCatalogBackfill)", self.script)
+
+    def test_the_control_does_not_depend_on_the_roster(self):
+        # The new path must not read draft.products at all.
+        start = self.script.index("function runCatalogBackfill(")
+        end = self.script.index("function runEmojiOperation(")
+        body = self.script[start:end]
+        self.assertNotIn("draft.products", body,
+                         "the catalog action must work from shop_items, not the roster")
+
+    def test_progress_is_rendered_from_the_read_only_report(self):
+        self.assertIn("/api/shop-publisher/emojis/report", self.script)
+        for field in ("eligible_products", "already_ready", "unprepared_products",
+                      "deferred", "parked", "quota_limited"):
+            self.assertIn(field, self.script, field)
 
 
 # ── 5. future changes ───────────────────────────────────────────────────────

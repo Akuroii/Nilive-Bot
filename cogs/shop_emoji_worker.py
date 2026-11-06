@@ -70,8 +70,9 @@ class ShopEmojiWorker(commands.Cog):
                 continue
             try:
                 async with aiosqlite.connect(DB_PATH) as db:
-                    queued = await Q.enqueue_guild_products(db, guild_id,
+                    result = await Q.enqueue_guild_products(db, guild_id,
                                                             reason="backfill")
+                    queued = result["queued"]
                     if queued:
                         await Q.record_sweep(db, guild_id, f"queued {queued}")
                 if queued:
