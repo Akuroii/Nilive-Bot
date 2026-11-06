@@ -883,7 +883,7 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
         granted = await give_reward(
             bot, guild_id, user_id, "role", role_id=role_id,
             reason=f"Shop purchase: {name}", source=source,
-            item_name=name, metadata_extra=extra or None)
+            item_name=name, metadata_extra=extra or None, op_id=str(op_id) if op_id else None)
         if not granted.get("success"):
             result.update(
                 error=granted.get("error") or "Role delivery failed.",

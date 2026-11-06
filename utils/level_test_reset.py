@@ -267,6 +267,7 @@ async def inspect_member(guild_id: int, user_id: int, *,
         "has_level_row": False,
         "vi_activation": None,
         "role_other_grants": {},
+        "role_retention_obligations": [],
         "roles_left_on_member": [],
         "claims": [],
         "claims_by_status": {},
@@ -415,6 +416,39 @@ async def inspect_member(guild_id: int, user_id: int, *,
             if str(source) != CLAIM_SOURCE:
                 report["role_other_grants"].setdefault(str(role_id), set()).add(
                     f"inventory '{item_name}' ({source})")
+        try:
+            from utils.timed_ownership import (
+                RETENTION_ITEM_TYPE, is_expired as _th_is_expired)
+            cursor = await db.execute("""
+                SELECT id, role_id, item_name, item_type, expires_at
+                FROM timed_holdings
+                WHERE guild_id=? AND user_id=?
+            """, (guild_id, user_id))
+            for (holding_id, role_id, item_name, item_type,
+                 expires_at) in await cursor.fetchall():
+                if role_id is None:
+                    continue
+                if str(item_type or "") == RETENTION_ITEM_TYPE:
+                    # A durable role-retention obligation is NOT a grant: it
+                    # records work the bot still owes, not something the
+                    # member owns. Counting it as `role_other_grants` would
+                    # tell the operator the role is legitimately held by a
+                    # timed holding when the bot may in fact still owe it.
+                    # Report it separately so it stays visible.
+                    report["role_retention_obligations"].append({
+                        "holding_id": int(holding_id),
+                        "role_id": int(role_id),
+                        "item_name": item_name,
+                    })
+                    continue
+                if _th_is_expired(expires_at):
+                    continue
+                report["role_other_grants"].setdefault(
+                    str(int(role_id)), set()
+                ).add(f"timed holding '{item_name}' (#{holding_id})")
+        except aiosqlite.OperationalError as exc:
+            if "no such table: timed_holdings" not in str(exc).lower():
+                raise
         report["role_other_grants"] = {
             k: sorted(v) for k, v in report["role_other_grants"].items()}
 
@@ -477,12 +511,18 @@ async def inspect_member(guild_id: int, user_id: int, *,
         # provenance, so nothing is claimed as reversible. Crashing here would
         # make an old member uninspectable, which is worse than reporting
         # honestly that their history cannot be proven.
+        # Shop purchase grants share the ledger (utils.level_ops
+        # GRANT_SOURCE_PURCHASE) but are not level rewards: this report, keyed
+        # by (claim_id, kind), describes what the claim engine granted, so they
+        # are excluded here and the level numbers stay what they were.
         try:
             cursor = await db.execute("""
                 SELECT claim_id, kind, grant_id, quantity, remaining_quantity,
                        unattributed, unattributed_reason, item_name, currency,
                        ledger_id, reward_level, track
-                FROM reward_grants WHERE guild_id=? AND user_id=? ORDER BY id
+                FROM reward_grants WHERE guild_id=? AND user_id=?
+                  AND COALESCE(grant_source, 'level_reward') <> 'shop_purchase'
+                ORDER BY id
             """, (guild_id, user_id))
             grant_rows = await cursor.fetchall()
         except aiosqlite.OperationalError:
@@ -913,9 +953,9 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
             f"another operation is running for this member: {lock['reason']}. "
             f"Nothing was changed - wait for it to finish or for its lease to "
             f"expire, then run the preview again.")
-    await ops.open_operation(operation_id, ops.OP_RESET, guild_id, user_id,
-                             actor_id=reversed_by, reason=reason)
     try:
+        await ops.open_operation(operation_id, ops.OP_RESET, guild_id, user_id,
+                                 actor_id=reversed_by, reason=reason)
         # Re-inspect under the lease: the preview the admin read may predate it.
         report = await inspect_member(guild_id, user_id,
                                       include_prestige=include_prestige)
@@ -1197,8 +1237,11 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
              "traces": report["traces"]})
         return report
     except Exception as exc:
-        await ops.finish_operation(operation_id, "failed",
-                                   {"error": f"{type(exc).__name__}: {exc}"})
+        try:
+            await ops.finish_operation(operation_id, "failed",
+                                       {"error": f"{type(exc).__name__}: {exc}"})
+        except Exception:
+            pass
         raise
     finally:
         await ops.release_lock(guild_id, user_id, operation_id)
@@ -1436,11 +1479,11 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
             f"another operation is running for this member: {lock['reason']}. "
             f"Nothing was changed - wait for it to finish or for its lease to "
             f"expire, then run the preview again.")
-    await ops.open_operation(rollback_operation_id, ops.OP_ROLLBACK, guild_id,
-                             user_id, actor_id=reversed_by,
-                             reason=f"rolls back {operation_id}: {reason or ''}")
     report["operation_id"] = rollback_operation_id
     try:
+        await ops.open_operation(rollback_operation_id, ops.OP_ROLLBACK, guild_id,
+                                 user_id, actor_id=reversed_by,
+                                 reason=f"rolls back {operation_id}: {reason or ''}")
         # Re-read under the lease and rebuild the plan from THAT state, so every
         # decision below is made from the rows this operation is allowed to
         # change. The preview the admin read may predate the lease.
@@ -1747,10 +1790,13 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                  1 for f in report.get("role_failures") or [] if f.get("open_case"))})
         return report
     except Exception as exc:
-        await ops.finish_operation(
-            rollback_operation_id, "failed",
-            {"error": f"{type(exc).__name__}: {exc}",
-             "rolled_back": operation_id})
+        try:
+            await ops.finish_operation(
+                rollback_operation_id, "failed",
+                {"error": f"{type(exc).__name__}: {exc}",
+                 "rolled_back": operation_id})
+        except Exception:
+            pass
         raise
     finally:
         await ops.release_lock(guild_id, user_id, rollback_operation_id)

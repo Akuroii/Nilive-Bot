@@ -14,7 +14,7 @@ Re-keying `inventory_items` would mean rewriting trade, reward provenance
 (`reward_grants`/`reward_reversals`) and the level-test-reset reversal guards,
 all of which deliberately rely on "one row per name" and on `rowcount == 1`
 checks to fail closed. That trade is not worth it, so timed holdings live in
-their own table and `utils.inventory.get_inventory()` presents a unified view.
+their own table; `utils.inventory.get_inventory_entries()` presents a unified view.
 
 Design rules enforced here
 --------------------------
@@ -585,7 +585,14 @@ async def grant_timed_holding(guild_id: int, user_id: int, item_name: str,
             """,
             (guild_id, user_id, item_name, item_type, int(quantity), payload,
              source, product_id, category, role_value, expires_at))
-        return cursor.lastrowid
+        holding_id = cursor.lastrowid
+        if item_type != RETENTION_ITEM_TYPE and source != "shop_late_rollback":
+            from utils.inventory_activity import record_activity
+            await record_activity(connection, guild_id=guild_id, user_id=user_id,
+                                  event_type="acquired", item_name=item_name,
+                                  item_type=item_type, quantity=int(quantity),
+                                  source=source, event_key=f"timed-grant:{holding_id}")
+        return holding_id
 
     if db is not None:
         return await apply(db)
@@ -643,20 +650,48 @@ async def get_timed_holding(entry_key: str) -> dict | None:
     return _row_to_holding(row, _HOLDING_COLUMNS) if row else None
 
 
-async def delete_timed_holding(entry_key_or_id) -> bool:
-    """Delete exactly one holding. Returns True when a row was removed."""
+async def delete_timed_holding(entry_key_or_id, *, event_type: str | None = None,
+                               guild_id: int | None = None,
+                               user_id: int | None = None) -> bool:
+    """Delete a holding once, optionally journalling its actual removal atomically.
+
+    Internal retention and compensation retry markers are not user ownership.
+    Callers that cannot establish why a row is removed leave event_type unset.
+    """
     raw = str(entry_key_or_id)
     try:
         holding_id = int(raw.split(":", 1)[1]) if ":" in raw else int(raw)
     except (IndexError, ValueError):
         return False
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            f"DELETE FROM timed_holdings "
-            f"WHERE id=? AND item_type != '{RETENTION_ITEM_TYPE}'",
-            (holding_id,))
-        await db.commit()
-        return cursor.rowcount == 1
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await db.execute(
+                "SELECT guild_id,user_id,item_name,item_type,quantity,source,metadata "
+                "FROM timed_holdings WHERE id=? AND item_type != ?",
+                (holding_id, RETENTION_ITEM_TYPE))
+            row = await cur.fetchone()
+            if not row or (guild_id is not None and int(row[0]) != int(guild_id)) or (
+                    user_id is not None and int(row[1]) != int(user_id)):
+                await db.rollback()
+                return False
+            cursor = await db.execute("DELETE FROM timed_holdings WHERE id=?", (holding_id,))
+            if cursor.rowcount == 1 and event_type and row[5] != "shop_late_rollback":
+                try:
+                    meta = json.loads(row[6]) if row[6] else {}
+                except (TypeError, ValueError):
+                    meta = {}
+                if not isinstance(meta, dict) or not meta.get("late_rollback"):
+                    from utils.inventory_activity import record_activity
+                    await record_activity(db, guild_id=row[0], user_id=row[1],
+                                          event_type=event_type, item_name=row[2],
+                                          item_type=row[3], quantity=row[4], source=row[5],
+                                          event_key=f"timed-removal:{holding_id}")
+            await db.commit()
+            return cursor.rowcount == 1
+        except BaseException:
+            await db.rollback()
+            raise
 
 
 # ── Category resolution (Color identity) ────────────────────────────────
@@ -1888,7 +1923,7 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
     holding.
     """
     from utils.equip_engine import get_equipped
-    from utils.inventory import get_inventory
+    from utils.inventory import get_inventory_entries
 
     current = await get_equipped(guild_id, user_id)
     if not current:
@@ -1919,7 +1954,7 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
             if tr_rows and not has_live_temp_roles:
                 has_expired_temp_roles = True
 
-        items = await get_inventory(guild_id, user_id, include_empty=False)
+        items = await get_inventory_entries(guild_id, user_id)
         candidates = []
         for it in items:
             if it.get("entry_key") == entry_key:
@@ -2269,7 +2304,7 @@ def _serialised_expiry(func):
 
 
 @_serialised_expiry
-async def expire_one(bot, holding: dict) -> dict:
+async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dict:
     """Retire ONE expired holding, reconciling Discord and bookkeeping.
 
     Idempotent by construction: every step reads current state first, and the
@@ -2281,6 +2316,20 @@ async def expire_one(bot, holding: dict) -> dict:
     guild_id = int(holding["guild_id"])
     user_id = int(holding["user_id"])
     entry_key = holding["entry_key"]
+    current = await get_timed_holding(entry_key)
+    if (not current or int(current["guild_id"]) != guild_id or
+            int(current["user_id"]) != user_id):
+        return {"status": "skipped", "reason": "holding no longer owned"}
+    if drop_requested:
+        # The confirmation snapshots the exact selected holding. Do not turn a
+        # stale or already-expired button into a different ownership mutation.
+        fields = ("id", "item_name", "item_type", "quantity", "role_id", "expires_at", "metadata")
+        if is_expired(current.get("expires_at")) or any(current.get(k) != holding.get(k) for k in fields):
+            return {"status": "skipped", "reason": "holding changed or expired"}
+    elif not is_expired(current.get("expires_at")):
+        return {"status": "skipped", "reason": "holding no longer expired"}
+    removal_event = "dropped" if drop_requested else "expired"
+    holding = current
     role_id = holding.get("role_id")
 
     if role_id is None:
@@ -2289,7 +2338,8 @@ async def expire_one(bot, holding: dict) -> dict:
             await clear_equip_for_holding(guild_id, user_id, entry_key)
         except Exception:
             pass
-        await delete_timed_holding(entry_key)
+        await delete_timed_holding(entry_key, event_type=removal_event,
+                                   guild_id=guild_id, user_id=user_id)
         return {"status": "removed", "reason": "no role"}
 
     guild = bot.get_guild(guild_id) if bot is not None else None
@@ -2336,7 +2386,8 @@ async def expire_one(bot, holding: dict) -> dict:
         except Exception as exc:  # pragma: no cover - defensive
             err = f"equip bookkeeping cleanup failed: {exc}"
             return {"status": "kept", "reason": err, "error": err}
-        await delete_timed_holding(entry_key)
+        await delete_timed_holding(entry_key, event_type=removal_event,
+                                   guild_id=guild_id, user_id=user_id)
         if linked_op_id:
             # Only clear when the operation visibly belongs to this holding and
             # its descriptor is still pending: `delivery_rollback=""` is the
@@ -2368,7 +2419,7 @@ async def expire_one(bot, holding: dict) -> dict:
         and (is_late_rollback or role in member_roles)
     ):
         try:
-            await member.remove_roles(role, reason="Timed entitlement expired")
+            await member.remove_roles(role, reason="Inventory item dropped" if drop_requested else "Timed entitlement expired")
             if isinstance(getattr(member, "roles", None), list) and role in member.roles:
                 member.roles.remove(role)
         except Exception as exc:
@@ -2387,7 +2438,8 @@ async def expire_one(bot, holding: dict) -> dict:
             err = f"equip bookkeeping cleanup failed: {exc}"
             return {"status": "kept", "reason": err, "error": err}
 
-    await delete_timed_holding(entry_key)
+    await delete_timed_holding(entry_key, event_type=removal_event,
+                                   guild_id=guild_id, user_id=user_id)
     if linked_op_id:
         await _complete_linked_rollback(linked_op_id)
     return {
@@ -4944,7 +4996,8 @@ async def compensate_late_delivery(
                                     and role_obj in itx_user.roles
                                 ):
                                     itx_user.roles.remove(role_obj)
-                    await delete_timed_holding(str(late_key))
+                    await delete_timed_holding(str(late_key), event_type="ownership_reversed",
+                                               guild_id=guild_id, user_id=user_id)
                     spec["role_reconciled"] = True
                 except Exception as exc:
                     return await _persist_incomplete(f"Timed holding Discord role rollback failed: {exc}")

@@ -1909,6 +1909,11 @@ async def init_db():
             ON inventory_items(guild_id, user_id)
         """)
 
+        # Future-facing inventory activity. Existing ownership is not backfilled.
+        from utils.inventory_activity import SCHEMA as INVENTORY_ACTIVITY_SCHEMA
+        for _statement in INVENTORY_ACTIVITY_SCHEMA:
+            await db.execute(_statement)
+
         # Level/reward provenance, operation journal and the per-member
         # coordination lease (utils/level_ops.py). Created here so a normal boot
         # has them, and created lazily by level_ops.ensure_tables() for a

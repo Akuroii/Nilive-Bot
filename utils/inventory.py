@@ -74,6 +74,15 @@ async def give_item(guild_id: int, user_id: int, item_name: str,
             WHERE guild_id=? AND user_id=? AND item_name=?
         """, (guild_id, user_id, item_name))
         row = await cursor.fetchone()
+        # Potion refund is a compensation, not a new acquisition. Its separate
+        # transaction and possible failure require explicit outcome handling.
+        if source != "refund":
+            from utils.inventory_activity import record_activity
+            await record_activity(connection, guild_id=guild_id, user_id=user_id,
+                                  event_type=("restored" if source == "level_correction_restore"
+                                              else "acquired"),
+                                  item_name=item_name, item_type=item_type,
+                                  quantity=quantity, source=source)
         return row[0] if row else quantity
 
     if db is not None:
@@ -91,49 +100,66 @@ async def give_item(guild_id: int, user_id: int, item_name: str,
 
 
 async def remove_item(guild_id: int, user_id: int, item_name: str,
-                       quantity: int = 1) -> int:
+                       quantity: int = 1,
+                       db: aiosqlite.Connection | None = None, *,
+                       expected_id: int | None = None,
+                       expected_type: str | None = None,
+                       expected_metadata: dict | None = None) -> int:
+    """Consume quantity and provenance together, optionally in a caller transaction.
+
+    A supplied connection must already be in the caller's write transaction;
+    this helper never commits or rolls it back.
+    """
     if quantity <= 0:
         raise ValueError("quantity must be positive")
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("""
-                SELECT quantity FROM inventory_items
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (guild_id, user_id, item_name))
-            row = await cursor.fetchone()
-            current = row[0] if row else 0
-            if current < quantity:
-                await db.execute("ROLLBACK")
-                raise InsufficientItems(
-                    f"Has {current}x {item_name}, needs {quantity}")
+    async def apply(connection):
+        cursor = await connection.execute("""
+            SELECT quantity, id, item_type, metadata FROM inventory_items
+            WHERE guild_id=? AND user_id=? AND item_name=?
+        """, (guild_id, user_id, item_name))
+        row = await cursor.fetchone()
+        current = row[0] if row else 0
+        if (expected_id is not None and (not row or row[1] != expected_id)) or (
+                expected_type is not None and (not row or row[2] != expected_type)):
+            raise InsufficientItems("That inventory entry has changed")
+        if expected_metadata is not None:
+            try:
+                actual_metadata = json.loads(row[3]) if row and row[3] else {}
+            except (ValueError, TypeError):
+                raise InsufficientItems("That inventory entry has changed")
+            if actual_metadata != expected_metadata:
+                raise InsufficientItems("That inventory entry has changed")
+        if current < quantity:
+            raise InsufficientItems(
+                f"Has {current}x {item_name}, needs {quantity}")
+        new_qty = current - quantity
+        await connection.execute("""
+            UPDATE inventory_items
+            SET quantity = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE guild_id=? AND user_id=? AND item_name=?
+        """, (new_qty, guild_id, user_id, item_name))
+        await _consume_provenance(
+            connection, guild_id, user_id, item_name, quantity)
+        return new_qty
 
-            new_qty = current - quantity
-            await db.execute("""
-                UPDATE inventory_items
-                SET quantity = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (new_qty, guild_id, user_id, item_name))
-            # Level-reward provenance: the units leaving the stack are taken off
-            # the oldest attributable reward grants first, inside this same
-            # transaction, so `reward_grants.remaining_quantity` keeps meaning
-            # "units of that reward that are still here". Without this the only
-            # way to judge a reversal would be the merged stack total, which
-            # cannot tell a reward's units from a quest's.
-            await _consume_provenance(db, guild_id, user_id, item_name, quantity)
-            await db.commit()
-            return new_qty
-        except InsufficientItems:
-            raise
-        except Exception:
-            await db.execute("ROLLBACK")
+    if db is not None:
+        return await apply(db)
+    async with aiosqlite.connect(DB_PATH) as connection:
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            result = await apply(connection)
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
             raise
 
 
 async def set_quantity(guild_id: int, user_id: int, item_name: str,
                         quantity: int, item_type: str = "custom",
-                        source: str = "admin", metadata: dict = None) -> int:
+                        source: str = "admin", metadata: dict = None,
+                        db: aiosqlite.Connection | None = None) -> int:
     """
     metadata is optional and additive (Rank Card foundation / equip
     system) — used for role/temp_role items to carry {"role_id":...,
@@ -147,7 +173,7 @@ async def set_quantity(guild_id: int, user_id: int, item_name: str,
         raise ValueError("quantity cannot be negative")
     meta_json = json.dumps(metadata) if metadata else None
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async def apply(db):
         await db.execute("""
             INSERT INTO inventory_items
                 (guild_id, user_id, item_name, item_type,
@@ -167,11 +193,27 @@ async def set_quantity(guild_id: int, user_id: int, item_name: str,
             db, guild_id, user_id, item_name,
             "set_quantity() wrote an absolute quantity, which cannot be "
             "attributed to individual grants")
-        await db.commit()
-    return quantity
+        return quantity
+
+    if db is not None:
+        return await apply(db)
+    async with aiosqlite.connect(DB_PATH) as connection:
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            result = await apply(connection)
+            await connection.commit()
+            return result
+        except BaseException:
+            await connection.rollback()
+            raise
 
 
-async def drop_item(guild_id: int, user_id: int, item_name: str) -> dict:
+async def drop_item(guild_id: int, user_id: int, item_name: str,
+                    *, expected_id: int | None = None,
+                    expected_type: str | None = None,
+                    expected_quantity: int | None = None,
+                    expected_metadata: dict | None = None,
+                    prevent_equipped: bool = False) -> dict:
     """
     Remove ALL copies of an owned item, regardless of quantity. Used
     by Wallet → Item → Drop after the user has confirmed. Returns the
@@ -184,14 +226,40 @@ async def drop_item(guild_id: int, user_id: int, item_name: str) -> dict:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute("""
-                SELECT quantity, item_type FROM inventory_items
+                SELECT quantity, item_type, id, metadata FROM inventory_items
                 WHERE guild_id=? AND user_id=? AND item_name=?
             """, (guild_id, user_id, item_name))
             row = await cursor.fetchone()
+            if expected_id is not None and (not row or row[2] != expected_id):
+                await db.execute("ROLLBACK")
+                return {"success": False, "error": "That inventory entry has changed. Open it again."}
             if not row or (row[0] or 0) <= 0:
                 await db.execute("ROLLBACK")
                 return {"success": False,
                         "error": f"You do not own **{item_name}**."}
+            if expected_type is not None and row[1] != expected_type:
+                await db.rollback()
+                return {"success": False, "error": "That entry has changed type."}
+            if expected_quantity is not None and row[0] != expected_quantity:
+                await db.rollback()
+                return {"success": False, "error": "That stack has changed. Open it again."}
+            if expected_metadata is not None:
+                try:
+                    metadata = json.loads(row[3]) if row[3] else {}
+                except (TypeError, ValueError):
+                    metadata = None
+                if metadata != expected_metadata:
+                    await db.rollback()
+                    return {"success": False, "error": "That entry has changed. Open it again."}
+            if prevent_equipped:
+                cursor = await db.execute(
+                    "SELECT 1 FROM equipped_titles WHERE guild_id=? AND user_id=? AND item_name=? "
+                    "UNION ALL SELECT 1 FROM equipped_roles WHERE guild_id=? AND user_id=? "
+                    "AND item_name=? AND (entry_key IS NULL OR entry_key='' OR entry_key=?) LIMIT 1",
+                    (guild_id, user_id, item_name, guild_id, user_id, item_name, f"i:{row[2]}"))
+                if await cursor.fetchone():
+                    await db.rollback()
+                    return {"success": False, "error": "That entry is equipped. Unequip it first."}
             dropped_qty = int(row[0] or 0)
             dropped_type = row[1]
             await db.execute("""
@@ -200,6 +268,11 @@ async def drop_item(guild_id: int, user_id: int, item_name: str) -> dict:
             """, (guild_id, user_id, item_name))
             await _consume_provenance(db, guild_id, user_id, item_name,
                                       dropped_qty)
+            from utils.inventory_activity import record_activity
+            await record_activity(db, guild_id=guild_id, user_id=user_id,
+                                  event_type="dropped", item_name=item_name,
+                                  item_type=dropped_type, quantity=dropped_qty,
+                                  source="inventory")
             await db.commit()
             return {"success": True, "item_name": item_name,
                     "quantity": dropped_qty, "item_type": dropped_type}
@@ -249,6 +322,44 @@ async def get_inventory(guild_id: int, user_id: int,
             "source": r[5], "created_at": r[6], "updated_at": r[7],
         })
     return result
+
+
+async def get_inventory_entries(guild_id: int, user_id: int, *,
+                                include_empty: bool = False) -> list[dict]:
+    """Return distinct permanent stacks and live timed holdings for UI readers.
+
+    Unlike get_inventory, this is a new opt-in interface: existing name-based
+    consumers continue to see only permanent stacks. Each key is scoped by the
+    guild and user supplied to this reader, not a global authorization token.
+    """
+    from utils.timed_ownership import get_timed_holdings, is_expired
+
+    result = []
+    for row in await get_inventory(guild_id, user_id, include_empty=include_empty):
+        meta = row.get("metadata")
+        meta = meta if isinstance(meta, dict) else {}
+        if (row.get("item_type") == "temp_role" and meta.get("expires_at")
+                and is_expired(meta["expires_at"])):
+            continue
+        result.append({**row, "entry_key": f"i:{row['id']}", "timed": False,
+                       "expires_at": meta.get("expires_at"),
+                       "category": meta.get("category"),
+                       "role_id": meta.get("role_id")})
+    result.extend(await get_timed_holdings(guild_id, user_id))
+    return sorted(result, key=lambda it: (str(it.get("item_name") or "").lower(),
+                                         str(it.get("expires_at") or ""),
+                                         it["entry_key"]))
+
+
+def find_entry(entries: list[dict], *, entry_key: str | None = None,
+               item_name: str | None = None, item_type: str | None = None) -> dict | None:
+    """Resolve one exact entry or refuse an absent/ambiguous name."""
+    matches = [entry for entry in entries
+               if (entry.get("entry_key") == entry_key if entry_key is not None
+                   else item_name is not None and entry.get("item_name") == item_name)
+               and (item_name is None or entry.get("item_name") == item_name)
+               and (item_type is None or entry.get("item_type") == item_type)]
+    return matches[0] if len(matches) == 1 else None
 
 
 async def get_guild_inventory_summary(guild_id: int, limit: int = 200) -> list[dict]:

@@ -26,6 +26,11 @@ async def _log_ledger(guild_id: int, user_id: int, currency: str,
             type=type, reason=reason, source=source,
             related_user_id=related_user_id, db=db)
     except Exception as e:
+        # A caller-owned transaction promises that the ledger and financial
+        # movement commit together. Propagate errors so its owner can roll back;
+        # standalone best-effort logging remains unchanged.
+        if db is not None:
+            raise
         print(f"[LEDGER] Failed to log transaction "
               f"(guild={guild_id} user={user_id} currency={currency}): {e}")
 
