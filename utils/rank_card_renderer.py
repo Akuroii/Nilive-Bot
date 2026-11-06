@@ -1245,6 +1245,49 @@ def _build_line_icons(size: int) -> dict:
 # NETWORK ASSET FETCH (avatar / genuinely-custom emoji only)
 # ─────────────────────────────────────────────────────────────────────────
 
+async def _fetch_item_icon(session: aiohttp.ClientSession, item: dict) -> Image.Image | None:
+    """Icon for one owned inventory-grid item.
+
+    Source order:
+      1. The item's already-prepared application emoji (the icon the Shop
+         actually published) served from Discord's CDN -- the agreed icon
+         source, and the only one that survives the stored source URL
+         rotting, moving, or hiding behind auth.
+      2. The raw http(s) icon_url from the catalog / exact listing match,
+         as a fallback when nothing usable was prepared or the CDN asset
+         is unreachable.
+      3. An icon_url that is itself a custom emoji token (an admin pasted
+         `<:name:id>` instead of a URL) -- parsed and fetched from the CDN.
+
+    Nothing is fabricated: when none of the three yields an image the
+    caller draws the neutral placeholder tile.
+    """
+    prepared = (item.get("app_emoji") or "").strip()
+    parsed = parse_emoji_input(prepared) if prepared else None
+    candidates = []
+    if parsed:
+        candidates.append(emoji_cdn_url(parsed[0], animated=parsed[2]))
+    raw = (item.get("icon_url") or "").strip()
+    if raw.lower().startswith(("http://", "https://")):
+        candidates.append(raw)
+    else:
+        raw_token = parse_emoji_input(raw) if raw else None
+        if raw_token:
+            candidates.append(emoji_cdn_url(raw_token[0], animated=raw_token[2]))
+    for url in candidates:
+        im = await _fetch_image(session, url)
+        if im is None:
+            continue
+        if getattr(im, "is_animated", False):
+            im.seek(0)
+            im = im.convert("RGBA")
+        return im
+    if candidates:
+        log.warning("rank_card: no usable icon for owned item %r (tried %d source(s))",
+                    item.get("item_name"), len(candidates))
+    return None
+
+
 async def _fetch_image(session: aiohttp.ClientSession, url: str) -> Image.Image | None:
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
@@ -1331,9 +1374,6 @@ async def render_rank_card(data: dict) -> io.BytesIO:
 
     grid = data.get("inventory_grid") or []
 
-    async def _no_icon():
-        return None
-
     async with aiohttp.ClientSession() as session:
         avatar_im, coin_icon_im, diamond_icon_im = await asyncio.gather(
             _fetch_avatar(session, data.get("avatar_url")),
@@ -1343,8 +1383,7 @@ async def render_rank_card(data: dict) -> io.BytesIO:
                                    _STAT_ICON_DISPLAY_SIZE),
         )
         item_icons = list(await asyncio.gather(*[
-            _fetch_image(session, it["icon_url"]) if it.get("icon_url") else _no_icon()
-            for it in grid
+            _fetch_item_icon(session, it) for it in grid
         ]))
     mailbox_im = await _load_mailbox()
     ring_im = await _load_avatar_ring()
