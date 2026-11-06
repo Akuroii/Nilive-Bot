@@ -85,6 +85,36 @@ class EmbedTests(unittest.TestCase):
             wallet._inventory_line("🎒", 1, "  a\\b\t c "),
             "> - 🎒 • ` 1 ` • ` a\\b c `")
 
+    def test_standard_list_tabs_have_no_thumbnail(self):
+        """Items / Colors / Potions / Titles carry no thumbnail.
+
+        Regression: the original implementation (dbf772f / 016186f) only set
+        a thumbnail on the item-detail and drop-confirm views; the four list
+        tabs are author line + description + colour + footer. An entry with a
+        perfectly good http icon URL must not leak into the panel.
+        """
+        with_icon = entry("Sunglasses", "i:1", rarity="rare",
+                          icon_url="https://cdn.example.com/sunglasses.png")
+        with_icon["app_emoji"] = "<:shades:1562903222086279178>"
+        cases = {
+            wallet.TAB_ITEMS: [with_icon],
+            wallet.TAB_COLORS: [dict(with_icon, category="colors",
+                                    item_type="role", metadata={"role_id": 4242})],
+            wallet.TAB_POTIONS: [dict(with_icon, item_type="potion",
+                                      metadata={"effect": "xp_boost",
+                                                "multiplier": 2,
+                                                "duration_hours": 1})],
+            wallet.TAB_TITLES: [dict(with_icon, item_type="title")],
+        }
+        for tab, entries in cases.items():
+            embed = wallet.build_inventory_embed(tab, entries, None, None)
+            self.assertIsNone(embed.thumbnail.url if embed.thumbnail else None, tab)
+            self.assertIsNone(embed.to_dict().get("thumbnail"), tab)
+        # The item-detail view keeps its featured image — out of scope here.
+        detail = wallet.build_item_embed(SimpleNamespace(get_role=lambda _r: None),
+                                         wallet.TAB_ITEMS, with_icon, False)
+        self.assertIsNotNone(detail.thumbnail.url)
+
     def test_currency_balances_are_rows_not_a_field(self):
         rows = [{"emoji": "<:silver:111>", "name": "Silvers", "quantity": 11024},
                 {"emoji": "<:pearl:222>", "name": "Pearls", "quantity": 399}]

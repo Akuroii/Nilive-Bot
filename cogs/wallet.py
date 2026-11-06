@@ -783,10 +783,11 @@ async def currency_balance_rows(guild_id: int, user_id: int) -> list[dict]:
 
 
 def _thumbnail_for(entries: list[dict]) -> str | None:
-    # The first (highest rarity) item with an http image is promoted to
-    # the thumbnail so the panel isn't just text. Discord only allows
-    # one thumbnail per embed, so this is a "featured item" treatment
-    # rather than a per-line image (which is not possible in field text).
+    # Discord allows one thumbnail per embed, so a list can only ever
+    # feature one image rather than a per-line one. The four standard list
+    # tabs deliberately show NO thumbnail (the agreed panel is author line
+    # + description lines + colour + footer only); this is used by the
+    # Equipped slot view, which is not part of that agreed template.
     return next((u for u in (_item_thumbnail_url(it) for it in entries) if u), None)
 
 
@@ -818,10 +819,10 @@ def build_inventory_embed(tab: str, entries: list[dict],
         embed.description = empty
         return embed
 
-    thumb = _thumbnail_for(entries)
-    if thumb:
-        embed.set_thumbnail(url=thumb)
-
+    # No thumbnail here, deliberately: the agreed panel is author line +
+    # description lines + colour + footer, and none of the four standard
+    # list tabs carried one in the original implementation (dbf772f /
+    # 016186f). Per-item imagery belongs to the item-detail view.
     if tab == TAB_COLORS:
         lines.extend(_color_row(it, equipped_role, equipped_title_name)
                      for it in entries)
