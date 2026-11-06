@@ -160,15 +160,27 @@ async def get_rank_card_data(guild_id: int, user_id: int,
     # prepared alias against (never guessed, never written).
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            missing = [it for it in grid_candidates if not it["icon_url"]]
-            if missing:
-                from utils.shop_emoji import find_listing_icon_urls
-                found = await find_listing_icon_urls(
-                    db, guild_id, [it["item_name"] for it in missing])
-                for it in missing:
-                    it["icon_url"] = found.get(it["item_name"], "")
-            from utils.shop_emoji import attach_prepared_emojis
+            from utils.shop_emoji import attach_prepared_emojis, find_listing_icon_urls
+            # Pass 1: the catalog row's own icon_url — the URL Shop
+            # preparation aliased — when that row exists and is current.
             await attach_prepared_emojis(db, guild_id, grid_candidates)
+            # Pass 2: a NON-EMPTY but stale catalog icon_url must not hide a
+            # prepared emoji that was aliased against the listing's current
+            # URL. `item_catalog` is written when a Shop item is SAVED, so a
+            # listing saved before that write path (or re-imaged afterwards)
+            # carries an old URL while the emoji is prepared against the new
+            # one. Anything still unresolved is retried against its exact,
+            # unique, guild-scoped listing icon_url — never guessed, never
+            # written back into item_catalog.
+            unresolved = [it for it in grid_candidates if not it.get("app_emoji")]
+            if unresolved:
+                found = await find_listing_icon_urls(
+                    db, guild_id, [it["item_name"] for it in unresolved])
+                listing_candidates = [
+                    {"icon_url": found.get(it["item_name"], "")} for it in unresolved]
+                await attach_prepared_emojis(db, guild_id, listing_candidates)
+                for it, candidate in zip(unresolved, listing_candidates):
+                    it["app_emoji"] = candidate.get("app_emoji") or ""
     except Exception:
         # A missing/unreadable emoji mapping is an ordinary state, never a
         # reason to fail the whole card. Icons degrade to the placeholder.

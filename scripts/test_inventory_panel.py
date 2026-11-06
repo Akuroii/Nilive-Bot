@@ -46,30 +46,78 @@ class EmbedTests(unittest.TestCase):
         self.assertEqual(buttons[wallet.TAB_HISTORY].label, "ʜɪꜱᴛᴏʀʏ")
         view.stop()
 
-    def test_brand_author_uses_smallcaps_category(self):
+    def test_brand_author_uses_the_agreed_author_word(self):
         interaction = SimpleNamespace(
             client=SimpleNamespace(user=SimpleNamespace(name="Nero")),
             user=SimpleNamespace(display_name="Shadow", name="Shadow"),
             guild_id=1)
-        embed = discord.Embed(title="x")
-        wallet._brand_inventory(embed, interaction, wallet.TAB_TITLES, "Page 1/1")
-        self.assertIn("ᴛɪᴛʟᴇꜱ", embed.author.name)
-        self.assertIn("Shadow", embed.author.name)
+        embed = discord.Embed()
+        wallet._brand_inventory(embed, interaction, wallet.TAB_TITLES)
+        self.assertEqual(embed.author.name, "Nero: \U0001d413\U0001d408\U0001d413\U0001d40b\U0001d404\U0001d412 Shadow")
+        self.assertEqual(embed.author.icon_url, wallet.INVENTORY_AUTHOR_ICON)
         self.assertEqual(embed.color.value, wallet.INVENTORY_COLOR)
+        # The footer is the branded line alone when no page suffix is asked
+        # for, and the branded line plus the suffix otherwise.
+        self.assertEqual(embed.footer.text, wallet.INVENTORY_FOOTER_TEXT)
+        self.assertEqual(embed.footer.icon_url, wallet.INVENTORY_FOOTER_ICON)
+        wallet._brand_inventory(embed, interaction, wallet.TAB_TITLES, "Page 2/3")
+        self.assertEqual(embed.footer.text,
+                         f"{wallet.INVENTORY_FOOTER_TEXT} · Page 2/3")
+
+    def test_panel_has_no_competing_title_or_extra_fields(self):
+        """The agreed panel: author line, description, colour, footer only."""
+        for tab in (wallet.TAB_ITEMS, wallet.TAB_COLORS, wallet.TAB_POTIONS,
+                    wallet.TAB_TITLES):
+            embed = wallet.build_inventory_embed(
+                tab, [entry("Moon Ball", "i:1", rarity="epic")], None, None)
+            self.assertIsNone(embed.title, tab)
+            self.assertEqual(len(embed.fields), 0, tab)
+            self.assertEqual(embed.color.value, wallet.INVENTORY_COLOR, tab)
+
+    def test_every_row_uses_the_agreed_line_template(self):
+        entries = [entry("Moon Ball", "i:1", rarity="epic", quantity=3)]
+        embed = wallet.build_inventory_embed(wallet.TAB_ITEMS, entries, None, None)
+        self.assertEqual(embed.description,
+                         "> - 🟣 • ` 3 ` • ` Moon Ball ` • *Epic*")
+        # A name carrying a backtick/newline cannot break out of the span.
+        self.assertEqual(
+            wallet._inventory_line("🎒", 3, "bad`name\nsecond line"),
+            "> - 🎒 • ` 3 ` • ` bad'name second line `")
+        # Inline code is literal: a backslash must not be doubled into a
+        # visible "\\", and whitespace is collapsed.
+        self.assertEqual(
+            wallet._inventory_line("🎒", 1, "  a\\b\t c "),
+            "> - 🎒 • ` 1 ` • ` a\\b c `")
+
+    def test_currency_balances_are_rows_not_a_field(self):
+        rows = [{"emoji": "<:silver:111>", "name": "Silvers", "quantity": 11024},
+                {"emoji": "<:pearl:222>", "name": "Pearls", "quantity": 399}]
+        embed = wallet.build_inventory_embed(
+            wallet.TAB_ITEMS, [entry("Moon Ball", "i:1")], None, None,
+            currency_rows=rows)
+        self.assertEqual(len(embed.fields), 0)
+        self.assertIn("> - <:silver:111> • ` 11,024 ` • ` Silvers `",
+                      embed.description)
+        self.assertIn("> - <:pearl:222> • ` 399 ` • ` Pearls `", embed.description)
+        # Balances belong to the Items view only.
+        other = wallet.build_inventory_embed(
+            wallet.TAB_POTIONS, [], None, None, currency_rows=rows)
+        self.assertNotIn("Silvers", other.description or "")
 
     def test_items_embed_backticks_name_and_prepared_emoji(self):
         entries = [entry("Moon Ball", "i:1", rarity="epic",
                          app_emoji="<:moon:1562903222086279178>")]
         embed = wallet.build_inventory_embed(wallet.TAB_ITEMS, entries, None, None)
         self.assertIn("<:moon:1562903222086279178>", embed.description)
-        self.assertIn("`Moon Ball`", embed.description)
+        self.assertIn("` Moon Ball `", embed.description)
         self.assertIn("*Epic*", embed.description)
 
     def test_items_embed_timed_entry_shows_remaining_time(self):
         entries = [entry("Temporary Cape", "h:2", timed=True, item_type="temp_role")]
         embed = wallet.build_inventory_embed(wallet.TAB_ITEMS, entries, None, None)
-        self.assertIn("<t:", embed.description)
-        self.assertIn("`Temporary Cape`", embed.description)
+        self.assertIn("expires <t:", embed.description)
+        self.assertIn("<t:2051222400:R>", embed.description)
+        self.assertIn("` Temporary Cape `", embed.description)
 
     def test_potion_rows_show_effect_and_setup_needed(self):
         good = entry("XP Elixir", "i:3", item_type="potion", quantity=2,
@@ -81,29 +129,37 @@ class EmbedTests(unittest.TestCase):
         embed = wallet.build_inventory_embed(wallet.TAB_POTIONS, [good, bad], None, None)
         self.assertIn("2× XP for 6h", embed.description)
         self.assertIn("Setup needed", embed.description)
-        self.assertIn("**×2**", embed.description)
+        self.assertIn("` 2 `", embed.description)
 
     def test_titles_embed_marks_equipped(self):
         entries = [entry("The Silent One", "i:5", item_type="title", rarity="mythical"),
                    entry("Early Adopter", "i:6", item_type="title", rarity="rare")]
         embed = wallet.build_inventory_embed(wallet.TAB_TITLES, entries, None,
                                              "The Silent One")
-        lines = {l.split(" — ")[0]: l for l in embed.description.splitlines()}
-        silent = next(l for l in lines.values() if "The Silent One" in l)
-        adopter = next(l for l in lines.values() if "Early Adopter" in l)
+        lines = embed.description.splitlines()
+        silent = next(l for l in lines if "The Silent One" in l)
+        adopter = next(l for l in lines if "Early Adopter" in l)
         self.assertIn("✅ Equipped", silent)
         self.assertNotIn("✅ Equipped", adopter)
 
-    def test_colors_embed_has_equip_guidance_and_equipped_mark(self):
-        entries = [entry("Crimson Tide", "i:7", item_type="role",
-                         category="colors", rarity="rare"),
-                   entry("Ocean Blue", "i:8", item_type="role",
-                         category="colors", rarity="common")]
-        embed = wallet.build_inventory_embed(wallet.TAB_COLORS, entries,
-                                             "Crimson Tide", None)
-        self.assertTrue(embed.description.startswith("-#"))
-        crimson = next(l for l in embed.description.splitlines() if "Crimson" in l)
-        self.assertIn("✅ Equipped", crimson)
+    def test_colors_rows_render_a_real_role_mention(self):
+        """Colors are worn Discord roles: the row shows a `<@&id>` pill, not
+        the role's display name, so the member sees the colour itself."""
+        crimson = entry("Crimson Tide", "i:7", item_type="role",
+                        category="colors", rarity="rare")
+        crimson["metadata"] = {"category": "colors", "role_id": 4242}
+        timed = entry("Ocean Blue", "h:8", item_type="temp_role", timed=True,
+                      category="colors")
+        timed["metadata"] = {"category": "colors", "role_id": 4343}
+        embed = wallet.build_inventory_embed(wallet.TAB_COLORS, [crimson, timed],
+                                             "h:8", None)
+        lines = embed.description.splitlines()
+        self.assertEqual("> - 🔵 • ` 1 ` • <@&4242> • *Rare*", lines[0])
+        self.assertEqual(
+            "> - ⚪ • ` 1 ` • <@&4343> • *✅ Equipped* · *Common* · expires <t:2051222400:R>",
+            lines[1])
+        # No invented guidance line: the list IS the panel.
+        self.assertFalse(any(l.startswith("-#") for l in lines))
 
     def test_equipped_embed_shows_slots_and_nothing_when_empty(self):
         empty = wallet.build_inventory_embed(wallet.TAB_EQUIPPED, [], None, None,
@@ -174,6 +230,7 @@ class EmbedTests(unittest.TestCase):
 
     def test_history_embed_empty_state(self):
         embed = wallet.build_history_embed([], None)
+        self.assertIsNone(embed.title)
         self.assertEqual(embed.description, "No recorded inventory activity yet.")
 
 

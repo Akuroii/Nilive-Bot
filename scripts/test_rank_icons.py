@@ -41,6 +41,12 @@ os.environ["DISCORD_CLIENT_ID"] = APP_ID
 SWORD_SRC = "https://source.example.com/sword.png"
 SHIELD_SRC = "https://source.example.com/shield.png"
 SWORD_EMOJI_ID = "1562903222086279178"
+# A product whose `item_catalog.icon_url` is stale (non-empty!) while the
+# Shop listing — and therefore the prepared alias — carries a new URL.
+STALE_CATALOG_SRC = "https://cdn.example.com/old/galaxy-juice.png"
+LISTING_SRC = "https://cdn.example.com/new/galaxy-juice.png"
+JUICE_EMOJI_ID = "1562903222086279179"
+JUICE_NAME = "Galaxy Juice"
 
 
 class StubAvatar:
@@ -76,13 +82,20 @@ async def seed():
             "value_currency,value_amount) VALUES (?,?,?,?,?,?)",
             [(GUILD, "Prepared Sword", SWORD_SRC, "epic", "balance", 300),
              (GUILD, "Source Shield", SHIELD_SRC, "rare", "balance", 150),
-             (GUILD, "Mystery Box", None, "common", "balance", 10)])
+             (GUILD, "Mystery Box", None, "common", "balance", 10),
+             (GUILD, JUICE_NAME, STALE_CATALOG_SRC, "rare", "balance", 90)])
         await db.executemany(
             "INSERT INTO inventory_items (guild_id,user_id,item_name,"
             "item_type,quantity) VALUES (?,?,?,?,?)",
             [(GUILD, USER, "Prepared Sword", "custom", 1),
              (GUILD, USER, "Source Shield", "custom", 1),
-             (GUILD, USER, "Mystery Box", "custom", 1)])
+             (GUILD, USER, "Mystery Box", "custom", 1),
+             (GUILD, USER, JUICE_NAME, "custom", 1)])
+        # the Shop listing keeps the CURRENT source URL
+        await db.execute(
+            "INSERT INTO shop_items (guild_id,name,price,type,icon_url,enabled)"
+            " VALUES (?,?,?,?,?,1)",
+            (GUILD, JUICE_NAME, 90, "custom", LISTING_SRC))
         # One READY prepared application emoji, aliased to SWORD_SRC only.
         # SHIELD_SRC has no alias (never prepared); Mystery Box has no URL.
         import hashlib
@@ -97,6 +110,19 @@ async def seed():
             "INSERT INTO shop_emoji_url_aliases (application_id,guild_id,source_url,content_hash)"
             " VALUES (?,?,?,?)",
             (APP_ID, GUILD, SWORD_SRC, content_hash))
+        # second prepared emoji, aliased against the LISTING url only --
+        # never against the stale catalog url.
+        juice_hash = hashlib.sha256(b"prepared-juice-bytes").hexdigest()
+        await db.execute(
+            "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,"
+            "emoji_id,animated,creator_guild_id,pipeline_version,status)"
+            " VALUES (?,?,?,?,0,?,?, 'ready')",
+            (APP_ID, juice_hash, "prepared_juice", JUICE_EMOJI_ID, GUILD,
+             "rgba-128-png-v1"))
+        await db.execute(
+            "INSERT INTO shop_emoji_url_aliases (application_id,guild_id,source_url,content_hash)"
+            " VALUES (?,?,?,?)",
+            (APP_ID, GUILD, LISTING_SRC, juice_hash))
         await db.commit()
 
 
@@ -146,6 +172,14 @@ async def main():
     assert box["app_emoji"] == "" and not box["icon_url"]
     print("  ok  app_emoji attached from the ready alias; absent where never prepared")
 
+    print("Case 1b: a STALE non-empty catalog icon_url still resolves the "
+          "prepared emoji aliased to the listing URL")
+    juice = by_name[JUICE_NAME]
+    assert juice["icon_url"] == STALE_CATALOG_SRC, juice["icon_url"]
+    assert juice["app_emoji"] == f"<:prepared_juice:{JUICE_EMOJI_ID}>", juice["app_emoji"]
+    print(f"  ok  stale catalog url kept ({STALE_CATALOG_SRC}) but "
+          f"app_emoji={juice['app_emoji']}")
+
     print("Case 2: renderer prefers the Discord CDN (prepared) over the dead source URL")
     h = Harness(dead={SWORD_SRC, SHIELD_SRC})   # ALL sources dead; CDN alive
     await run_render_case("prepared icon via CDN, dead source", data, h)
@@ -164,6 +198,15 @@ async def main():
     h4 = Harness(dead={f"https://cdn.discordapp.com/emojis/{SWORD_EMOJI_ID}.png",
                        SWORD_SRC, SHIELD_SRC})
     await run_render_case("everything dead", data, h4)
+
+    print("Case 4b: with a stale catalog url the prepared CDN is still the "
+          "FIRST source tried (no dead-URL-only fallback)")
+    hb = Harness(dead={STALE_CATALOG_SRC})
+    await run_render_case("stale catalog url, prepared cdn alive", data, hb)
+    juice_cdn = f"https://cdn.discordapp.com/emojis/{JUICE_EMOJI_ID}.png"
+    assert juice_cdn in hb.requested, hb.requested
+    assert STALE_CATALOG_SRC not in hb.requested, hb.requested
+    print(f"  ok  requested {juice_cdn} — the stale source was never tried")
 
     print("Case 5: _fetch_item_icon source order (unit)")
     item = {"app_emoji": f"<:prepared_sword:{SWORD_EMOJI_ID}>", "icon_url": SWORD_SRC,
