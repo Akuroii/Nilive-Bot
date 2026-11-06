@@ -729,17 +729,24 @@ async def _refresh_ready_asset(db, asset, remote, bot_user_id):
     return asset
 
 
-async def attach_prepared_emojis(db, guild_id, products):
+async def attach_prepared_emojis(db, guild_id, products, *, application_id=None):
     """Mutate product dicts with prepared markup using only batched DB reads.
 
     Preview/publication rows already carry icon_url. The lightweight catalog
     omits it from its response, so fetch those source URLs transiently by the
     same guild-scoped product IDs without adding icon_url to the API payload.
+
+    Bot callers pass the authenticated client's application_id. DISCORD_CLIENT_ID
+    remains the dashboard/preparation default, but a bot read must not depend on
+    that dashboard variable being present (or still current) in its process.
+    This parameter only selects which existing alias to read; it never creates,
+    reconciles, or mutates an asset.
     """
     products = list(products or [])
     for product in products:
         product["app_emoji"] = ""
-    application_id = configured_application_id()
+    application_id = (str(application_id).strip() if application_id is not None
+                      else configured_application_id())
     if not application_id or not products:
         return products
     sources = [product.get("icon_url") if "icon_url" in product else None

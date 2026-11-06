@@ -2312,9 +2312,11 @@ class Leveling(commands.Cog):
         from utils.rank_card_data import get_rank_card_data
         from utils.rank_card_renderer import render_rank_card
 
+        application_id = getattr(getattr(interaction, "client", None), "application_id", None)
         try:
             data = await get_rank_card_data(
-                interaction.guild.id, member.id, member=member)
+                interaction.guild.id, member.id, member=member,
+                application_id=application_id)
             buf = await render_rank_card(data)
             file = discord.File(buf, filename="rank.png")
             await interaction.followup.send(file=file)
@@ -2324,7 +2326,8 @@ class Leveling(commands.Cog):
             # renderer (fonts/assets/network) fails for any reason.
             from utils.prestige import tier_label
             data = await get_rank_card_data(
-                interaction.guild.id, member.id, member=member)
+                interaction.guild.id, member.id, member=member,
+                application_id=application_id)
             embed = discord.Embed(
                 title=f"Rank — {member.display_name}", color=0x7c5cbf)
             if member.display_avatar:

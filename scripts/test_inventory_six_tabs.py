@@ -55,7 +55,7 @@ class SixTabTests(unittest.IsolatedAsyncioTestCase):
         interaction = SimpleNamespace(response=response, message=object())
         with patch.object(wallet, 'get_inventory_entries', AsyncMock(return_value=items)), \
              patch.object(wallet, 'cleanup_unowned_title', AsyncMock()), \
-             patch.object(wallet, '_decorate', AsyncMock(side_effect=lambda gid, entries: entries)), \
+             patch.object(wallet, '_decorate', AsyncMock(side_effect=lambda gid, entries, **kwargs: entries)), \
              patch.object(wallet, 'get_currency_config', AsyncMock(return_value={'coins': {'name': 'Coins', 'emoji': '🪙'}, 'diamonds': {'name': 'Diamonds', 'emoji': '💎'}})), \
              patch.object(wallet, 'get_balance', AsyncMock(return_value=0)), \
              patch.object(wallet, 'get_equipped', AsyncMock(return_value=None)), \
@@ -111,15 +111,17 @@ class SixTabTests(unittest.IsolatedAsyncioTestCase):
         config = {'coins': {'name': 'Gold', 'emoji': '🟡'}, 'diamonds': {'name': 'Gems', 'emoji': '💠'}}
         with patch.object(wallet, 'get_inventory_entries', AsyncMock(return_value=items)), \
              patch.object(wallet, 'cleanup_unowned_title', AsyncMock()), \
-             patch.object(wallet, '_decorate', AsyncMock(side_effect=lambda gid, values: values)), \
+             patch.object(wallet, '_decorate', AsyncMock(side_effect=lambda gid, values, **kwargs: values)), \
              patch.object(wallet, 'get_currency_config', AsyncMock(return_value=config)), \
              patch.object(wallet, 'get_balance', AsyncMock(side_effect=[1234, 3])), \
              patch.object(wallet, 'get_equipped', AsyncMock(return_value=None)), \
              patch.object(wallet, 'get_equipped_title', AsyncMock(return_value=None)):
             await wallet.open_inventory_panel(interaction, 1, 2, wallet.TAB_ITEMS)
             rendered = response.edit_message.await_args.kwargs
-            self.assertIn('1,234', rendered['embed'].fields[0].value)
-            self.assertIn('Gems', rendered['embed'].fields[0].value)
+            # PR #120 restored balances as description rows, not embed fields.
+            self.assertEqual(rendered['embed'].fields, [])
+            self.assertIn('1,234', rendered['embed'].description)
+            self.assertIn('Gems', rendered['embed'].description)
             select = next(x for x in rendered['view'].children if isinstance(x, wallet.InventoryItemSelect))
             self.assertEqual([o.value for o in select.options], ['i:1'])
             rendered['view'].stop()
@@ -138,3 +140,7 @@ class SixTabTests(unittest.IsolatedAsyncioTestCase):
             view = wallet.ItemPanelView(1, 2, wallet.TAB_ITEMS, item, False)
             self.assertFalse(any(isinstance(x, wallet.DropButton) for x in view.children))
             view.stop()
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
