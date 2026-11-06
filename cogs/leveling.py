@@ -2312,7 +2312,8 @@ class Leveling(commands.Cog):
         from utils.rank_card_data import get_rank_card_data
         from utils.rank_card_renderer import render_rank_card
 
-        application_id = getattr(getattr(interaction, "client", None), "application_id", None)
+        application_id = (getattr(interaction, "application_id", None)
+                          or getattr(getattr(interaction, "client", None), "application_id", None))
         try:
             data = await get_rank_card_data(
                 interaction.guild.id, member.id, member=member,

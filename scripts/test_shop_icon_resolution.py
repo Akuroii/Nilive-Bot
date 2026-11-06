@@ -193,6 +193,10 @@ class ShopIconResolutionTests(unittest.IsolatedAsyncioTestCase):
     def _interaction(self):
         send = AsyncMock()
         return SimpleNamespace(
+            # Model both discord.py 2.7.1 identity surfaces: the interaction
+            # payload ID and the logged-in client ID. Production prefers the
+            # former and falls back to the latter.
+            application_id=int(APP),
             client=SimpleNamespace(application_id=int(APP), user=SimpleNamespace(name="Nilive")),
             user=SimpleNamespace(id=USER, name="tester", display_name="Tester"),
             guild=SimpleNamespace(id=GUILD),
@@ -255,16 +259,22 @@ class ShopIconResolutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_runtime_identity_wins_over_stale_dashboard_env_for_reads(self):
         os.environ["DISCORD_CLIENT_ID"] = OTHER_APP
-        embed = await self._inventory()
+        interaction, send = self._interaction()
+        interaction.client.application_id = int(OTHER_APP)
+        await wallet.open_inventory_panel(interaction, GUILD, USER, wallet.TAB_ITEMS, first=True)
+        kwargs = send.await_args.kwargs
+        kwargs["view"].stop()
+        embed = kwargs["embed"]
         for i, name in enumerate(NAMES):
             self.assertIn(await self._token(i), embed.description)
         data = await self._rank()
         self.assertTrue(all(it["app_emoji"] for it in data["inventory_grid"]))
 
-    async def test_rank_command_passes_authenticated_client_identity(self):
+    async def test_rank_command_prefers_interaction_application_identity(self):
         os.environ.pop("DISCORD_CLIENT_ID", None)
         from cogs.leveling import Leveling
         interaction, _ = self._interaction()
+        interaction.client.application_id = int(OTHER_APP)
         interaction.response.defer = AsyncMock()
         interaction.followup = SimpleNamespace(send=AsyncMock())
         member = SimpleNamespace(id=USER, display_name="Tester", mention=f"<@{USER}>",
@@ -286,9 +296,10 @@ class ShopIconResolutionTests(unittest.IsolatedAsyncioTestCase):
             emoji_id = (await self._token(i)).rsplit(":", 1)[1][:-1]
             self.assertIn(f"https://cdn.discordapp.com/emojis/{emoji_id}.png", requested)
 
-    async def test_item_detail_and_drop_confirm_use_runtime_identity(self):
+    async def test_item_detail_and_drop_confirm_prefer_interaction_application_identity(self):
         os.environ.pop("DISCORD_CLIENT_ID", None)
         interaction, _ = self._interaction()
+        interaction.client.application_id = int(OTHER_APP)
         await wallet.open_item_panel(interaction, GUILD, USER, wallet.TAB_ITEMS, NAMES[0])
         kwargs = interaction.response.edit_message.await_args.kwargs
         self.assertIn(await self._token(0), kwargs["embed"].title)
@@ -297,6 +308,77 @@ class ShopIconResolutionTests(unittest.IsolatedAsyncioTestCase):
         kwargs = interaction.response.edit_message.await_args.kwargs
         self.assertIn(await self._token(0), kwargs["embed"].title)
         kwargs["view"].stop()
+
+    async def test_client_application_id_fallback_when_interaction_id_absent(self):
+        os.environ.pop("DISCORD_CLIENT_ID", None)
+        interaction, send = self._interaction()
+        del interaction.application_id
+        await wallet.open_inventory_panel(interaction, GUILD, USER, wallet.TAB_ITEMS, first=True)
+        kwargs = send.await_args.kwargs
+        kwargs["view"].stop()
+        for i, name in enumerate(NAMES):
+            self.assertIn(f"{await self._token(i)} • ` 1 ` • ` {name} `", kwargs["embed"].description)
+        await wallet.open_item_panel(interaction, GUILD, USER, wallet.TAB_ITEMS, NAMES[0])
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        self.assertIn(await self._token(0), kwargs["embed"].title)
+        kwargs["view"].stop()
+        await wallet.open_drop_confirm(interaction, GUILD, USER, wallet.TAB_ITEMS, NAMES[0])
+        kwargs = interaction.response.edit_message.await_args.kwargs
+        self.assertIn(await self._token(0), kwargs["embed"].title)
+        kwargs["view"].stop()
+
+        from cogs.leveling import Leveling
+        interaction.response.defer = AsyncMock()
+        interaction.followup = SimpleNamespace(send=AsyncMock())
+        member = SimpleNamespace(id=USER, display_name="Tester", mention=f"<@{USER}>",
+                                 display_avatar=SimpleNamespace(url=""),
+                                 joined_at=datetime(2024, 1, 1, tzinfo=timezone.utc), premium_since=None)
+        async def fake_fetch(session, url):
+            return Image.new("RGBA", (96, 96), (1, 2, 3, 255))
+        with patch.object(renderer, "_fetch_image", fake_fetch), \
+             patch.object(rank_card_data, "get_rank_card_data",
+                          wraps=rank_card_data.get_rank_card_data) as aggregate:
+            await Leveling.rank.callback(object(), interaction, member)
+        self.assertEqual(aggregate.await_args.kwargs["application_id"], int(APP))
+        self.assertIn("file", interaction.followup.send.await_args.kwargs)
+
+    async def test_stale_equipped_title_cleanup_is_preexisting_and_emoji_state_read_only(self):
+        stale_title = "لقب قديم غير مملوك"
+        await self._exec("INSERT INTO equipped_titles (guild_id,user_id,item_name) VALUES (?,?,?)",
+                         (GUILD, USER, stale_title))
+        before = await self._snapshot()
+        self.assertEqual(len(before["equipped_titles"]), 1)
+
+        # Opening Inventory may run the pre-existing stale-title cleanup, but it
+        # must not enter any Discord emoji API, preparation, reconciliation,
+        # source-fetch, or upload path.
+        with patch.object(SE, "DiscordAPI") as api, \
+             patch.object(SE, "prepare_product_emojis", AsyncMock()) as prepare, \
+             patch.object(SE, "reconcile_product_emojis", AsyncMock()) as reconcile, \
+             patch.object(SE, "reconcile_uncertain_at_startup", AsyncMock()) as startup, \
+             patch.object(SE, "_download_and_normalize", AsyncMock()) as download, \
+             patch.object(SE, "fetch_source_image", AsyncMock()) as fetch:
+            embed = await self._inventory()
+        api.assert_not_called()
+        prepare.assert_not_called()
+        reconcile.assert_not_called()
+        startup.assert_not_called()
+        download.assert_not_called()
+        fetch.assert_not_called()
+
+        after = await self._snapshot()
+        self.assertEqual(after["shop_emoji_assets"], before["shop_emoji_assets"])
+        self.assertEqual(after["shop_emoji_url_aliases"], before["shop_emoji_url_aliases"])
+        changed = {table for table in before if before[table] != after[table]}
+        self.assertEqual(changed, {"equipped_titles", "inventory_activity"},
+                         "only the pre-existing stale-title cleanup may write")
+        self.assertEqual(after["equipped_titles"], [])
+        event = await self._one(
+            "SELECT event_type,item_name,item_type,quantity,source FROM inventory_activity "
+            "WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 1", (GUILD, USER))
+        self.assertEqual(event, ("unequipped", stale_title, "title", 1, "equipment"))
+        for i, name in enumerate(NAMES):
+            self.assertIn(f"{await self._token(i)} • ` 1 ` • ` {name} `", embed.description)
 
     async def test_missing_and_non_ready_aliases_fallback_without_mutation(self):
         await self._exec("DELETE FROM shop_emoji_url_aliases WHERE source_url=?", (URLS[0],))

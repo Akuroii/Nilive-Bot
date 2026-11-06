@@ -1180,9 +1180,9 @@ async def open_inventory_panel(interaction: discord.Interaction,
     equipped_title_name = (equipped_title["item_name"]
                            if equipped_title else None)
 
-    decorated_all = await _decorate(
-        guild_id, items,
-        application_id=getattr(getattr(interaction, "client", None), "application_id", None))
+    application_id = (getattr(interaction, "application_id", None)
+                      or getattr(getattr(interaction, "client", None), "application_id", None))
+    decorated_all = await _decorate(guild_id, items, application_id=application_id)
     if tab == TAB_EQUIPPED:
         role_key = equipped.get("entry_key") if equipped else None
         entries = [it for it in decorated_all if
@@ -1512,9 +1512,9 @@ async def open_drop_confirm(interaction: discord.Interaction,
         await interaction.response.send_message(
             "Timed holdings cannot be dropped.", ephemeral=True)
         return
-    item = (await _decorate(
-        guild_id, [item],
-        application_id=getattr(getattr(interaction, "client", None), "application_id", None)))[0]
+    application_id = (getattr(interaction, "application_id", None)
+                      or getattr(getattr(interaction, "client", None), "application_id", None))
+    item = (await _decorate(guild_id, [item], application_id=application_id))[0]
     view = DropConfirmView(guild_id, user_id, tab, item["item_name"],
                            item_id=item["id"], item_type=item["item_type"], page=page,
                            quantity=item["quantity"], metadata=item.get("metadata") or {})
@@ -1532,9 +1532,9 @@ async def open_item_panel(interaction: discord.Interaction, guild_id: int,
     if not item or (tab != TAB_EQUIPPED and item not in split_by_tab(items).get(tab, [])):
         await interaction.response.send_message("That inventory entry is no longer available.", ephemeral=True)
         return
-    item = (await _decorate(
-        guild_id, [item],
-        application_id=getattr(getattr(interaction, "client", None), "application_id", None)))[0]
+    application_id = (getattr(interaction, "application_id", None)
+                      or getattr(getattr(interaction, "client", None), "application_id", None))
+    item = (await _decorate(guild_id, [item], application_id=application_id))[0]
     item["_page"] = page
     if item["item_type"] == TITLE_ITEM_TYPE:
         current = await get_equipped_title(guild_id, user_id)
