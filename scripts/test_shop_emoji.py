@@ -1395,3 +1395,120 @@ def test_discord_transport_create_and_delete_failures_are_uncertain(failure):
         run(client._request("DELETE", "/applications/test/emojis/1", mutating=True))
     assert error.value.uncertain is True
     assert error.value.code == "discord_transport_error"
+
+
+def test_owner_prepare_never_uploads_an_image_the_listing_stopped_using(shop):
+    """The explicit owner path must be fenced too.
+
+    `prepare_product_emojis()` derives its URL list once, then prepares each
+    URL. If that path passes no staleness validator, every `validate_source`
+    guard inside `_prepare_one` is inert and an edit made mid-batch can still
+    upload the obsolete image. The listing is changed while the batch is running
+    — after the snapshot, before creation — and the obsolete image must never
+    reach Discord.
+    """
+    edits = []
+
+    def edit_listing_then_download(url):
+        # Runs inside the batch, after the URL snapshot was taken.
+        if not edits:
+            with sqlite3.connect(shop.path) as db:
+                db.execute("UPDATE shop_items SET icon_url=? WHERE id=1", (URL2,))
+                db.commit()
+            edits.append(url)
+        return {URL1: PNG1, URL2: PNG2}[url]
+
+    shop.download = edit_listing_then_download
+    original = SE._download_and_normalize
+
+    async def download(url):
+        return shop.download(url)
+
+    SE._download_and_normalize = download
+    try:
+        result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    finally:
+        SE._download_and_normalize = original
+
+    assert edits, "the scenario never engaged: the listing was not edited mid-batch"
+    uploaded = [png for _name, png, _bot in shop.fake.create_calls]
+    assert PNG1 not in uploaded, (
+        "the obsolete image was uploaded after the listing moved away from it")
+    assert result["status"] != "ready", (
+        "a stale URL must not be reported as prepared for the product")
+
+
+def test_uncertain_recovery_post_is_fenced_at_the_boundary(shop):
+    """Requirement 1 names three creation paths; uncertain recovery is one.
+
+    The recovery POST happens inside `_create_claimed()` after a listing and a
+    reconciliation, so a fence placed before that call is not at the boundary.
+    Here the listing moves away while the pass runs, between the request's
+    snapshot and the recovery POST.
+    """
+    shop.fake.create_error = SE.DiscordAPIError("5xx", uncertain=True)
+    first = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert first["status"] == "uncertain"
+    assert len(shop.fake.create_calls) == 1
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_emoji_assets SET quarantine_until=? WHERE content_hash=?",
+                   (SE._iso(SE._utcnow() - timedelta(seconds=1)), first["content_hash"]))
+    shop.fake.create_error = None
+
+    def edit_listing_then_download(url):
+        with sqlite3.connect(shop.path) as db:
+            db.execute("UPDATE shop_items SET icon_url=? WHERE id=1", (URL2,))
+            db.commit()
+        return {URL1: PNG1, URL2: PNG2}[url]
+
+    async def download(url):
+        return edit_listing_then_download(url)
+
+    original = SE._download_and_normalize
+    SE._download_and_normalize = download
+    try:
+        retried = run(SE.prepare_product_emojis(
+            GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+    finally:
+        SE._download_and_normalize = original
+
+    assert len(shop.fake.create_calls) == 1, (
+        "the recovery POST ran for an image the listing had already replaced")
+    assert retried["status"] != "ready"
+
+
+def test_changed_source_remap_post_is_fenced_at_the_boundary(shop):
+    """The third named path: an acknowledged remap must be fenced at its POST.
+
+    A confirmed alias whose bytes change re-enters through `_remap_changed_source`.
+    That path inserts a new identity and can create, so it needs the boundary
+    check as much as a fresh create does.
+    """
+    content_hash = put_asset(shop, status="ready", emoji_id="2001")
+    shop.fake.remote = [remote_emoji(content_hash, 2001)]
+    # New bytes for the same alias, acknowledged, past quarantine.
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_items SET icon_url=? WHERE id=1", (URL2,))
+        db.commit()
+    shop.images[URL2] = PNG2
+
+    def edit_listing_then_download(url):
+        with sqlite3.connect(shop.path) as db:
+            db.execute("UPDATE shop_items SET icon_url=? WHERE id=1", (URL1,))
+            db.commit()
+        return {URL1: PNG1, URL2: PNG2}[url]
+
+    async def download(url):
+        return edit_listing_then_download(url)
+
+    original = SE._download_and_normalize
+    SE._download_and_normalize = download
+    try:
+        result = run(SE.prepare_product_emojis(
+            GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+    finally:
+        SE._download_and_normalize = original
+
+    uploaded = [png for _name, png, _bot in shop.fake.create_calls]
+    assert PNG2 not in uploaded, (
+        "the remap uploaded the replacement image after the listing reverted")

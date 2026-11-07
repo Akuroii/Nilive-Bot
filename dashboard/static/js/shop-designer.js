@@ -571,7 +571,12 @@ window.NERO = window.NERO || {};
             });
             if (catalogEmojiBackfill) ctx.on(catalogEmojiBackfill, 'click', runCatalogBackfill);
             if (catalogEmojiRefresh) ctx.on(catalogEmojiRefresh, 'click', refreshCatalogEmojiReport);
-            refreshCatalogEmojiReport();
+            // Deliberately NOT fetched on mount. The Shop Designer's read-route
+            // contract (asserted by the existing designer harnesses) allows only
+            // its own catalog/design/category GETs on load, and progress is not
+            // needed until the owner acts. The panel shows a prompt and fetches
+            // on first use instead.
+            setCatalogEmojiStatus('Open this panel\'s controls to check progress, or use "Refresh progress".');
 
             // Setting select.value in code fires no event, so dependents (the Publications panel)
             // would keep showing the previous Design's records. Announce a real selection change,

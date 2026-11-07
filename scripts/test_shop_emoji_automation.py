@@ -104,6 +104,8 @@ class FakeDiscord:
         self.patched_emoji_ids = []
         self.deletes = 0
         self.lists = 0
+        self.list_calls = []
+        self.list_gates = {}
         self.create_failures = set(create_failures or ())
         self.create_timeout_indexes = set(create_timeout_indexes or ())
         self.rename_failures = dict(rename_failures or {})
@@ -138,6 +140,13 @@ class FakeDiscord:
 
     async def list_emojis(self):
         self.lists += 1
+        self.list_calls.append(self.lists)
+        gate = self.list_gates.get(self.lists)
+        if gate is not None:
+            # Block INSIDE the Nth list call. Used to prove the validation that
+            # precedes a create is still re-checked at the actual POST boundary:
+            # by the time this returns, the product may have changed.
+            await gate.wait()
         if self.list_status:
             status = self.list_status.get("status", 500)
             raise SE.DiscordAPIError(
@@ -1125,7 +1134,15 @@ class StaleQueueDeletionTests(AutomationTestBase):
         self.assertEqual(survivor["generation"], newer["generation"])
         self.assertEqual(survivor["source_url"], url_for(8))
 
-    async def test_deleted_listing_does_not_destroy_a_newer_generation(self):
+    async def test_deleted_listing_completes_only_its_own_generation(self):
+        """The listing is REALLY deleted here, so the branch is actually entered.
+
+        The queue row is left in place (a deleted listing does not delete it),
+        which is what lets the worker reach the `listing_gone` branch. The
+        scenario the branch must handle is: this generation is still current, so
+        completing it is correct — and the completion must be the CAS, so a row
+        written afterwards survives.
+        """
         self._add_product("Vanishing Product")
         pid = await self._product_id("Vanishing Product")
         self.images.put(url_for(9), (9, 9, 9, 255))
@@ -1134,10 +1151,51 @@ class StaleQueueDeletionTests(AutomationTestBase):
         async with aiosqlite.connect(DB_PATH) as db:
             await Q.enqueue_guild_products(db, GUILD)
         old_row = await self._row_dict(pid)
+        self.assertEqual(old_row["source_url"], url_for(9))
+
+        # Delete the listing. There is deliberately no FK cascade from
+        # shop_emoji_queue to shop_items, so the intent row survives — which is
+        # precisely the state the branch exists to clean up.
+        await self._exec("DELETE FROM shop_items WHERE id=?", (pid,))
+        self.assertIsNone(await self._one(
+            "SELECT id FROM shop_items WHERE id=?", (pid,)),
+            "the listing must genuinely be gone for this test to mean anything")
+        self.assertIsNotNone(await self._row_dict(pid),
+                             "the queue row survives the listing deletion")
+
+        status = await self._resume_stale_worker(old_row)
+        self.assertEqual(status, "listing_gone",
+                         "the deleted-listing branch must be the one that ran")
+        self.assertIsNone(await self._row_dict(pid),
+                          "a current generation of a deleted listing is void")
+
+    async def test_deleted_listing_cannot_destroy_a_newer_generation(self):
+        """Same branch, but a newer intent exists: the CAS must refuse."""
+        self._add_product("Vanishing Newer")
+        pid = await self._product_id("Vanishing Newer")
+        self.images.put(url_for(19), (19, 19, 19, 255))
+        self._set_icon(pid, url_for(19))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        old_row = await self._row_dict(pid)
+
+        # A newer generation is written directly, as the Dashboard would.
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_product(db, GUILD, pid, "Vanishing Newer",
+                                    url_for(20), reason="product_saved")
         newer = await self._row_dict(pid)
-        await self._resume_stale_worker(old_row)
-        # Nothing changed, so the row is legitimately finished and removed.
-        self.assertIsNone(await self._row_dict(pid))
+        self.assertGreater(newer["generation"], old_row["generation"])
+
+        await self._exec("DELETE FROM shop_items WHERE id=?", (pid,))
+        status = await self._resume_stale_worker(old_row)
+        self.assertEqual(status, "stale_listing_gone",
+                         "the stale generation must be reported, not acted on")
+        survivor = await self._row_dict(pid)
+        self.assertIsNotNone(survivor,
+                             "a stale worker must never delete a newer generation")
+        self.assertEqual(survivor["generation"], newer["generation"])
+        self.assertEqual(survivor["source_url"], url_for(20))
 
     async def test_reactivate_cannot_reset_a_newer_intent(self):
         """An old Backfill snapshot must not revive/reset a newer row."""
@@ -1243,6 +1301,346 @@ class FenceCoverageTests(AutomationTestBase):
                 "WHERE guild_id=? AND product_id=?", (GUILD, pid))).fetchone())
             self.assertTrue(await W._source_still_current(db, row),
                             "normal work must still be allowed")
+
+
+# ── 4a5. audit round 4: the fence must be at the ACTUAL POST boundary ──────
+class PostBoundaryFenceTests(AutomationTestBase):
+    """A fence that runs before `_create_claimed()` is not at the POST.
+
+    `_create_claimed()` awaits `list_emojis()` and `_reconcile_asset()` before
+    calling `create_emoji()`. A product can change inside that window, after the
+    pre-create validation has already passed. These tests block the LIST call
+    that happens inside `_create_claimed()` — i.e. after the download fence has
+    succeeded — to prove the boundary itself is guarded.
+    """
+
+    async def _run_to_blocked_list(self, url, *, pass_index=1):
+        """Start a pass and block the Nth list_emojis call of that pass."""
+        gate = asyncio.Event()
+        self.fake.list_gates[pass_index] = gate
+        task = asyncio.create_task(self._run_pass())
+        for _ in range(600):
+            if self.fake.lists >= pass_index:
+                return gate, task
+            await asyncio.sleep(0.01)
+        self.fail(f"list_emojis call #{pass_index} never happened")
+
+    async def test_url_changed_during_the_final_list_never_posts_the_old_image(self):
+        self._add_product("Boundary Product")
+        pid = await self._product_id("Boundary Product")
+        self.images.put(url_for(0), (12, 24, 36, 255))
+        self._set_icon(pid, url_for(0))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+
+        # Block the LAST list call before the create. In this flow the pass
+        # performs: verify/list for reconciliation, then _create_claimed's own
+        # list. Blocking by index keeps the test deterministic.
+        gate, task = await self._run_to_blocked_list(url_for(0), pass_index=self.fake.lists + 1)
+        # While the list is in flight, the product really changes.
+        self.images.put(url_for(1), (200, 10, 10, 255))
+        self._set_icon(pid, url_for(1))
+        gate.set()
+        await asyncio.wait_for(task, timeout=90)
+
+        self.assertEqual(self.fake.creates, 0,
+                         "the POST boundary must revalidate: URL A must not be created")
+        stale_asset = await self._one(
+            "SELECT COUNT(*) FROM shop_emoji_url_aliases WHERE guild_id=? AND source_url=?",
+            (GUILD, url_for(0)))
+        self.assertEqual(stale_asset[0], 0, "no alias may exist for the abandoned image")
+
+    async def test_cleared_image_during_the_final_list_never_posts(self):
+        self._add_product("Boundary Cleared")
+        pid = await self._product_id("Boundary Cleared")
+        self.images.put(url_for(2), (3, 6, 9, 255))
+        self._set_icon(pid, url_for(2))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+
+        gate, task = await self._run_to_blocked_list(url_for(2), pass_index=self.fake.lists + 1)
+        self._set_icon(pid, "")
+        gate.set()
+        await asyncio.wait_for(task, timeout=90)
+        self.assertEqual(self.fake.creates, 0,
+                         "a cleared image must not be POSTed at the boundary")
+
+    async def test_the_validator_is_invoked_immediately_before_create_emoji(self):
+        """Behavioural proof, not a source-string count.
+
+        The fake records the ORDER of list/create/validate events, so we can
+        assert that a validation happened after the final list and before the
+        POST rather than trusting a grep.
+        """
+        self._add_product("Boundary Order")
+        pid = await self._product_id("Boundary Order")
+        self.images.put(url_for(3), (7, 14, 21, 255))
+        self._set_icon(pid, url_for(3))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+
+        events = []
+        real_create = self.fake.create_emoji
+        real_list = self.fake.list_emojis
+
+        async def create_spy(name, png, bot_user_id):
+            events.append("create")
+            return await real_create(name, png, bot_user_id)
+
+        async def list_spy():
+            events.append("list")
+            return await real_list()
+
+        self.fake.create_emoji = create_spy
+        self.fake.list_emojis = list_spy
+        # Count validations by wrapping the worker's fence.
+        real_fence = W._source_still_current
+        validations = []
+
+        async def fence_spy(db, row):
+            validations.append(list(events))
+            return await real_fence(db, row)
+
+        with patch.object(W, "_source_still_current", fence_spy):
+            await self._run_pass()
+
+        self.assertEqual(self.fake.creates, 1, "the normal path still creates")
+        self.assertIn("create", events)
+        create_at = events.index("create")
+        last_list_before = max(i for i, e in enumerate(events[:create_at]) if e == "list")
+        # Some validation must be recorded after that final list.
+        self.assertTrue(
+            any(len(snapshot) > last_list_before and "create" not in snapshot
+                for snapshot in validations),
+            f"no validation ran after the final list and before the POST: "
+            f"events={events} validations={validations}")
+
+
+# ── 4a6. audit round 4: stale requeue must not overwrite newer intent ──────
+class StaleRequeueTests(AutomationTestBase):
+    """The requeue branch wrote from an old listing snapshot, unconditionally."""
+
+    async def _row_dict(self, pid):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                f"SELECT {','.join(Q.QUEUE_FIELDS)} FROM shop_emoji_queue "
+                "WHERE guild_id=? AND product_id=?", (GUILD, pid))
+            fetched = await cur.fetchone()
+            return Q._row(fetched) if fetched else None
+
+    async def test_requeue_from_a_stale_snapshot_does_not_overwrite_a_newer_url(self):
+        self._add_product("Requeue Product")
+        pid = await self._product_id("Requeue Product")
+        self.images.put(url_for(10), (10, 1, 1, 255))
+        self._set_icon(pid, url_for(10))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        old_row = await self._row_dict(pid)          # generation for URL 10
+
+        # The listing moves to URL 11, then to URL 12 (newest intent).
+        self.images.put(url_for(11), (11, 1, 1, 255))
+        self.images.put(url_for(12), (12, 1, 1, 255))
+        self._set_icon(pid, url_for(11))
+        self._set_icon(pid, url_for(12))
+        newest = await self._row_dict(pid)
+        self.assertEqual(newest["source_url"], url_for(12))
+
+        # A stale worker resumes believing the listing is still URL 11.
+        await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?", (url_for(11), pid))
+        async with aiosqlite.connect(DB_PATH) as db:
+            await W._process_row(db, self.fake, old_row, list(self.fake.remote),
+                                 BOT_ID, W._empty_report())
+
+        survivor = await self._row_dict(pid)
+        self.assertIsNotNone(survivor, "newer intent must not be destroyed")
+        self.assertEqual(survivor["generation"], newest["generation"],
+                         "a stale requeue must never bump or replace a newer generation")
+        self.assertEqual(survivor["source_url"], newest["source_url"],
+                         "the newest URL must survive, not be overwritten by a stale one")
+
+    async def test_requeue_is_refused_when_the_listing_moved_on_again(self):
+        """The listing itself changed after the snapshot was taken."""
+        self._add_product("Requeue Moved")
+        pid = await self._product_id("Requeue Moved")
+        self.images.put(url_for(13), (13, 2, 2, 255))
+        self._set_icon(pid, url_for(13))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        old_row = await self._row_dict(pid)
+
+        self.images.put(url_for(14), (14, 2, 2, 255))
+        self._set_icon(pid, url_for(14))
+        newest = await self._row_dict(pid)
+
+        # Between the worker's read and its write, the listing changes again.
+        self.images.put(url_for(15), (15, 2, 2, 255))
+        await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?", (url_for(15), pid))
+        async with aiosqlite.connect(DB_PATH) as db:
+            listing = await W._load_listing(db, GUILD, pid)
+            _i, _g, name, icon, enabled = listing
+            wrote = await Q.requeue_if_current(
+                db, old_row, name, Q.queue_source_url(icon))
+        self.assertFalse(wrote, "a requeue must verify the listing still matches")
+
+    async def test_the_current_url_is_still_prepared_after_a_stale_requeue(self):
+        """Requirement 2, third half: refusing the write must not lose the work.
+
+        A lost requeue is only correct if the surviving intent still gets
+        prepared. This drains the real worker and asserts that exactly the
+        CURRENT image was uploaded — never the URL the stale worker proposed.
+        """
+        self._add_product("Requeue Converges")
+        pid = await self._product_id("Requeue Converges")
+        self.images.put(url_for(20), (20, 5, 5, 255))
+        self._set_icon(pid, url_for(20))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        old_row = await self._row_dict(pid)          # generation for URL 20
+
+        # The listing really moves to URL 21, which queues its own generation.
+        self.images.put(url_for(21), (21, 5, 5, 255))
+        self._set_icon(pid, url_for(21))
+        newest = await self._row_dict(pid)
+
+        # The stale worker proposes URL 21 from a snapshot it read too early:
+        # its write must be refused because its own generation is gone.
+        async with aiosqlite.connect(DB_PATH) as db:
+            wrote = await Q.requeue_if_current(db, old_row, "Requeue Converges",
+                                               url_for(21))
+        self.assertFalse(wrote, "a superseded generation must not write")
+
+        await self._drain()
+        survivor = await self._row_dict(pid)
+        self.assertIsNone(survivor, "the current intent must be completed, not stranded")
+        alias = await self._all(
+            "SELECT source_url FROM shop_emoji_url_aliases WHERE guild_id=?", (GUILD,))
+        self.assertIn((url_for(21),), alias,
+                      "the current URL must end up prepared")
+        self.assertNotIn((url_for(20),), alias,
+                         "the superseded URL must never be prepared")
+        self.assertEqual(self.fake.creates, 1,
+                         "exactly one emoji may be created, for the current image")
+
+    async def test_backfill_snapshot_cannot_overwrite_newer_intent(self):
+        self._add_product("Backfill Snapshot")
+        pid = await self._product_id("Backfill Snapshot")
+        self.images.put(url_for(16), (16, 3, 3, 255))
+        self._set_icon(pid, url_for(16))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        # A newer URL arrives before Backfill writes its snapshot.
+        self.images.put(url_for(17), (17, 3, 3, 255))
+        self._set_icon(pid, url_for(17))
+        newest = await self._row_dict(pid)
+        before = dict(newest)
+        # Backfill re-runs: it must not clobber the newer intent.
+        async with aiosqlite.connect(DB_PATH) as db:
+            await Q.enqueue_guild_products(db, GUILD)
+        after = await self._row_dict(pid)
+        self.assertEqual(after["generation"], before["generation"])
+        self.assertEqual(after["source_url"], before["source_url"])
+
+
+# ── 4a7. audit round 4: reactivation must match its documented contract ───
+class RetryStateContractTests(AutomationTestBase):
+    """/emojis/retry is documented as reactivating PARKED rows.
+
+    It used to reset any existing row: a `queued` row was bumped to a new
+    generation (invalidating a worker mid-flight) and a `retry` row lost its
+    attempts, error and backoff timer. Each state is exercised through the real
+    API, not by calling reactivate() directly.
+    """
+
+    async def _queue(self, name, index):
+        self._add_product(name)
+        pid = await self._product_id(name)
+        self.images.put(url_for(index), (index, 9, 9, 255))
+        self._set_icon(pid, url_for(index))
+        return pid
+
+    async def _row(self, pid):
+        return await self._one(
+            "SELECT state,generation,attempts,next_attempt_at,last_error "
+            "FROM shop_emoji_queue WHERE guild_id=? AND product_id=?", (GUILD, pid))
+
+    async def _retry(self, pid):
+        r = self.client.post("/api/shop-publisher/emojis/retry",
+                             json={"product_ids": [pid]},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        return r.get_json()
+
+    async def test_a_parked_row_is_reactivated(self):
+        pid = await self._queue("Retry Parked", 0)
+        await self._exec(
+            "UPDATE shop_emoji_queue SET state='parked', attempts=4, "
+            "last_error='dead', next_attempt_at=NULL WHERE guild_id=? AND product_id=?",
+            (GUILD, pid))
+        body = await self._retry(pid)
+        self.assertEqual(body["reactivated"], 1)
+        row = await self._row(pid)
+        self.assertEqual(row[0], "queued", "parked -> queued")
+        self.assertEqual(row[1], 2, "a new generation fences stale work")
+        self.assertEqual(row[2], 0, "the retry budget is reset")
+        self.assertIsNone(row[4])
+
+    async def test_a_queued_row_is_left_alone(self):
+        pid = await self._queue("Retry Queued", 1)
+        before = await self._row(pid)
+        self.assertEqual(before[0], "queued")
+        body = await self._retry(pid)
+        self.assertEqual(body["reactivated"], 0,
+                         "an already-queued row is not a parked row")
+        after = await self._row(pid)
+        self.assertEqual(tuple(after), tuple(before),
+                         "a queued row must stay byte-identical: its generation "
+                         "must not be bumped under a worker that is processing it")
+
+    async def test_a_retry_row_keeps_its_backoff(self):
+        pid = await self._queue("Retry Backoff", 2)
+        await self._exec(
+            "UPDATE shop_emoji_queue SET state='retry', attempts=2, "
+            "last_error='source_http_error: 404', "
+            "next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','+900 seconds') "
+            "WHERE guild_id=? AND product_id=?", (GUILD, pid))
+        before = await self._row(pid)
+        body = await self._retry(pid)
+        self.assertEqual(body["reactivated"], 0,
+                         "a row in backoff is not a parked row")
+        after = await self._row(pid)
+        self.assertEqual(tuple(after), tuple(before),
+                         "attempts, error and next_attempt_at must all survive")
+        self.assertEqual(after[0], "retry")
+
+    async def test_a_missing_row_is_queued_fresh(self):
+        self._add_product("Retry Missing")
+        pid = await self._product_id("Retry Missing")
+        self.images.put(url_for(3), (3, 9, 9, 255))
+        self._set_icon(pid, url_for(3))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        body = await self._retry(pid)
+        self.assertEqual(body["reactivated"], 1, "a never-queued product is queued")
+        row = await self._row(pid)
+        self.assertEqual(row[0], "queued")
+
+    async def test_parked_path_in_backfill_still_reactivates(self):
+        """The Backfill `retry_parked` switch must keep working."""
+        pid = await self._queue("Retry Backfill", 4)
+        await self._exec(
+            "UPDATE shop_emoji_queue SET state='parked', attempts=4 "
+            "WHERE guild_id=? AND product_id=?", (GUILD, pid))
+        r = self.client.post("/api/shop-publisher/emojis/backfill",
+                             json={"retry_parked": True},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(r.get_json()["reactivated"], 1)
 
 
 # ── 4b. generation fencing ──────────────────────────────────────────────────# ── 4b. generation fencing ──────────────────────────────────────────────────

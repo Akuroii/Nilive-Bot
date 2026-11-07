@@ -240,18 +240,78 @@ async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
     return url
 
 
-async def reactivate(db, guild_id, product_id, *, expect_generation=None,
-                     expect_source_url=None):
-    """Owner retry of a parked row: new generation, fresh retry budget.
+async def requeue_if_current(db, row, item_name, canonical_url):
+    """Re-queue a product for a URL the worker discovered, fenced to its snapshot.
 
-    ``expect_generation``/``expect_source_url`` turn this into a compare-and-swap
-    so an OLD Backfill snapshot cannot reset a newer intent that arrived after
-    its catalog was read. Returns True when a row was actually reactivated.
+    The worker reads a listing, then writes later; in between the Dashboard may
+    have saved something newer. An unconditional ``enqueue_product()`` would
+    then overwrite that newer intent (the UPSERT keys on guild/product only).
+
+    Two conditions must hold, re-read inside the same transaction as the write:
+
+    * the listing's CURRENT canonical URL is exactly ``canonical_url`` — the
+      listing itself has not moved on since the caller looked, and
+    * the queue row is still the generation the caller held.
+
+    Returns True when the requeue was written. False means a newer intent (or a
+    newer listing) exists and the caller must leave it alone.
     """
+    if not canonical_url:
+        return False
+    cur = await db.execute(
+        "SELECT icon_url, COALESCE(enabled,1) FROM shop_items WHERE id=? AND guild_id=?",
+        (row["product_id"], row["guild_id"]))
+    listing = await cur.fetchone()
+    if listing is None:
+        return False
+    live_url, enabled = listing
+    if not enabled or queue_source_url(live_url) != canonical_url:
+        # The listing moved on (or was disabled/cleared) after the snapshot.
+        return False
+    cur = await db.execute(
+        "SELECT generation, source_url FROM shop_emoji_queue "
+        "WHERE guild_id=? AND product_id=?",
+        (row["guild_id"], row["product_id"]))
+    current = await cur.fetchone()
+    if current is not None and int(current[0]) != int(row["generation"]):
+        # A newer queue generation exists: it wins, unconditionally.
+        return False
+    if current is not None and current[1] == canonical_url:
+        # Already queued for exactly this URL: nothing to write.
+        return False
+    await enqueue_product(db, row["guild_id"], row["product_id"], item_name,
+                          canonical_url, reason="icon_url_changed")
+    return True
+
+
+async def reactivate(db, guild_id, product_id, *, expect_generation=None,
+                     expect_source_url=None, allow_active=False):
+    """Owner retry of a PARKED row: new generation, fresh retry budget.
+
+    The state transition is part of the contract, not an incidental detail. Only
+    ``state='parked'`` is reactivated, because that is the only state the owner
+    action is documented to revive:
+
+    * ``queued`` — work is already pending. Resetting it would bump the
+      generation and invalidate a worker that may be processing it right now.
+    * ``retry`` — the row is in a deliberate backoff. Reviving it would discard
+      the recorded attempts, error and ``next_attempt_at``, which is exactly the
+      failure history the owner needs to see.
+
+    ``allow_active=True`` is the explicitly documented FORCE retry for those two
+    states. Nothing calls it implicitly; a caller that passes it is stating that
+    it intends to discard an in-flight claim or a live backoff.
+
+    ``expect_generation``/``expect_source_url`` make this a compare-and-swap so
+    an OLD snapshot cannot reset a newer intent. Returns True when a row was
+    actually reactivated.
+    """
+    states = (STATE_PARKED, STATE_QUEUED, STATE_RETRY) if allow_active else (STATE_PARKED,)
     sql = ("UPDATE shop_emoji_queue SET state=?, generation=generation+1, attempts=0, "
            f"next_attempt_at=NULL, last_error=NULL, updated_at={_now_sql()} "
-           "WHERE guild_id=? AND product_id=?")
-    params = [STATE_QUEUED, guild_id, product_id]
+           "WHERE guild_id=? AND product_id=? "
+           "AND state IN (" + ",".join("?" for _ in states) + ")")
+    params = [STATE_QUEUED, guild_id, product_id, *states]
     if expect_generation is not None:
         sql += " AND generation=?"
         params.append(int(expect_generation))

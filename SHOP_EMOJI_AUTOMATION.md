@@ -330,6 +330,93 @@ for `level_claims`**; I did not touch it, per the “no unrelated changes” con
 
 ---
 
+## Round-4 fixes: the concurrency fences, and a reproducible JS suite
+
+Round 3 promised "no obsolete image can be uploaded". That was **not yet true at the
+actual POST**, and this round closes it. Four distinct fences exist and they are *not*
+interchangeable — conflating them was the root of the round-3 overclaim.
+
+| # | Fence | Scope | Where |
+|---|---|---|---|
+| a | **Queue-row fence** | generation compare-and-swap on `shop_emoji_queue` | `Q.mark_done`, `Q.record_attempt`, `Q.mark_failed` (`WHERE generation=?`) |
+| b | **Source / listing fence** | re-reads `shop_items` and the queue generation before work | `W._source_still_current`, `SE._fence_for_url` |
+| c | **Creation-boundary fence** | revalidation after the final list/reconcile, immediately before `create_emoji()` | `SE._create_claimed` |
+| d | **Requeue fence** | re-reads listing + generation *inside* the requeue write | `Q.requeue_if_current` |
+
+### R4-1. The fence was before the window, not at the boundary (critical)
+
+`_prepare_one()` checked staleness after the download and then called
+`_create_claimed()`, which **awaits** `list_emojis()` and `_reconcile_asset()` before
+`create_emoji()`. A product changing during that list call could still POST the old
+image. `validate_source` is now threaded through `_create_claimed()` and
+`_remap_changed_source()`, and re-run after every suspendable await.
+
+**Documented serialization boundary** (exactly what is protected):
+
+```
+[final list_emojis + _reconcile_asset awaits]  ->  validate_source()  ->  create_emoji() POST
+```
+
+Nothing is awaited between the validator returning `True` and the POST, so that interval
+is the protected one. What this does **not** claim: SQLite's single-writer rule does not
+synchronise a *future* Dashboard write that lands after the POST was dispatched — a
+create that is already in flight cannot be recalled. That is why the late-completion path
+(`duplicate_detected`, `late_completion`, `create_uncertain`) is retained and never emits
+a second POST or a delete.
+
+### R4-2. The explicit owner path had no fence at all
+
+`prepare_product_emojis()` derived its URL list once and passed **no** validator, so every
+`validate_source` guard inside `_prepare_one` was inert for the Dashboard's Prepare
+button — only the worker was fenced. It now builds `SE._fence_for_url(db, guild_id, url,
+product_ids)`, which re-reads the listings that produced that URL and requires at least
+one of them to still point at it ("at least one" because several products may share one
+icon URL, and the batch prepares each URL once).
+
+### R4-3. Stale requeue overwrote newer intent (critical)
+
+`_process_row()` called `Q.enqueue_product(..., current_url, reason="icon_url_changed")`
+unconditionally from a snapshot read several awaits earlier, so worker A's stale URL
+could overwrite a newer queued URL. `Q.requeue_if_current()` now re-reads `shop_items`
+and the queue generation inside the write transaction and refuses the write unless both
+still match the snapshot it started from; `_process_row` reports `requeued_new_url` or
+`stale_requeue` accordingly.
+
+### R4-4. `/emojis/retry` reset states it did not own
+
+`reactivate()` now requires `state='parked'`. A `queued` row is a deliberate no-op (no
+new generation, so a worker mid-flight is not invalidated) and a `retry` row keeps its
+`attempts`, `last_error` and `next_attempt_at` backoff. There is no silent force-retry.
+All five cases are exercised **through the real API route**, not by calling
+`reactivate()` directly.
+
+### R4-5. A test that did not test its name
+
+`test_deleted_listing_does_not_destroy_a_newer_generation` never deleted anything. It now
+genuinely `DELETE`s the `shop_items` row, asserts the row is gone **and** that the
+generation-CAS keeps the newer queue row, plus a stale-generation variant.
+
+### R4-6. Reproducible JS tests (`npm ci && npm test`)
+
+`scripts/test_shop_designer_ui.js` required a globally or `/tmp`-installed `jsdom`
+(optionally via `JSDOM_PATH`) — so a clean clone could not run it. `jsdom` is now a
+pinned devDependency (`31.0.0`) with a committed `package-lock.json`, `node_modules/` is
+gitignored, and the harness resolves only the declared dependency. A missing `jsdom` is a
+hard failure (**exit 2**) with instructions, never a silent skip.
+
+Verified from a clean copy (tracked files only, no `node_modules`, no `.venv`, no env
+vars): `npm ci` → 28 packages, then `npm test` → **27 harnesses passed, exit 0**. At
+`b048dec` the same clean copy cannot even `npm ci` (no lockfile, exit 1).
+
+### R4-7. Own regression found and fixed
+
+Round 2/3 had the Shop Designer panel auto-fetch `/emojis/report` on mount. That broke
+**five pre-existing harnesses** (`test_shop_designer_actions.js` and friends use a
+read-route allowlist for page load) and made every page open cost an unnecessary Discord-
+backed read. The mount-time fetch is removed; the panel loads progress only when the owner
+asks. The UI harness now asserts the absence explicitly *and* that the Refresh control
+still loads the report.
+
 ## Test evidence (commands, counts, real exit codes)
 
 Each command was run from the repository root. Exit codes are the **test process's own**
@@ -337,20 +424,53 @@ Each command was run from the repository root. Exit codes are the **test process
 
 | Command | Result | Exit |
 |---|---|---|
-| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 124 — OK** | **0** |
-| `node scripts/test_shop_designer_ui.js` | **28 interaction checks, 0 failures** | **0** |
+| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 137 — OK** | **0** |
 | `PYTHONPATH=. python scripts/test_shop_emoji_migration.py` | Ran 6 — OK | 0 |
-| `python -m pytest scripts/test_shop_emoji.py -q` | **93 passed** | 0 |
-| `python scripts/test_shop_icon_resolution.py` | Ran 13 — OK | 0 |
-| `python scripts/test_inventory_panel.py` | Ran 30 — OK | 0 |
-| `python scripts/test_inventory_six_tabs.py` | Ran 9 — OK | 0 |
-| `python -m pytest test_db_migration_concurrency.py -q` | 9 passed, 2 subtests | 0 |
-| `python -m pytest test_shop_publisher_api.py -q` | **18 passed**, 15 subtests | 0 |
-| `python -m pytest test_shop_categories_api.py -q` | 16 passed | 0 |
-| `python -m pytest test_shop_designs_api.py -q` | 20 passed, 4 subtests | 0 |
-| `python -m pytest test_shop_publications.py -q` | 23 passed | 0 |
-| `python -m pytest test_shop_json_body_api.py -q` | 1 passed | 0 |
+| `node scripts/test_shop_designer_ui.js` | **30 interaction checks, 0 failures** | **0** |
+| `npm test` (27 harnesses) | **27 passed** | **0** |
+| `python -m pytest scripts/test_shop_emoji.py -q` | **96 passed** | 0 |
+| `python -m pytest scripts/test_shop_icon_resolution.py -q` | 13 passed | 0 |
+| `python -m pytest scripts/test_inventory_activity.py -q` | 16 passed | 0 |
+| `python -m pytest scripts/test_inventory_entry_safety.py -q` | 9 passed | 0 |
+| `python -m pytest scripts/test_inventory_panel.py -q` | 30 passed | 0 |
+| `python -m pytest scripts/test_inventory_six_tabs.py -q` | 9 passed | 0 |
+| `python -m pytest scripts/test_shop_emoji_api.py -q` | 8 passed, 5 subtests | 0 |
+| `python -m pytest scripts/test_shop_emoji_tls.py -q` | 1 passed | 0 |
 | `python -m pytest scripts/test_shop_options.py -q` | 5 passed | 0 |
+| `python -m pytest scripts/test_shop_product_management.py -q` | 50 passed, 8 subtests | 0 |
+| `python -m pytest scripts/test_shop_publisher_api.py -q` | 19 passed, 15 subtests | 0 |
+| `python -m pytest scripts/test_shop_categories_api.py -q` | 16 passed | 0 |
+| `python -m pytest scripts/test_shop_designs_api.py -q` | 22 passed, 8 subtests | 0 |
+| `python -m pytest scripts/test_shop_json_body_api.py -q` | 1 passed | 0 |
+| `python -m pytest scripts/test_shop_publications.py -q` | 23 passed | 0 |
+| `python -m pytest scripts/test_shop_publication_reconcile.py -q` | 30 passed | 0 |
+| `python -m pytest scripts/test_shop_select_dispatch.py -q` | 9 passed, 12 subtests | 0 |
+| `python -m pytest scripts/test_dashboard_redesign.py -q` | 3 passed | 0 |
+| `python -m pytest test_db_migration_concurrency.py -q` | 9 passed, 2 subtests | 0 |
+| `python scripts/test_shop_publisher.py` | 115/115 passed | 0 |
+| `python scripts/test_dashboard_page_scripts.py` | 148 passed (**partial**: see below) | 0 |
+
+`test_dashboard_page_scripts.py` prints `SKIPPED: acorn is not installed` at `e0ca738`
+too, so it is **pre-existing and unchanged by this PR**; its two acorn-backed checks do
+not run. With acorn present those checks pass (177 passed, 0 failed) — verified once in a
+throwaway copy, not added as a dependency here to avoid touching the dashboard's runtime
+surface.
+
+### Round-4 test → fix map (each was RED before its fix, GREEN after)
+
+| Test | Failed before with | Fix it proves |
+|---|---|---|
+| `PostBoundaryFenceTests.test_url_changed_during_the_final_list_never_posts_the_old_image` | `the POST boundary must revalidate: URL A must not be created` | R4-1 (worker create) |
+| `PostBoundaryFenceTests.test_cleared_image_during_the_final_list_never_posts` | create happened after the icon was cleared | R4-1 |
+| `PostBoundaryFenceTests.test_the_validator_is_invoked_immediately_before_create_emoji` | `events=['list','list','create']` — no validation after the final list | R4-1 ordering, behaviourally |
+| `test_owner_prepare_never_uploads_an_image_the_listing_stopped_using` | `the obsolete image was uploaded after the listing moved away from it` | R4-2 |
+| `test_uncertain_recovery_post_is_fenced_at_the_boundary` | `the recovery POST ran for an image the listing had already replaced` | R4-1 (recovery path) |
+| `test_changed_source_remap_post_is_fenced_at_the_boundary` | `the remap uploaded the replacement image after the listing reverted` | R4-1 (remap path) |
+| `StaleRequeueTests.test_requeue_from_a_stale_snapshot_does_not_overwrite_a_newer_url` | `4 != 3` (generation bumped by a stale worker) | R4-3 |
+| `StaleRequeueTests.test_requeue_is_refused_when_the_listing_moved_on_again` | write accepted from a dead snapshot | R4-3, source half |
+| `StaleRequeueTests.test_the_current_url_is_still_prepared_after_a_stale_requeue` | — | R4-3 converges: current URL prepared, superseded URL never uploaded, exactly 1 create |
+| `RetryStateContractTests` (5) | queued and retry rows were reactivated | R4-4, via the real `/emojis/retry` route |
+| `StaleQueueDeletionTests` (5) | never deleted anything | R4-5 |
 
 The pytest files need `OWNER_ID` (they exit during import without it):
 `OWNER_ID=999999999999 DISCORD_CLIENT_ID=123456789012345678 DATABASE_PATH=/tmp/x.db PYTHONPATH=. …`
@@ -360,7 +480,7 @@ test counts are not the claim — every test above asserts on row state, attempt
 `creates`/`renames`/`deletes`/`patch_requests`/`patched_emoji_ids` counters, `images.fetches`
 and pre/post database rows.
 
-### Automation suite composition (124)
+### Automation suite composition (137)
 
 `BulkBackfillTests` 5 · `DuplicateContentTests` 4 · `GenerationFencingTests` 4 ·
 `BackfillScopeTests` 6 · `SourceFailureTests` 4 · `DiscordFailureTests` 5 ·
@@ -372,7 +492,13 @@ and pre/post database rows.
 `FutureChangeTests` 5 · `NamingTests` 7 · `SharedIdentityTests` 4 · `NameCollisionTests` 4 ·
 `LegacyRenameTests` 4 · `ConcurrentWorkerTests` 2 · `ReadOnlyConsumerTests` 7
 
-(bold = added this round)
+Round 4 adds **13**: `PostBoundaryFenceTests` 3, `StaleRequeueTests` 4,
+`RetryStateContractTests` 5, and one extra case in `StaleQueueDeletionTests` (5, from 4).
+`FenceCoverageTests` keeps its 5 structural checks, but they are no longer the *only*
+evidence for the recovery and remap paths — the two new pytest boundary tests prove
+those behaviourally instead.
+
+(bold = added in round 2)
 
 ### Round-3 test → fix map (each was RED before its fix, GREEN after)
 
@@ -465,12 +591,14 @@ and byte-compared against a backup afterwards.
    (`shop_emoji.py:1017`) and a truthy marker would silently change identity tolerance.
 5. **First backfill wall-clock**: ~8 products/minute, paced so Discord is never hammered.
    The Dashboard request returns immediately.
-6. **The UI interaction test needs jsdom**, which is not vendored here (it is a dev-only
-   harness dependency). `scripts/test_shop_designer_ui.js` resolves it from
-   `JSDOM_PATH`, the repo's `node_modules`, or a local install, and exits **2** with an
-   actionable message if it is absent rather than passing vacuously. No browser binary is
-   available in this environment, so this is a real DOM + real event dispatch in jsdom,
-   not a headless-browser render.
+6. **The UI interaction test needs jsdom**, now a pinned devDependency (`31.0.0`) with a
+   committed `package-lock.json`, so `npm ci && npm test` works from a clean clone with no
+   `/tmp` install and no environment variable. A missing `jsdom` exits **2** with
+   instructions rather than passing vacuously. No browser binary is available in this
+   environment, so this is a real DOM + real event dispatch in jsdom, **not** a
+   headless-browser render — and the Dashboard "control present" checks remain static
+   source assertions, which is a weaker claim than the behaviour tests and is labelled as
+   such.
 7. **`stats()["deferred"]` keeps its old meaning** (every row in a future backoff) for
    backwards compatibility, but every UI label and the report now separate
    `retrying_backoff` from `uncertain`. Anything else reading `deferred` should be

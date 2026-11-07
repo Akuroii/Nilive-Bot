@@ -236,13 +236,16 @@ async def _process_row(db, discord, row, remote, bot_user_id, report):
         report["skipped"] += 1
         return "no_usable_url"
     if current_url != row["source_url"]:
-        # The listing changed after this generation was written. Re-queue for
-        # the new URL (which bumps the generation and invalidates this row)
-        # instead of preparing an image the storefront no longer uses.
-        await Q.enqueue_product(db, guild_id, product_id, item_name, current_url,
-                                reason="icon_url_changed")
-        report["skipped"] += 1
-        return "requeued_new_url"
+        # The listing changed after this generation was written. Re-queue for the
+        # new URL instead of preparing an image the storefront no longer uses —
+        # but ONLY against the snapshot we read. The write happens after several
+        # awaits, so the Dashboard may already have saved something newer; an
+        # unconditional enqueue would overwrite it with our stale URL.
+        if await Q.requeue_if_current(db, row, item_name, current_url):
+            report["skipped"] += 1
+            return "requeued_new_url"
+        report["stale"] += 1
+        return "stale_requeue"
 
     # ── already prepared for THIS exact URL? (reuse) ─────────────────────
     ready = await _alias_asset(db, discord.application_id, guild_id, current_url)

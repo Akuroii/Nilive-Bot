@@ -1381,7 +1381,25 @@ async def _retry_allowed(asset, retry_uncertain, acknowledgement, *, quarantine_
     return True
 
 
-async def _create_claimed(db, discord, asset, final_png, bot_user_id):
+async def _create_claimed(db, discord, asset, final_png, bot_user_id,
+                          validate_source=None):
+    """Create the claimed emoji, revalidating AT the dispatch boundary.
+
+    The serialization boundary this function defines is deliberately narrow:
+
+        [final list + reconcile awaits] -> validate_source() -> POST
+
+    Everything that can suspend (``list_emojis``, ``_reconcile_asset``) is
+    finished BEFORE the validator runs, and nothing is awaited between the
+    validator returning True and ``create_emoji()`` being dispatched. A fence
+    that ran earlier — before this function — leaves exactly that window open:
+    the product can change while the list is in flight, after the earlier check
+    has already passed.
+
+    Cost of the check is one indexed SQLite read against the same connection the
+    caller already holds, so it is a cross-process fence: the Dashboard's write
+    is committed before its HTTP response returns, and this read sees it.
+    """
     remote = await discord.list_emojis()
     reconciled, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id, stale_after=10**9)
     if duplicates:
@@ -1393,6 +1411,10 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id):
         if failed["status"] == "ready":
             return _result(failed, code="reconciled")
         return _result(failed, code="emoji_capacity", message=failed["last_error"])
+    # ── POST BOUNDARY ── every suspendable await is behind us. This is the last
+    # check before an irreversible, never-deleted Discord emoji is created.
+    if not await _guard_source(validate_source):
+        raise StalePreparation()
     try:
         created = await discord.create_emoji(asset["emoji_name"], final_png, bot_user_id)
     except DiscordAPIError as exc:
@@ -1432,7 +1454,8 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id):
 
 
 async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
-                                final_png, remote, bot_user_id, emoji_name=None):
+                                final_png, remote, bot_user_id, emoji_name=None,
+                                validate_source=None):
     """Prepare a new identity and clear recovery state only through this flow."""
     changed_hash = content_identity(final_png)
     new_asset, new_claimed, new_duplicates = await _insert_asset_or_claim(
@@ -1447,7 +1470,8 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
         new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
     await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
     if new_claimed is not None and new_asset["status"] == "preparing":
-        outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id)
+        outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id,
+                                        validate_source=validate_source)
     else:
         outcome = _result(new_asset, duplicates=new_duplicates)
         if outcome["status"] == "ready":
@@ -1548,14 +1572,15 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                 raise StalePreparation()
             return await _remap_changed_source(
                 db, discord, guild_id, source_url, alias_asset, final_png, remote, bot_user_id,
-                emoji_name=emoji_name)
+                emoji_name=emoji_name, validate_source=validate_source)
         if alias_asset["status"] == "ready":
             return _result(alias_asset, code="reconciled"), remote
         claimed = await _claim_existing(db, alias_asset, guild_id, allow_uncertain=True)
         if claimed is None:
             current = await _get_asset(db, discord.application_id, alias_asset["content_hash"])
             return _result(current), remote
-        return await _create_claimed(db, discord, claimed, final_png, bot_user_id), remote
+        return await _create_claimed(db, discord, claimed, final_png, bot_user_id,
+                                     validate_source=validate_source), remote
 
     old_alias_asset = None
     recovery_not_before = None
@@ -1596,7 +1621,7 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                 raise StalePreparation()
             return await _remap_changed_source(
                 db, discord, guild_id, source_url, old_alias_asset, final_png, remote, bot_user_id,
-                emoji_name=emoji_name)
+                emoji_name=emoji_name, validate_source=validate_source)
     asset = await _get_asset(db, discord.application_id, content_hash)
     duplicates = []
     claimed = None
@@ -1658,7 +1683,8 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
     # was in flight. Verify against the caller's authority before creating.
     if not await _guard_source(validate_source):
         raise StalePreparation()
-    return await _create_claimed(db, discord, claimed, final_png, bot_user_id), remote
+    return await _create_claimed(db, discord, claimed, final_png, bot_user_id,
+                                 validate_source=validate_source), remote
 
 
 def _preparation_lock(application_id):
@@ -1675,6 +1701,37 @@ async def _load_products(db, guild_id, product_ids):
         f"SELECT id,icon_url FROM shop_items WHERE guild_id=? AND id IN ({marks})",
         (guild_id, *product_ids))
     return {int(row[0]): row[1] for row in await cur.fetchall()}
+
+
+def _fence_for_url(db, guild_id, source_url, product_ids):
+    """Build a fence re-confirming ONE URL against the current listings.
+
+    The explicit owner path is authoritative on product IDs, never on URLs: the
+    URL list is derived once, when the request arrives, and the batch may run
+    for a long time afterwards. Before any image is uploaded, re-read the
+    listings this URL came from and require that at least one of them still
+    points at it — otherwise the emoji would be created for an image the
+    storefront no longer shows.
+
+    "At least one" is deliberate: several products can share one icon URL, and
+    the batch prepares each URL once. If every listing moves away, the
+    preparation is obsolete; if one keeps it, the artefact is still wanted.
+
+    Returns an awaitable predicate for ``_prepare_one``'s ``validate_source``.
+    """
+    async def still_current():
+        marks = ",".join("?" for _ in product_ids)
+        cur = await db.execute(
+            f"SELECT icon_url FROM shop_items WHERE guild_id=? AND id IN ({marks})",
+            (guild_id, *product_ids))
+        for row in await cur.fetchall():
+            try:
+                if canonicalize_url(row[0]) == source_url:
+                    return True
+            except SourceImageError:
+                continue
+        return False
+    return still_current
 
 
 def _validate_product_ids(product_ids):
@@ -1707,7 +1764,7 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                     await discord.verify_application()
                     bot_user_id = await discord.bot_user_id()
                     remote = await discord.list_emojis()
-                    by_url, order = {}, []
+                    by_url, order, url_products = {}, [], {}
                     for pid in product_ids:
                         raw = products[pid]
                         if not raw:
@@ -1720,13 +1777,20 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                             continue
                         if url not in order:
                             order.append(url)
+                        url_products.setdefault(url, []).append(pid)
                         by_url[pid] = url
                     url_results = {}
                     for url in order:
                         try:
                             result, remote = await _prepare_one(
                                 db, discord, guild_id, url, remote, bot_user_id,
-                                retry_uncertain, acknowledge_duplicate_risk)
+                                retry_uncertain, acknowledge_duplicate_risk,
+                                # This path is an explicit owner request, so the
+                                # URL is re-confirmed per product: a listing that
+                                # was edited while this batch ran must not get an
+                                # emoji for the image it no longer uses.
+                                validate_source=_fence_for_url(
+                                    db, guild_id, url, url_products[url]))
                             if result.get("status") == "ready" and result.get("emoji_id"):
                                 # Later URLs in this batch must see creations or
                                 # adoptions made earlier in that same batch.

@@ -15,22 +15,22 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
-/* jsdom is not vendored in this repository (it is a dev-only harness dep), so
- * resolve it from the usual places and fail with an actionable message. */
+/* jsdom is a DECLARED development dependency (package.json) with a committed
+ * lockfile, so this resolves exactly what `npm ci` installs. There is no /tmp
+ * fallback and no environment variable: a clean clone must be reproducible.
+ *
+ * A missing dependency is a hard, explicit failure (exit 2) rather than a skip:
+ * a UI test that silently passes when it cannot run is worse than no test. */
 function loadJsdom() {
-    const candidates = [
-        process.env.JSDOM_PATH,
-        'jsdom',
-        path.join(ROOT, 'node_modules/jsdom'),
-        '/tmp/jsdomrig/node_modules/jsdom',
-    ].filter(Boolean);
-    for (const candidate of candidates) {
-        try { return require(candidate); } catch (e) { /* try the next one */ }
+    try {
+        return require('jsdom');
+    } catch (error) {
+        console.error('jsdom is required for this harness and is declared in ' +
+                      'package.json.\nRun `npm ci` (or `npm install`) from the ' +
+                      'repository root first.');
+        console.error(String(error && error.message ? error.message : error));
+        process.exit(2);
     }
-    console.error('jsdom is required for this test. Install it with:\n' +
-                  '  npm install --no-save jsdom\n' +
-                  'or point JSDOM_PATH at an existing installation.');
-    process.exit(2);
 }
 const { JSDOM } = loadJsdom();
 
@@ -148,12 +148,28 @@ function flush() {
     const reportBox = document.getElementById('sd-catalog-emoji-report');
     check(status !== null && reportBox !== null, 'progress elements exist');
 
-    // Mounting must have fetched the report (the UI shows progress on open).
+    // Mounting must NOT fetch anything: the Shop Designer's read-route contract
+    // allows only its own catalog/design/category GETs on load, and progress is
+    // not needed until the owner acts. (This is what broke five pre-existing
+    // harnesses before it was fixed, so it is asserted explicitly here.)
     const initial = requests.filter(function (r) {
         return r.url.indexOf('/emojis/report') >= 0;
     });
-    check(initial.length >= 1, 'opening the page reads the progress report');
-    check(initial.every(function (r) { return r.method === 'GET'; }),
+    check(initial.length === 0,
+          'opening the page does NOT auto-request the icon report');
+    check(requests.every(function (r) {
+        return r.url.indexOf('/emojis/') === -1;
+    }), 'mounting issues no icon-related request at all');
+
+    // Progress arrives on demand, via the explicit Refresh control.
+    const refreshBtn0 = document.getElementById('sd-catalog-emoji-refresh');
+    refreshBtn0.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    await flush();
+    const onDemand = requests.filter(function (r) {
+        return r.url.indexOf('/emojis/report') >= 0;
+    });
+    check(onDemand.length >= 1, 'Refresh loads the progress report on demand');
+    check(onDemand.every(function (r) { return r.method === 'GET'; }),
           'reading progress is a GET (read-only)');
     check((reportBox.textContent || '').indexOf('Already prepared') >= 0,
           'the report is actually rendered, not just requested');

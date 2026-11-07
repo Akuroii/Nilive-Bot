@@ -220,11 +220,19 @@ def api_shop_emoji_retry():
                 if not isinstance(pid, int) or isinstance(pid, bool):
                     continue
                 current = await queue.descriptor(db, guild_id, pid)
-                if current and await queue.reactivate(
-                        db, guild_id, pid,
-                        expect_generation=current["generation"],
-                        expect_source_url=current["source_url"]):
-                    reactivated += 1
+                if current is not None:
+                    # Only a parked row is reactivated. A queued row is already
+                    # pending (and may be mid-flight) and a retry row is in a
+                    # deliberate backoff; neither is this endpoint's contract.
+                    # A force retry of an active row is a separate, explicit
+                    # decision and is not offered implicitly here.
+                    if await queue.reactivate(
+                            db, guild_id, pid,
+                            expect_generation=current["generation"],
+                            expect_source_url=current["source_url"]):
+                        reactivated += 1
+                    # Deliberately no `else`: an existing non-parked row is a
+                    # no-op, not a reason to re-queue and reset it.
                 else:
                     # Never queued (or already finished): queue it now.
                     cur = await db.execute(
