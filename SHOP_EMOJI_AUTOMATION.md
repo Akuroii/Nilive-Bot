@@ -562,9 +562,9 @@ and byte-compared against a backup afterwards.
 
 | File | Change |
 |---|---|
-| `utils/shop_emoji_queue.py` | `state`/`generation` columns, `shop_icon_backfill` authorisation, same-URL no-op, `reactivate()` with `expect_generation`/`expect_source_url`, dict return `{queued, reactivated}`, `usable_emoji_id_for()` + `classify_catalog()` (the single readiness predicate), **generation-fenced `clear_product()`**, `stats()` separating deferred/retrying/uncertain, CAS writers, race-safe migration |
-| `utils/shop_emoji.py` | 8-char suffix, readable naming, `canonical_product_label`, `product_names_for_asset`/`_canonical_or_raw` (canonicalised name lookup), `emoji_name_conflict`, `_add_column` race-safe migration, **`validate_source` post-download fence + `StalePreparation` at all three creation paths** |
-| `utils/shop_emoji_worker.py` | `_process_row` fencing, **`_source_still_current()` fence injected into `_prepare_one`**, **fenced `clear_product`/`mark_done` in every deletion branch**, guild-scoped rename cursor, `_labels_for` canonicalisation, rename results carry identity, `rename_all`/`rename_pass` |
+| `utils/shop_emoji_queue.py` | `state`/`generation` columns, `shop_icon_backfill` authorisation, same-URL no-op, **`requeue_if_current()` (listing + generation re-read inside the write)**, **`reactivate()` restricted to `state='parked'`** with `expect_generation`/`expect_source_url`, dict return `{queued, reactivated}`, `usable_emoji_id_for()` + `classify_catalog()` (the single readiness predicate), **generation-fenced `clear_product()`**, `stats()` separating deferred/retrying/uncertain, CAS writers, race-safe migration |
+| `utils/shop_emoji.py` | 8-char suffix, readable naming, `canonical_product_label`, `product_names_for_asset`/`_canonical_or_raw` (canonicalised name lookup), `emoji_name_conflict`, `_add_column` race-safe migration, **`validate_source` threaded through `_create_claimed`/`_remap_changed_source` and re-run at the ACTUAL POST boundary after the final list/reconcile**, **`_fence_for_url` so the explicit owner path is fenced too** |
+| `utils/shop_emoji_worker.py` | `_process_row` fencing, **`_source_still_current()` fence injected into `_prepare_one`**, **conditional requeue via `requeue_if_current()` instead of an unconditional enqueue**, **fenced `clear_product`/`mark_done` in every deletion branch**, guild-scoped rename cursor, `_labels_for` canonicalisation, rename results carry identity, `rename_all`/`rename_pass` |
 | `cogs/shop_emoji_worker.py` | NEW — worker + authorised-guild discovery loops |
 | `dashboard/api/shop_emoji.py` | backfill (authorise + bulk queue), read-only queue/retry/names/report; report rebuilt on `classify_catalog()` (`invalid_source_products`, `fully_prepared`); `/retry` reactivation fenced; no DDL on GET |
 | `dashboard/api/economy_shop.py` | auto-queue hooks on create / `icon_url` change |
@@ -572,10 +572,12 @@ and byte-compared against a backup afterwards.
 | `dashboard/static/js/shop-designer.js` | backfill handler, progress renderer (invalid URLs, deferred vs uncertain), parked-retry switch, success message preserved across refresh, control re-enabled after failure |
 | `main.py` | load the new cog |
 | `test_shop_publisher_api.py` | stale catalog key set now includes `app_emoji` |
-| `scripts/test_shop_emoji_automation.py` | 124 tests |
-| `scripts/test_shop_designer_ui.js` | NEW — real jsdom interaction test: renders the template, mounts the real module, clicks the real button, asserts the outgoing request (28 checks) |
+| `scripts/test_shop_emoji_automation.py` | **137 tests** (`PostBoundaryFenceTests`, `StaleRequeueTests`, `RetryStateContractTests`, rewritten `StaleQueueDeletionTests`) |
+| `scripts/test_shop_designer_ui.js` | NEW — real jsdom interaction test: renders the template, mounts the real module, clicks the real button, asserts the outgoing request, and asserts that mounting fetches nothing (**30 checks**) |
 | `scripts/test_shop_emoji_migration.py` | NEW — pre-feature schema, idempotent/repeated init, race-safe concurrent init, previous-revision queue upgrade |
 | `tools/icon_diagnostic.py`, `INVESTIGATION_PRODUCT_ICONS.md` | read-only diagnostic used for the investigation |
+| `scripts/test_shop_emoji.py` | 3 new boundary regressions (owner prepare, uncertain recovery, changed-source remap) — 96 tests |
+| `package.json`, `package-lock.json`, `.gitignore` | pinned `jsdom` devDependency + committed lockfile so `npm ci && npm test` works from a clean clone; `node_modules/` ignored |
 
 ## Remaining risks / decisions for you
 
