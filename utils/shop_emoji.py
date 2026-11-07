@@ -87,6 +87,7 @@ SHOP_EMOJI_SCHEMA = (
         attempt_started_at   TEXT,
         quarantine_until     TEXT,
         last_error           TEXT,
+        managed_name         INTEGER NOT NULL DEFAULT 0,
         created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (application_id, content_hash)
@@ -122,6 +123,11 @@ _ASSET_FIELDS = (
     "application_id", "content_hash", "emoji_name", "emoji_id", "animated",
     "creator_guild_id", "pipeline_version", "status", "attempt_id", "attempt_started_at",
     "quarantine_until", "last_error", "created_at", "updated_at",
+    # Set once this asset's Discord name is managed by the readable-name policy.
+    # It marks "a rename may be in flight or may have completed", so a restart
+    # between PATCH and the local write reconciles from Discord instead of
+    # treating the name difference as conflicting metadata.
+    "managed_name",
 )
 _ASSET_SELECT = ",".join(_ASSET_FIELDS)
 _ASSET_SELECT_E = ",".join("e." + field for field in _ASSET_FIELDS)
@@ -129,22 +135,46 @@ _startup_tasks: set[asyncio.Task] = set()
 _preparation_locks: dict[str, asyncio.Lock] = {}
 
 
+async def _add_column(db, table, column, ddl, known_columns):
+    """Add a column once, tolerating a concurrent initialiser winning the race.
+
+    ``PRAGMA table_info`` + ``ALTER TABLE`` is check-then-act: the Bot and the
+    Dashboard can start together against one SQLite file, both observe the
+    column as missing, and both issue the ALTER — the loser raises
+    ``duplicate column name``. Re-checking on failure makes the migration safe
+    for every process, and the outcome is identical either way.
+    """
+    if column in known_columns:
+        return False
+    try:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        return True
+    except Exception:  # noqa: BLE001 - another process may have just added it
+        cur = await db.execute(f"PRAGMA table_info({table})")
+        if column in {row[1] for row in await cur.fetchall()}:
+            return False
+        raise
+
+
 async def ensure_shop_emoji_schema(db):
     """Initialize and additively migrate emoji accounting during normal init_db."""
     for statement in SHOP_EMOJI_SCHEMA:
         await db.execute(statement)
+    # The durable preparation queue lives beside the aliases: one DB file means
+    # one restart-survivable source of truth for pending work.
+    from utils.shop_emoji_queue import ensure_schema as _ensure_queue_schema
+    await _ensure_queue_schema(db)
     cur = await db.execute("PRAGMA table_info(shop_emoji_assets)")
     columns = {row[1] for row in await cur.fetchall()}
-    if "creator_guild_id" not in columns:
-        await db.execute("ALTER TABLE shop_emoji_assets ADD COLUMN creator_guild_id INTEGER")
+    await _add_column(db, "shop_emoji_assets", "creator_guild_id", "INTEGER", columns)
+    await _add_column(db, "shop_emoji_assets", "managed_name",
+                      "INTEGER NOT NULL DEFAULT 0", columns)
     cur = await db.execute("PRAGMA table_info(shop_emoji_url_aliases)")
     alias_columns = {row[1] for row in await cur.fetchall()}
-    if "recovery_ack_required" not in alias_columns:
-        await db.execute(
-            "ALTER TABLE shop_emoji_url_aliases "
-            "ADD COLUMN recovery_ack_required INTEGER NOT NULL DEFAULT 0")
-    if "recovery_not_before" not in alias_columns:
-        await db.execute("ALTER TABLE shop_emoji_url_aliases ADD COLUMN recovery_not_before TEXT")
+    await _add_column(db, "shop_emoji_url_aliases", "recovery_ack_required",
+                      "INTEGER NOT NULL DEFAULT 0", alias_columns)
+    await _add_column(db, "shop_emoji_url_aliases", "recovery_not_before",
+                      "TEXT", alias_columns)
     # Existing aliased rows retain their original guild where possible. A
     # legacy unaliased NULL remains unattributed and cannot claim a new POST.
     await db.execute(
@@ -217,6 +247,260 @@ def deterministic_emoji_name(content_hash: str) -> str:
     if not _HEX_64.fullmatch(content_hash or ""):
         raise ValueError("A lowercase SHA-256 content hash is required")
     return "shop_" + content_hash[:24]
+
+
+# ── Readable emoji names ────────────────────────────────────────────────────
+# Discord application-emoji names accept ASCII word characters only, so an
+# Arabic product name cannot be used verbatim. The slug below is a best-effort
+# transliteration for HUMAN legibility; the emoji's IDENTITY is still the
+# content hash, which is why the name always ends in a hash-derived suffix.
+# Renaming is therefore cosmetic and can never change an asset's identity.
+_EMOJI_NAME_LIMIT = 32          # Discord's documented maximum
+# 8 hex characters = 32 bits of the content hash inside the name. The suffix is
+# only a human-readable tie-breaker, NOT the identity: identity is (and remains)
+# the full SHA-256 in shop_emoji_assets, and adoption additionally verifies the
+# suffix against that full hash (see _name_matches_content). A longer suffix
+# makes an accidental name collision between two different images negligible
+# while still leaving room for a readable slug.
+_SUFFIX_LENGTH = 8
+_NAME_SLUG_BUDGET = _EMOJI_NAME_LIMIT - 1 - _SUFFIX_LENGTH
+
+# Digraphs are replaced first (as whole strings) so they win over their parts;
+# single letters then go through one translate table.
+_ARABIC_DIGRAPHS = (("ال", "al"), ("خ", "kh"), ("ش", "sh"), ("ث", "th"),
+                    ("ذ", "dh"), ("غ", "gh"), ("أ", "a"), ("إ", "e"), ("آ", "aa"))
+_ARABIC_LETTERS = {
+    "ا": "a", "ب": "b", "ت": "t", "ة": "a", "ج": "j", "ح": "h",
+    "د": "d", "ر": "r", "ز": "z", "س": "s", "ص": "s", "ض": "d",
+    "ط": "t", "ظ": "z", "ع": "a", "ف": "f", "ق": "q", "ك": "k",
+    "ل": "l", "م": "m", "ن": "n", "ه": "h", "و": "u", "ى": "a",
+    "ي": "i", "ئ": "e", "ؤ": "o", "ء": "",
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+}
+# Arabic diacritics/tatweel carry no lexical weight in a slug.
+_ARABIC_DROP = set("\u0610\u0611\u0612\u0613\u0614\u0615\u061a\u0640"
+                   "\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652"
+                   "\u0653\u0654\u0655\u0656\u0657\u0658\u0659\u065e\u0670")
+_TRANSLITERATE = str.maketrans(_ARABIC_LETTERS)
+
+
+def slugify_name(value: str) -> str:
+    """ASCII slug for a product name; empty when nothing usable remains.
+
+    Arabic transliterates to Latin, other non-ASCII is dropped, runs of
+    separators collapse, and the result is bounded so a suffix still fits.
+    """
+    text = str(value or "")
+    for char in _ARABIC_DROP:
+        text = text.replace(char, "")
+    for source, replacement in _ARABIC_DIGRAPHS:
+        text = text.replace(source, replacement)
+    text = text.translate(_TRANSLITERATE).lower()
+    out, last_was_sep = [], True
+    for char in text:
+        if char.isalnum() and char.isascii():
+            out.append(char)
+            last_was_sep = False
+        elif not last_was_sep:
+            out.append("_")
+            last_was_sep = True
+    slug = "".join(out).strip("_")
+    return slug[:_NAME_SLUG_BUDGET].strip("_")
+
+
+def name_suffix(content_hash: str) -> str:
+    """6-char deterministic suffix derived from the content hash.
+
+    Same image -> same suffix, so a rename of an existing asset is stable and
+    two different images can never collide on the readable part alone.
+    """
+    if not _HEX_64.fullmatch(content_hash or ""):
+        raise ValueError("A lowercase SHA-256 content hash is required")
+    return content_hash[:_SUFFIX_LENGTH]
+
+
+def readable_emoji_name(item_name: str, content_hash: str) -> str:
+    """``aseer_almajarat_3ef701`` — readable slug + deterministic suffix.
+
+    Falls back to the hash-only name when the product name yields no ASCII
+    slug at all, so a name Discord would reject is never sent.
+    """
+    suffix = name_suffix(content_hash)
+    slug = slugify_name(item_name)
+    if not slug:
+        return deterministic_emoji_name(content_hash)
+    name = f"{slug}_{suffix}"[:_EMOJI_NAME_LIMIT]
+    return name if len(name) >= _SUFFIX_LENGTH + 2 else deterministic_emoji_name(content_hash)
+
+
+_VALID_EMOJI_NAME = re.compile(r"[A-Za-z0-9_]{2,32}")
+
+
+def safe_emoji_name(candidate, content_hash) -> str:
+    """A name Discord will accept, or the deterministic fallback.
+
+    Guards the create path: a readable name is only used when it is plain ASCII
+    word characters within Discord's 2-32 length window. Anything else falls
+    back to the hash-only name rather than risking a rejected create.
+    """
+    if isinstance(candidate, str) and _VALID_EMOJI_NAME.fullmatch(candidate):
+        return candidate
+    return deterministic_emoji_name(content_hash)
+
+
+def name_slug_part(name: str) -> str:
+    """The readable part of an emoji name (everything before the suffix)."""
+    if not isinstance(name, str):
+        return ""
+    if "_" not in name:
+        return "" if name.startswith("shop_") else name
+    return name.rsplit("_", 1)[0]
+
+
+def _name_matches_content(name: str, content_hash: str) -> bool:
+    """Is this Discord emoji name a legitimate name for THIS content hash?
+
+    Guards adoption: a name match must never attach an emoji that belongs to a
+    different image. Accepts
+
+    * the deterministic legacy form ``shop_<hash24>``, or
+    * a readable ``<slug>_<hash8>`` whose suffix equals this hash's suffix.
+
+    Anything else - including a readable name built from a different hash that
+    happens to share the slug - is rejected, so a collision can never be
+    adopted.
+    """
+    if not _HEX_64.fullmatch(content_hash or "") or not isinstance(name, str):
+        return False
+    if name == deterministic_emoji_name(content_hash):
+        return True
+    return name.endswith("_" + name_suffix(content_hash)) and bool(name_slug_part(name))
+
+
+def canonical_product_label(names) -> str | None:
+    """The one deterministic product label for a shared image.
+
+    Content-based deduplication means several products can share a single
+    application emoji. Its name must not depend on which product happened to be
+    processed first, so the label is the lexicographically smallest usable
+    product name among everything bound to that content. Pure: the same set of
+    names always yields the same label, in any order, across restarts.
+    """
+    usable = [str(n).strip() for n in (names or [])
+              if isinstance(n, str) and str(n).strip() and not str(n).strip().isdigit()]
+    return min(usable) if usable else None
+
+
+async def canonical_label_for_asset(db, application_id, content_hash) -> str | None:
+    """Canonical product label for a prepared asset, read from the alias table.
+
+    Every product bound to this asset contributes its listing name; the
+    deterministic minimum wins. Returned label is what the emoji should be
+    called, independent of queue order.
+    """
+    if not content_hash:
+        return None
+    return canonical_product_label(
+        await product_names_for_asset(db, application_id, content_hash))
+
+
+def _canonical_or_raw(raw):
+    """Canonicalize when possible; otherwise keep the raw string for comparison.
+
+    ``shop_items.icon_url`` is stored exactly as the owner wrote it, while
+    ``shop_emoji_url_aliases.source_url`` is canonicalized. Comparing the two
+    with SQL string equality therefore misses legitimate matches (an uppercase
+    host, an explicit ``:443``). Both sides go through the same function here.
+    """
+    try:
+        return canonicalize_url(raw) if isinstance(raw, str) else None
+    except SourceImageError:
+        return raw if isinstance(raw, str) and raw else None
+
+
+async def product_names_for_asset(db, application_id, content_hash) -> list[str]:
+    """Every listing name this asset's content is bound to, canonically matched.
+
+    The alias table gives the (guild, canonical URL) pairs the asset serves; the
+    listing names are then resolved by canonicalizing ``shop_items.icon_url`` in
+    Python, so a stored URL that differs only in host case or an explicit
+    default port still contributes its product name. This is what keeps the
+    readable name independent of which product happened to be processed first.
+    """
+    if not content_hash:
+        return []
+    cur = await db.execute(
+        "SELECT a.guild_id, a.source_url, e.creator_guild_id "
+        "FROM shop_emoji_url_aliases a "
+        "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
+        "  AND e.content_hash=a.content_hash "
+        "WHERE a.application_id=? AND a.content_hash=?",
+        (application_id, content_hash))
+    aliases = await cur.fetchall()
+    if not aliases:
+        return []
+    wanted = {(int(gid), _canonical_or_raw(url)) for gid, url, _owner in aliases
+              if gid is not None}
+    if not wanted:
+        return []
+    cur = await db.execute(
+        "SELECT guild_id, name, icon_url FROM shop_items "
+        "WHERE guild_id IN (" + ",".join("?" for _ in {g for g, _ in wanted}) + ")",
+        tuple({g for g, _ in wanted}))
+    names = set()
+    for gid, name, icon_url in await cur.fetchall():
+        if (int(gid), _canonical_or_raw(icon_url)) in wanted and isinstance(name, str):
+            names.add(name)
+    return sorted(names)
+
+
+async def resolve_asset_name(db, asset) -> str:
+    """The name this asset should carry, for its own content identity."""
+    content_hash = (asset or {}).get("content_hash") or ""
+    label = await canonical_label_for_asset(db, (asset or {}).get("application_id"), content_hash)
+    return readable_emoji_name(label or "", content_hash)
+
+
+async def emoji_name_conflict(db, application_id, emoji_id, content_hash):
+    """The other content hash already bound to this emoji ID, if any.
+
+    A Discord emoji ID belongs to exactly one image. This returns a DIFFERENT
+    hash than ``content_hash`` when this emoji is already spoken for, so a
+    colliding name or ID can never point two images at one emoji.
+    """
+    if not _valid_emoji_id(emoji_id):
+        return None
+    cur = await db.execute(
+        "SELECT content_hash FROM shop_emoji_assets WHERE application_id=? AND emoji_id=? "
+        "AND content_hash<>?", (application_id, str(emoji_id), content_hash))
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+def rename_target_name(asset, label) -> str | None:
+    """The name a *ready* asset should carry, or None when it is already fine.
+
+    ``label`` must be the CANONICAL product label (see
+    ``canonical_product_label``), not whichever product the caller happens to
+    be processing - that is what keeps a shared emoji's name stable instead of
+    oscillating with queue order.
+
+    Only a ready, bound asset is a rename candidate: renaming anything else
+    would change what reconciliation expects while a create may still be in
+    flight. Returns None when the current name already matches, so repeat
+    passes issue zero PATCHes.
+    """
+    if not isinstance(asset, dict) or asset.get("status") != "ready":
+        return None
+    if not _valid_emoji_id(asset.get("emoji_id")):
+        return None
+    content_hash = asset.get("content_hash") or ""
+    if not _HEX_64.fullmatch(content_hash):
+        return None
+    current = asset.get("emoji_name") or ""
+    target = readable_emoji_name(label or "", content_hash)
+    return None if current == target else target
 
 
 def canonicalize_url(raw: str) -> str:
@@ -525,6 +809,15 @@ async def _clear_alias_recovery_required(db, application_id, guild_id, source_ur
 async def _adopt_asset(db, asset, candidate):
     if not _valid_emoji_id(candidate.get("id")):
         return asset
+    # A Discord emoji ID may be bound to exactly one content hash. If it is
+    # already bound elsewhere, adopting it here would silently point two
+    # different images at the same emoji — the collision failure this guards.
+    bound_elsewhere = await emoji_name_conflict(
+        db, asset["application_id"], candidate.get("id"), asset["content_hash"])
+    if bound_elsewhere:
+        return await _set_last_error(
+            db, asset,
+            "This Discord emoji ID is already bound to different content; refusing to adopt it.")
     cur = await db.execute(
         "UPDATE shop_emoji_assets SET status='ready',emoji_id=?,attempt_id=NULL,"
         "attempt_started_at=NULL,quarantine_until=NULL,last_error=NULL,updated_at=? "
@@ -638,8 +931,13 @@ async def _claim_existing(db, asset, guild_id, *, allow_uncertain=False):
     return await _get_asset(db, asset["application_id"], asset["content_hash"])
 
 
-async def _insert_asset_or_claim(db, application_id, guild_id, content_hash, remote, bot_user_id):
-    name = deterministic_emoji_name(content_hash)
+async def _insert_asset_or_claim(db, application_id, guild_id, content_hash, remote,
+                                bot_user_id, emoji_name=None):
+    # `emoji_name` may be a plain string or a resolver taking the content hash.
+    # A resolver is what lets the readable suffix be derived from the REAL hash
+    # without downloading the image twice.
+    candidate = emoji_name(content_hash) if callable(emoji_name) else emoji_name
+    name = safe_emoji_name(candidate, content_hash)
     synthetic = {"application_id": application_id, "content_hash": content_hash,
                  "emoji_name": name, "animated": 0}
     matches = _matching_name(synthetic, remote)
@@ -696,6 +994,15 @@ async def _reconcile_asset(db, asset, remote, bot_user_id, *, stale_after=PREPAR
         candidate = matches[0]
         if (_valid_emoji_id(candidate.get("id"))
                 and _ownership_supported(candidate, asset["application_id"], bot_user_id)):
+            # Ownership is not enough: the name must also be a legitimate name
+            # for THIS content hash, otherwise a slug collision would adopt an
+            # emoji that belongs to a different image.
+            if not _name_matches_content(candidate.get("name"), asset["content_hash"]):
+                message = ("The emoji name match does not correspond to this content hash; "
+                           "refusing to adopt it.")
+                if asset["status"] == "preparing":
+                    return await _mark_uncertain(db, asset, message), []
+                return await _set_last_error(db, asset, message), []
             return await _adopt_asset(db, asset, candidate), []
         # A name match without positive bot-uploader provenance is a collision,
         # not absence. Keep ambiguous creation uncertain and return its ID so
@@ -722,9 +1029,16 @@ async def _refresh_ready_asset(db, asset, remote, bot_user_id):
     bound = next((emoji for emoji in remote if str(emoji.get("id")) == str(asset["emoji_id"])), None)
     if bound is None:
         return await _mark_missing(db, asset)
-    if (bound.get("name") != asset["emoji_name"]
-            or bool(bound.get("animated", False)) != bool(asset["animated"])
-            or not _ownership_supported(bound, asset["application_id"], bot_user_id)):
+    animated_mismatch = bool(bound.get("animated", False)) != bool(asset["animated"])
+    owned = _ownership_supported(bound, asset["application_id"], bot_user_id)
+    same_name = bound.get("name") == asset["emoji_name"]
+    if owned and not animated_mismatch and not same_name and asset.get("managed_name"):
+        # This asset's name is managed by the readable-name policy, so a name
+        # difference is expected while a rename is in flight or after one
+        # completed but the local write was interrupted. The bound ID is still
+        # proven ours, which is what actually matters for resolution.
+        return asset
+    if not same_name or animated_mismatch or not owned:
         return await _mark_failed(db, asset, "The bound Discord emoji ID has conflicting metadata.")
     return asset
 
@@ -947,6 +1261,23 @@ class DiscordAPI:
                                   code="create_uncertain", uncertain=True)
         return result
 
+    async def rename_emoji(self, emoji_id, name):
+        """PATCH an existing application emoji's name. Never creates, never deletes.
+
+        Discord supports renaming in place (Modify Application Emoji), so a
+        cosmetic rename can reuse the bound ID and leave every alias, hash and
+        ownership record untouched.
+        """
+        result = await self._request(
+            "PATCH", f"/applications/{self.application_id}/emojis/{emoji_id}",
+            payload={"name": name}, mutating=True)
+        if not isinstance(result, dict) or str(result.get("id")) != str(emoji_id) \
+                or result.get("name") != name:
+            raise DiscordAPIError(
+                "Discord's rename response did not confirm the expected name.",
+                code="rename_uncertain", uncertain=True)
+        return result
+
     async def delete_emoji(self, emoji_id):
         return await self._request(
             "DELETE", f"/applications/{self.application_id}/emojis/{emoji_id}", mutating=True)
@@ -1050,7 +1381,25 @@ async def _retry_allowed(asset, retry_uncertain, acknowledgement, *, quarantine_
     return True
 
 
-async def _create_claimed(db, discord, asset, final_png, bot_user_id):
+async def _create_claimed(db, discord, asset, final_png, bot_user_id,
+                          validate_source=None):
+    """Create the claimed emoji, revalidating AT the dispatch boundary.
+
+    The serialization boundary this function defines is deliberately narrow:
+
+        [final list + reconcile awaits] -> validate_source() -> POST
+
+    Everything that can suspend (``list_emojis``, ``_reconcile_asset``) is
+    finished BEFORE the validator runs, and nothing is awaited between the
+    validator returning True and ``create_emoji()`` being dispatched. A fence
+    that ran earlier — before this function — leaves exactly that window open:
+    the product can change while the list is in flight, after the earlier check
+    has already passed.
+
+    Cost of the check is one indexed SQLite read against the same connection the
+    caller already holds, so it is a cross-process fence: the Dashboard's write
+    is committed before its HTTP response returns, and this read sees it.
+    """
     remote = await discord.list_emojis()
     reconciled, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id, stale_after=10**9)
     if duplicates:
@@ -1062,6 +1411,10 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id):
         if failed["status"] == "ready":
             return _result(failed, code="reconciled")
         return _result(failed, code="emoji_capacity", message=failed["last_error"])
+    # ── POST BOUNDARY ── every suspendable await is behind us. This is the last
+    # check before an irreversible, never-deleted Discord emoji is created.
+    if not await _guard_source(validate_source):
+        raise StalePreparation()
     try:
         created = await discord.create_emoji(asset["emoji_name"], final_png, bot_user_id)
     except DiscordAPIError as exc:
@@ -1101,11 +1454,13 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id):
 
 
 async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
-                                final_png, remote, bot_user_id):
+                                final_png, remote, bot_user_id, emoji_name=None,
+                                validate_source=None):
     """Prepare a new identity and clear recovery state only through this flow."""
     changed_hash = content_identity(final_png)
     new_asset, new_claimed, new_duplicates = await _insert_asset_or_claim(
-        db, discord.application_id, guild_id, changed_hash, remote, bot_user_id)
+        db, discord.application_id, guild_id, changed_hash, remote, bot_user_id,
+        emoji_name=emoji_name)
     if new_claimed is None and new_asset["status"] in {"preparing", "uncertain"}:
         new_asset, new_duplicates = await _reconcile_asset(db, new_asset, remote, bot_user_id)
     if new_asset["status"] == "ready":
@@ -1115,7 +1470,8 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
         new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
     await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
     if new_claimed is not None and new_asset["status"] == "preparing":
-        outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id)
+        outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id,
+                                        validate_source=validate_source)
     else:
         outcome = _result(new_asset, duplicates=new_duplicates)
         if outcome["status"] == "ready":
@@ -1137,8 +1493,37 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
     return outcome, remote
 
 
+class StalePreparation(ShopEmojiError):
+    """The image stopped being what the product currently uses.
+
+    Raised by the injected ``validate_source`` hook after the download and
+    BEFORE any Discord creation, so an obsolete worker cannot leave a durable,
+    undeletable emoji behind for an image the storefront no longer shows.
+    """
+
+    def __init__(self, message="The product's image changed during preparation."):
+        super().__init__(message, code="stale_preparation", status=409)
+
+
+async def _guard_source(validate_source):
+    """Run the caller's staleness fence, if any, exactly where it belongs."""
+    if validate_source is None:
+        return True
+    return bool(await validate_source())
+
+
 async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
-                       retry_uncertain, acknowledgement):
+                       retry_uncertain, acknowledgement, emoji_name=None,
+                       validate_source=None):
+    """Prepare one product image, with a caller-supplied staleness fence.
+
+    ``validate_source`` is awaited after the image has been downloaded and
+    normalised, immediately before any creation request. It must return True
+    only while the product's current image is still the one being prepared.
+    A False return raises :class:`StalePreparation` before the POST, so no
+    external side effect can be produced for an obsolete image. All creation
+    paths (fresh create, uncertain recovery, remap) are covered.
+    """
     alias_asset = await _get_alias_asset(db, discord.application_id, guild_id, source_url)
     if alias_asset and alias_asset["status"] in {"preparing", "uncertain"}:
         original_asset = alias_asset
@@ -1147,6 +1532,8 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         # old asset ready. A later request must not inherit an unmarked ready
         # alias after an error, crash, or unacknowledged preparation attempt.
         final_png = await _download_and_normalize(source_url)
+        if not await _guard_source(validate_source):
+            raise StalePreparation()
         changed_hash = content_identity(final_png)
         source_changed = changed_hash != original_asset["content_hash"]
         recovery_not_before = original_asset.get("recovery_not_before")
@@ -1181,15 +1568,19 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                 remote = await discord.list_emojis()
             # Only this acknowledged flow may move the alias and clear its
             # durable recovery requirement. The old hash is never re-POSTed.
+            if not await _guard_source(validate_source):
+                raise StalePreparation()
             return await _remap_changed_source(
-                db, discord, guild_id, source_url, alias_asset, final_png, remote, bot_user_id)
+                db, discord, guild_id, source_url, alias_asset, final_png, remote, bot_user_id,
+                emoji_name=emoji_name, validate_source=validate_source)
         if alias_asset["status"] == "ready":
             return _result(alias_asset, code="reconciled"), remote
         claimed = await _claim_existing(db, alias_asset, guild_id, allow_uncertain=True)
         if claimed is None:
             current = await _get_asset(db, discord.application_id, alias_asset["content_hash"])
             return _result(current), remote
-        return await _create_claimed(db, discord, claimed, final_png, bot_user_id), remote
+        return await _create_claimed(db, discord, claimed, final_png, bot_user_id,
+                                     validate_source=validate_source), remote
 
     old_alias_asset = None
     recovery_not_before = None
@@ -1204,6 +1595,12 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         alias_asset = await _refresh_ready_asset(db, alias_asset, remote, bot_user_id)
 
     final_png = await _download_and_normalize(source_url)
+    # ── FENCE ── the download is the long operation. If the product's image
+    # changed while it was in flight, stop HERE: no asset row (which would
+    # consume quota), no alias, and no Discord request may be produced for an
+    # image the storefront no longer shows.
+    if not await _guard_source(validate_source):
+        raise StalePreparation()
     content_hash = content_identity(final_png)
     if old_alias_asset and old_alias_asset.get("recovery_ack_required"):
         if content_hash == old_alias_asset["content_hash"]:
@@ -1220,14 +1617,18 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
                     "use acknowledged recovery after quarantine to remap it.",
                     code="source_changed_recovery_required", status=409)
             remote = await discord.list_emojis()
+            if not await _guard_source(validate_source):
+                raise StalePreparation()
             return await _remap_changed_source(
-                db, discord, guild_id, source_url, old_alias_asset, final_png, remote, bot_user_id)
+                db, discord, guild_id, source_url, old_alias_asset, final_png, remote, bot_user_id,
+                emoji_name=emoji_name, validate_source=validate_source)
     asset = await _get_asset(db, discord.application_id, content_hash)
     duplicates = []
     claimed = None
     if asset is None:
         asset, claimed, duplicates = await _insert_asset_or_claim(
-            db, discord.application_id, guild_id, content_hash, remote, bot_user_id)
+            db, discord.application_id, guild_id, content_hash, remote, bot_user_id,
+            emoji_name=emoji_name)
     elif asset["status"] in {"preparing", "uncertain"}:
         asset, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id)
     elif asset["status"] == "ready":
@@ -1278,7 +1679,12 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         return _result(asset, duplicates=duplicates), remote
     if content_identity(final_png) != claimed["content_hash"]:
         return _result(claimed, code="content_changed", message="The normalized content changed before creation."), remote
-    return await _create_claimed(db, discord, claimed, final_png, bot_user_id), remote
+    # ── FENCE ── the download is finished; the product may have changed while it
+    # was in flight. Verify against the caller's authority before creating.
+    if not await _guard_source(validate_source):
+        raise StalePreparation()
+    return await _create_claimed(db, discord, claimed, final_png, bot_user_id,
+                                 validate_source=validate_source), remote
 
 
 def _preparation_lock(application_id):
@@ -1295,6 +1701,37 @@ async def _load_products(db, guild_id, product_ids):
         f"SELECT id,icon_url FROM shop_items WHERE guild_id=? AND id IN ({marks})",
         (guild_id, *product_ids))
     return {int(row[0]): row[1] for row in await cur.fetchall()}
+
+
+def _fence_for_url(db, guild_id, source_url, product_ids):
+    """Build a fence re-confirming ONE URL against the current listings.
+
+    The explicit owner path is authoritative on product IDs, never on URLs: the
+    URL list is derived once, when the request arrives, and the batch may run
+    for a long time afterwards. Before any image is uploaded, re-read the
+    listings this URL came from and require that at least one of them still
+    points at it — otherwise the emoji would be created for an image the
+    storefront no longer shows.
+
+    "At least one" is deliberate: several products can share one icon URL, and
+    the batch prepares each URL once. If every listing moves away, the
+    preparation is obsolete; if one keeps it, the artefact is still wanted.
+
+    Returns an awaitable predicate for ``_prepare_one``'s ``validate_source``.
+    """
+    async def still_current():
+        marks = ",".join("?" for _ in product_ids)
+        cur = await db.execute(
+            f"SELECT icon_url FROM shop_items WHERE guild_id=? AND id IN ({marks})",
+            (guild_id, *product_ids))
+        for row in await cur.fetchall():
+            try:
+                if canonicalize_url(row[0]) == source_url:
+                    return True
+            except SourceImageError:
+                continue
+        return False
+    return still_current
 
 
 def _validate_product_ids(product_ids):
@@ -1327,7 +1764,7 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                     await discord.verify_application()
                     bot_user_id = await discord.bot_user_id()
                     remote = await discord.list_emojis()
-                    by_url, order = {}, []
+                    by_url, order, url_products = {}, [], {}
                     for pid in product_ids:
                         raw = products[pid]
                         if not raw:
@@ -1340,13 +1777,20 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                             continue
                         if url not in order:
                             order.append(url)
+                        url_products.setdefault(url, []).append(pid)
                         by_url[pid] = url
                     url_results = {}
                     for url in order:
                         try:
                             result, remote = await _prepare_one(
                                 db, discord, guild_id, url, remote, bot_user_id,
-                                retry_uncertain, acknowledge_duplicate_risk)
+                                retry_uncertain, acknowledge_duplicate_risk,
+                                # This path is an explicit owner request, so the
+                                # URL is re-confirmed per product: a listing that
+                                # was edited while this batch ran must not get an
+                                # emoji for the image it no longer uses.
+                                validate_source=_fence_for_url(
+                                    db, guild_id, url, url_products[url]))
                             if result.get("status") == "ready" and result.get("emoji_id"):
                                 # Later URLs in this batch must see creations or
                                 # adoptions made earlier in that same batch.
