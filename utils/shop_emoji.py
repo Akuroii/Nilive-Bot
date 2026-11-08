@@ -899,6 +899,7 @@ async def _claim_existing(db, asset, guild_id, *, allow_uncertain=False):
     if asset["status"] not in allowed:
         return None
     await db.execute("BEGIN IMMEDIATE")
+    attempt = None
     try:
         current = await _get_asset(db, asset["application_id"], asset["content_hash"])
         if (current is None or current["status"] != asset["status"]
@@ -923,12 +924,21 @@ async def _claim_existing(db, asset, guild_id, *, allow_uncertain=False):
             (attempt, now, now, current["application_id"], current["content_hash"],
              current["status"], current.get("attempt_id")))
         await db.commit()
-    except Exception:
-        await db.rollback()
+        if not cur.rowcount:
+            return None
+        # `claim_origin` is in-memory only (never persisted, never returned by
+        # _result): it tells _release_unposted_claim whether an earlier create may
+        # already have been dispatched for this asset.
+        return dict(await _get_asset(db, asset["application_id"], asset["content_hash"]),
+                    claim_origin="uncertain" if current["status"] == "uncertain" else "recovered")
+    except BaseException as exc:    # incl. CancelledError: the caller never gets the claim
+        if isinstance(exc, Exception):
+            await db.rollback()
+        if attempt is not None:
+            await _abandon_new_attempt(
+                db, asset["application_id"], asset["content_hash"], attempt,
+                "uncertain" if asset["status"] == "uncertain" else "recovered")
         raise
-    if not cur.rowcount:
-        return None
-    return await _get_asset(db, asset["application_id"], asset["content_hash"])
 
 
 async def _insert_asset_or_claim(db, application_id, guild_id, content_hash, remote,
@@ -943,6 +953,7 @@ async def _insert_asset_or_claim(db, application_id, guild_id, content_hash, rem
     matches = _matching_name(synthetic, remote)
     duplicates = _duplicates(synthetic, matches)
     await db.execute("BEGIN IMMEDIATE")
+    written, attempt = False, None
     try:
         existing = await _get_asset(db, application_id, content_hash)
         if existing is not None:
@@ -963,6 +974,7 @@ async def _insert_asset_or_claim(db, application_id, guild_id, content_hash, rem
                 status, error, attempt = "failed", "The deterministic-name match lacks supported ownership metadata.", None
         if status == "preparing":
             await _enforce_guild_quota(db, application_id, guild_id)
+        written = status == "preparing"      # from the next statement on, our claim may exist
         await db.execute(
             "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,emoji_id,animated,"
             "creator_guild_id,pipeline_version,status,attempt_id,attempt_started_at,quarantine_until,last_error,created_at,updated_at) "
@@ -970,13 +982,17 @@ async def _insert_asset_or_claim(db, application_id, guild_id, content_hash, rem
             (application_id, content_hash, name, emoji_id, guild_id, PIPELINE_VERSION, status,
              attempt, now if attempt else None, error, now, now))
         await db.commit()
-    except Exception:
-        await db.rollback()
+        current = await _get_asset(db, application_id, content_hash)
+        claimed = (dict(current, claim_origin="new")
+                   if (current and status == "preparing"
+                       and current.get("attempt_id") == attempt) else None)
+        return current, claimed, duplicates
+    except BaseException as exc:    # incl. CancelledError: the caller never gets the claim
+        if isinstance(exc, Exception):
+            await db.rollback()
+        if written:
+            await _abandon_new_attempt(db, application_id, content_hash, attempt, "new")
         raise
-    current = await _get_asset(db, application_id, content_hash)
-    claimed = current if (current and status == "preparing"
-                          and current.get("attempt_id") == attempt) else None
-    return current, claimed, duplicates
 
 
 async def _reconcile_asset(db, asset, remote, bot_user_id, *, stale_after=PREPARING_STALE_SECONDS):
@@ -1381,6 +1397,117 @@ async def _retry_allowed(asset, retry_uncertain, acknowledgement, *, quarantine_
     return True
 
 
+async def _release_unposted_claim(db, asset, reason):
+    """Hand back a claim whose create request was provably never dispatched.
+
+    Only the claimant may POST, and every caller invokes this strictly before
+    ``create_emoji()`` is awaited, so nothing can exist on Discord for this
+    attempt. Leaving the row ``preparing`` would be wrong twice over: it keeps
+    consuming the per-server quota, and a later pass ages it into ``uncertain``,
+    demanding an owner duplicate-risk acknowledgement for an emoji that was
+    never sent.
+
+    * claim taken from a fresh row, or from ``failed``/``missing`` -> ``failed``:
+      the existing ordinary-retry state (no quota, no acknowledgement; the retry
+      still goes through name reconciliation and the quota check).
+    * claim taken from ``uncertain`` -> back to ``uncertain``: an EARLIER create
+      may really have been sent, so the duplicate guard must survive.
+
+    Both transitions are compare-and-swap on this attempt's ``attempt_id``, so a
+    row another process has since adopted, re-claimed or marked is left alone.
+    Nothing is deleted, locally or on Discord, and no other asset or alias that
+    shares the content is touched.
+    """
+    try:
+        if asset.get("claim_origin") == "uncertain":
+            return await _mark_uncertain(db, asset, reason)
+        return await _mark_failed(db, asset, reason)
+    except Exception:  # noqa: BLE001 - releasing must never mask the original error
+        log.warning("could not release unposted claim %s", asset.get("content_hash"),
+                    exc_info=True)
+        return asset
+
+
+async def _finish_cleanup(coro):
+    """Run ``coro`` to completion even if this task is cancelled meanwhile.
+
+    ``await asyncio.shield(x)`` alone is not enough: a second cancellation makes
+    the awaiting task leave at once, its caller then closes the database
+    connection, and the shielded work finishes (or fails) against a closed
+    connection. Here every cancellation that arrives during the cleanup is
+    remembered, the cleanup is awaited to its end, and only then is the
+    cancellation re-raised, so it is delayed but never swallowed. The wait is
+    bounded by the cleanup itself (one indexed UPDATE under SQLite's busy timeout).
+    """
+    task = asyncio.ensure_future(coro)
+    cancelled = None
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            if task.cancelled():                 # the cleanup itself was cancelled
+                raise
+            cancelled = exc
+        except BaseException:
+            if cancelled is not None:
+                raise cancelled
+            raise
+    if cancelled is not None:
+        raise cancelled
+    return result
+
+
+class _PreDispatch:
+    """Release ``claimed`` if this block exits by ANY exception before dispatch.
+
+    That includes ``asyncio.CancelledError`` (a ``BaseException``, so an
+    ``except Exception`` never sees it) and ``StalePreparation``.
+
+    "Before dispatch" is not inferred, it is recorded: ``_create_claimed`` sets
+    ``claimed["dispatch_started"]`` synchronously (no await in between)
+    immediately before ``create_emoji()`` is called. From that instant a request
+    may have reached Discord (a cancelled or timed-out POST proves nothing), so
+    the claim is never released here; the existing uncertain/reconcile recovery
+    owns it. The release is awaited to completion even under repeated cancellation
+    (``_finish_cleanup``) and is marked so nested guards release only once.
+    """
+
+    def __init__(self, db, claimed):
+        self.db, self.claimed = db, claimed
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        claimed = self.claimed
+        if (exc_type is None or claimed is None or claimed.get("dispatch_started")
+                or claimed.get("released")):
+            return False
+        if issubclass(exc_type, StalePreparation):
+            reason = str(exc)
+        elif issubclass(exc_type, asyncio.CancelledError):
+            reason = "Preparation was cancelled before any create request was sent."
+        else:
+            reason = f"Creation was abandoned before any request was sent: {exc}"
+        claimed["released"] = True
+        await _finish_cleanup(_release_unposted_claim(self.db, claimed, reason))
+        return False
+
+
+async def _abandon_new_attempt(db, application_id, content_hash, attempt, origin):
+    """Compensate a claim whose acquisition was interrupted after it was written.
+
+    The caller never received the claim, so only the attempt id it generated can
+    identify it. The release is a compare-and-swap on that id: if the write never
+    happened it matches nothing.
+    """
+    stub = {"application_id": application_id, "content_hash": content_hash,
+            "attempt_id": attempt, "claim_origin": origin}
+    await _finish_cleanup(_release_unposted_claim(
+        db, stub, "Preparation was interrupted before any create request was sent."))
+
+
 async def _create_claimed(db, discord, asset, final_png, bot_user_id,
                           validate_source=None):
     """Create the claimed emoji, revalidating AT the dispatch boundary.
@@ -1400,21 +1527,25 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id,
     caller already holds, so it is a cross-process fence: the Dashboard's write
     is committed before its HTTP response returns, and this read sees it.
     """
-    remote = await discord.list_emojis()
-    reconciled, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id, stale_after=10**9)
-    if duplicates:
-        return _result(reconciled, code="deterministic_name_conflict", duplicates=duplicates)
-    if reconciled["status"] != "preparing" or reconciled.get("attempt_id") != asset.get("attempt_id"):
-        return _result(reconciled, duplicates=duplicates)
-    if len(remote) >= APPLICATION_EMOJI_LIMIT:
-        failed = await _mark_failed(db, asset, "The application's total emoji capacity is full.")
-        if failed["status"] == "ready":
-            return _result(failed, code="reconciled")
-        return _result(failed, code="emoji_capacity", message=failed["last_error"])
-    # ── POST BOUNDARY ── every suspendable await is behind us. This is the last
-    # check before an irreversible, never-deleted Discord emoji is created.
-    if not await _guard_source(validate_source):
-        raise StalePreparation()
+    async with _PreDispatch(db, asset):
+        remote = await discord.list_emojis()
+        reconciled, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id, stale_after=10**9)
+        if duplicates:
+            return _result(reconciled, code="deterministic_name_conflict", duplicates=duplicates)
+        if reconciled["status"] != "preparing" or reconciled.get("attempt_id") != asset.get("attempt_id"):
+            return _result(reconciled, duplicates=duplicates)
+        if len(remote) >= APPLICATION_EMOJI_LIMIT:
+            failed = await _mark_failed(db, asset, "The application's total emoji capacity is full.")
+            if failed["status"] == "ready":
+                return _result(failed, code="reconciled")
+            return _result(failed, code="emoji_capacity", message=failed["last_error"])
+        # ── POST BOUNDARY ── every suspendable await is behind us. This is the last
+        # check before an irreversible, never-deleted Discord emoji is created.
+        if not await _guard_source(validate_source):
+            raise StalePreparation()
+    # From here a request may reach Discord. Recorded synchronously, with no await
+    # between this line and the call, so no cancellation can fall in between.
+    asset["dispatch_started"] = True
     try:
         created = await discord.create_emoji(asset["emoji_name"], final_png, bot_user_id)
     except DiscordAPIError as exc:
@@ -1468,7 +1599,8 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
             remote = await discord.list_emojis()
             new_duplicates = _duplicates(new_asset, _matching_name(new_asset, remote))
         new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
-    await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
+    async with _PreDispatch(db, new_claimed):    # no-op while `new_claimed` is None
+        await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
     if new_claimed is not None and new_asset["status"] == "preparing":
         outcome = await _create_claimed(db, discord, new_claimed, final_png, bot_user_id,
                                         validate_source=validate_source)
@@ -1637,7 +1769,8 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         asset = await _refresh_ready_asset(db, asset, remote, bot_user_id)
 
     # Aliases may point at a non-ready asset, but only ready assets resolve.
-    await _upsert_alias(db, discord.application_id, guild_id, source_url, content_hash)
+    async with _PreDispatch(db, claimed):        # no-op while `claimed` is None
+        await _upsert_alias(db, discord.application_id, guild_id, source_url, content_hash)
     if asset["status"] == "ready":
         return _result(asset, code="reused",
                        duplicates=_duplicates(asset, _matching_name(asset, remote))), remote
@@ -1681,8 +1814,10 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         return _result(claimed, code="content_changed", message="The normalized content changed before creation."), remote
     # ── FENCE ── the download is finished; the product may have changed while it
     # was in flight. Verify against the caller's authority before creating.
-    if not await _guard_source(validate_source):
-        raise StalePreparation()
+    # The claim exists by now, so a rejection must hand it back (nothing was sent).
+    async with _PreDispatch(db, claimed):
+        if not await _guard_source(validate_source):
+            raise StalePreparation()
     return await _create_claimed(db, discord, claimed, final_png, bot_user_id,
                                  validate_source=validate_source), remote
 

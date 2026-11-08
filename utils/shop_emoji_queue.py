@@ -166,9 +166,13 @@ def _now_minus(seconds):
 
 
 # ── Enqueue ─────────────────────────────────────────────────────────────────
+_UNFENCED = object()
+
+
 async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
                           reason="product_saved", reset_attempts=False,
-                          embed_item_name=False):
+                          embed_item_name=False, expect_icon_url=_UNFENCED,
+                          expect_generation=None):
     """Queue one product's current icon URL. Returns the canonical URL or None.
 
     A product with no usable URL is *removed* from the queue rather than stored
@@ -189,9 +193,36 @@ async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
     The generation is bumped in BOTH the URL-change and the explicit-retry case,
     so an in-flight worker holding the old generation fails its compare-and-swap
     and cannot clobber this newer intent.
+
+    **Fenced mode** is for callers that decided from a SNAPSHOT (the worker's
+    requeue, the Backfill sweep) rather than from a save they are performing.
+    Passing ``expect_icon_url`` (the raw ``shop_items.icon_url`` that was read)
+    makes the whole check-and-write ONE SQL statement: it writes only if the
+    listing still holds exactly that URL and is enabled, and only if the queue
+    still matches what was seen: a numeric ``expect_generation`` requires that
+    row to still exist at that generation (a consumed row is never resurrected),
+    while ``None`` means "no row was seen", so it may insert but never replaces
+    an existing row.
+    A statement is atomic in SQLite, so no Dashboard commit can slip between
+    the check and the write, in this process or another. Returns the URL when
+    something was written and ``None`` when the fence refused (in fenced mode
+    ``None`` therefore means "a newer intent exists; leave it alone").
     """
+    fenced = expect_icon_url is not _UNFENCED
     url = queue_source_url(icon_url)
     if url is None:
+        if fenced:
+            # Only retract the exact row this snapshot saw, and only while the
+            # listing still holds the unusable URL we judged it by.
+            if expect_generation is not None:
+                await db.execute(
+                    "DELETE FROM shop_emoji_queue WHERE guild_id=? AND product_id=? "
+                    "AND generation=? AND EXISTS (SELECT 1 FROM shop_items WHERE id=? "
+                    "AND guild_id=? AND icon_url IS ?)",
+                    (guild_id, product_id, int(expect_generation), product_id,
+                     guild_id, expect_icon_url))
+                await db.commit()
+            return None
         await db.execute(
             "DELETE FROM shop_emoji_queue WHERE guild_id=? AND product_id=?",
             (guild_id, product_id))
@@ -202,7 +233,8 @@ async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
     # generation there would invalidate work that is still correct, and moving
     # `retry` to `queued` would strand a scheduled backoff. A parked row and a
     # genuinely changed URL fall through to the update below.
-    if not reset_attempts:
+    # (Fenced callers skip this read: they need the statement's own verdict.)
+    if not reset_attempts and not fenced:
         cur = await db.execute(
             "SELECT state FROM shop_emoji_queue "
             "WHERE guild_id=? AND product_id=? AND source_url=?",
@@ -211,11 +243,35 @@ async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
         if existing and existing[0] in (STATE_QUEUED, STATE_RETRY):
             return url
 
-    await db.execute(
-        "INSERT INTO shop_emoji_queue "
-        "(guild_id,product_id,item_name,source_url,reason,state,generation,"
-        f"queued_at,updated_at,next_attempt_at,attempts) "
-        f"VALUES (?,?,?,?,?,'{STATE_QUEUED}',1,{_now_sql()},{_now_sql()},NULL,0) "
+    flags = (1 if reset_attempts else 0,) * 4
+    if fenced:
+        head = ("INSERT INTO shop_emoji_queue "
+                "(guild_id,product_id,item_name,source_url,reason,state,generation,"
+                "queued_at,updated_at,next_attempt_at,attempts) "
+                f"SELECT ?,?,?,?,?,'{STATE_QUEUED}',1,{_now_sql()},{_now_sql()},NULL,0 "
+                "WHERE EXISTS (SELECT 1 FROM shop_items WHERE id=? AND guild_id=? "
+                "AND COALESCE(enabled,1)=1 AND icon_url IS ?) ")
+        head_params = (guild_id, product_id, item_name, url, reason,
+                       product_id, guild_id, expect_icon_url)
+        if expect_generation is not None:
+            # A numeric generation names a row the caller SAW. ON CONFLICT ... WHERE
+            # only governs an existing row; if that row has since been consumed
+            # (finished or cleared) the INSERT itself must be refused too, or the
+            # stale snapshot would resurrect work someone else already completed.
+            head += ("AND EXISTS (SELECT 1 FROM shop_emoji_queue WHERE guild_id=? "
+                     "AND product_id=? AND generation=?) ")
+            head_params += (guild_id, product_id, int(expect_generation))
+        tail = " WHERE shop_emoji_queue.generation=?"
+        tail_params = (-1 if expect_generation is None else int(expect_generation),)
+    else:
+        head = ("INSERT INTO shop_emoji_queue "
+                "(guild_id,product_id,item_name,source_url,reason,state,generation,"
+                "queued_at,updated_at,next_attempt_at,attempts) "
+                f"VALUES (?,?,?,?,?,'{STATE_QUEUED}',1,{_now_sql()},{_now_sql()},NULL,0) ")
+        head_params = (guild_id, product_id, item_name, url, reason)
+        tail, tail_params = "", ()
+    cur = await db.execute(
+        head +
         "ON CONFLICT(guild_id,product_id) DO UPDATE SET "
         "  item_name=excluded.item_name,"
         "  updated_at=excluded.updated_at,"
@@ -232,11 +288,12 @@ async def enqueue_product(db, guild_id, product_id, item_name, icon_url, *,
         "                  THEN shop_emoji_queue.last_error ELSE NULL END,"
         "  state=CASE WHEN shop_emoji_queue.source_url=excluded.source_url AND ?=0 "
         "                  AND shop_emoji_queue.state='parked' "
-        "             THEN shop_emoji_queue.state ELSE 'queued' END",
-        (guild_id, product_id, item_name, url, reason,
-         1 if reset_attempts else 0, 1 if reset_attempts else 0,
-         1 if reset_attempts else 0, 1 if reset_attempts else 0))
+        "             THEN shop_emoji_queue.state ELSE 'queued' END"
+        + tail,
+        head_params + flags + tail_params)
     await db.commit()
+    if fenced and not cur.rowcount:
+        return None
     return url
 
 
@@ -247,11 +304,11 @@ async def requeue_if_current(db, row, item_name, canonical_url):
     have saved something newer. An unconditional ``enqueue_product()`` would
     then overwrite that newer intent (the UPSERT keys on guild/product only).
 
-    Two conditions must hold, re-read inside the same transaction as the write:
-
-    * the listing's CURRENT canonical URL is exactly ``canonical_url`` — the
-      listing itself has not moved on since the caller looked, and
-    * the queue row is still the generation the caller held.
+    The listing is read once here, and the write is a SINGLE fenced statement
+    (see ``enqueue_product``): it lands only if the listing still holds the very
+    URL read below AND the queue row is still the generation the caller held.
+    Checking and writing in separate statements would leave a window in which a
+    Dashboard save could commit between them and then be replaced.
 
     Returns True when the requeue was written. False means a newer intent (or a
     newer listing) exists and the caller must leave it alone.
@@ -268,20 +325,10 @@ async def requeue_if_current(db, row, item_name, canonical_url):
     if not enabled or queue_source_url(live_url) != canonical_url:
         # The listing moved on (or was disabled/cleared) after the snapshot.
         return False
-    cur = await db.execute(
-        "SELECT generation, source_url FROM shop_emoji_queue "
-        "WHERE guild_id=? AND product_id=?",
-        (row["guild_id"], row["product_id"]))
-    current = await cur.fetchone()
-    if current is not None and int(current[0]) != int(row["generation"]):
-        # A newer queue generation exists: it wins, unconditionally.
-        return False
-    if current is not None and current[1] == canonical_url:
-        # Already queued for exactly this URL: nothing to write.
-        return False
-    await enqueue_product(db, row["guild_id"], row["product_id"], item_name,
-                          canonical_url, reason="icon_url_changed")
-    return True
+    return await enqueue_product(
+        db, row["guild_id"], row["product_id"], item_name, canonical_url,
+        reason="icon_url_changed",
+        expect_icon_url=live_url, expect_generation=row["generation"]) is not None
 
 
 async def reactivate(db, guild_id, product_id, *, expect_generation=None,
@@ -413,8 +460,13 @@ async def enqueue_guild_products(db, guild_id, *, reason="backfill",
                 # Already pending for this URL: true no-op (kept for clarity even
                 # though enqueue_product() now enforces it too).
                 continue
-        if await enqueue_product(db, guild_id, pid, name, icon_url,
-                                 reason=reason) is not None:
+        # The catalog and queue were read earlier, across many awaits. Write
+        # only against exactly that snapshot (see enqueue_product, fenced mode):
+        # a Dashboard save made since then must not be replaced by an old URL.
+        if await enqueue_product(
+                db, guild_id, pid, name, icon_url, reason=reason,
+                expect_icon_url=icon_url,
+                expect_generation=existing["generation"] if existing else None) is not None:
             queued += 1
     return {"queued": queued, "reactivated": reactivated}
 

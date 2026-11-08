@@ -424,7 +424,7 @@ Each command was run from the repository root. Exit codes are the **test process
 
 | Command | Result | Exit |
 |---|---|---|
-| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 137 — OK** | **0** |
+| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 165 — OK** | **0** |
 | `PYTHONPATH=. python scripts/test_shop_emoji_migration.py` | Ran 6 — OK | 0 |
 | `node scripts/test_shop_designer_ui.js` | **30 interaction checks, 0 failures** | **0** |
 | `npm test` (27 harnesses) | **27 passed** | **0** |
@@ -480,7 +480,7 @@ test counts are not the claim — every test above asserts on row state, attempt
 `creates`/`renames`/`deletes`/`patch_requests`/`patched_emoji_ids` counters, `images.fetches`
 and pre/post database rows.
 
-### Automation suite composition (137)
+### Automation suite composition (165)
 
 `BulkBackfillTests` 5 · `DuplicateContentTests` 4 · `GenerationFencingTests` 4 ·
 `BackfillScopeTests` 6 · `SourceFailureTests` 4 · `DiscordFailureTests` 5 ·
@@ -497,6 +497,13 @@ Round 4 adds **13**: `PostBoundaryFenceTests` 3, `StaleRequeueTests` 4,
 `FenceCoverageTests` keeps its 5 structural checks, but they are no longer the *only*
 evidence for the recovery and remap paths — the two new pytest boundary tests prove
 those behaviourally instead.
+
+Rounds 5–7 add **28**: `StaleWriteInterleavingTests` 10 (requeue, Backfill, owner-retry and
+two out-of-order Dashboard saves, each swept across every statement boundary and drained to
+convergence, plus three "consumed queue row is never resurrected" cases), `PostBoundaryReleaseTests` 11 (the real POST boundary, release/quota/alias/shared
+asset behaviour) and `PreDispatchCancellationTests` 7 (cancellation or an exception at every
+pre-dispatch await, cancellation after dispatch, which must never release the claim, and a
+second cancellation during claim cleanup, which must not abandon it).
 
 (bold = added in round 2)
 
@@ -572,7 +579,7 @@ and byte-compared against a backup afterwards.
 | `dashboard/static/js/shop-designer.js` | backfill handler, progress renderer (invalid URLs, deferred vs uncertain), parked-retry switch, success message preserved across refresh, control re-enabled after failure |
 | `main.py` | load the new cog |
 | `test_shop_publisher_api.py` | stale catalog key set now includes `app_emoji` |
-| `scripts/test_shop_emoji_automation.py` | **137 tests** (`PostBoundaryFenceTests`, `StaleRequeueTests`, `RetryStateContractTests`, rewritten `StaleQueueDeletionTests`) |
+| `scripts/test_shop_emoji_automation.py` | **165 tests** (`PostBoundaryFenceTests`, `StaleRequeueTests`, `RetryStateContractTests`, rewritten `StaleQueueDeletionTests`) |
 | `scripts/test_shop_designer_ui.js` | NEW — real jsdom interaction test: renders the template, mounts the real module, clicks the real button, asserts the outgoing request, and asserts that mounting fetches nothing (**30 checks**) |
 | `scripts/test_shop_emoji_migration.py` | NEW — pre-feature schema, idempotent/repeated init, race-safe concurrent init, previous-revision queue upgrade |
 | `tools/icon_diagnostic.py`, `INVESTIGATION_PRODUCT_ICONS.md` | read-only diagnostic used for the investigation |

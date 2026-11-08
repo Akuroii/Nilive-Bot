@@ -239,9 +239,13 @@ def api_shop_emoji_retry():
                         "SELECT name, icon_url FROM shop_items WHERE id=? AND guild_id=?",
                         (pid, guild_id))
                     row = await cur.fetchone()
+                    # Fenced to what was just read: no queue row was seen and the
+                    # listing held row[1]. A Dashboard save (or a queue row) that
+                    # lands before this write is newer intent and is left alone.
                     if row and await queue.enqueue_product(
                             db, guild_id, pid, row[0], row[1],
-                            reason="owner_retry", reset_attempts=True) is not None:
+                            reason="owner_retry", reset_attempts=True,
+                            expect_icon_url=row[1], expect_generation=None) is not None:
                         reactivated += 1
             return {"success": True, "reactivated": reactivated,
                     "queue": await queue.stats(db, guild_id=guild_id)}
