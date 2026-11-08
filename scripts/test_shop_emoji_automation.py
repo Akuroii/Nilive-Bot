@@ -3320,5 +3320,964 @@ class ReadOnlyConsumerTests(AutomationTestBase):
         self.assertEqual(self.fake.creates, 0)
 
 
+# ── 4b. audit round 5: real interleavings and the true POST boundary ───────
+class _InterleavingDB:
+    """aiosqlite proxy that lets a test act BETWEEN the code-under-test's statements.
+
+    ``hook(n)`` runs, awaited, immediately before the n-th statement issued
+    while this connection is NOT inside a write transaction. Those are exactly
+    the windows in which another process (the Dashboard) can commit: while a
+    write transaction is open SQLite already serializes the writers. The tests
+    sweep every such point, so they hold for any implementation and do not
+    depend on which helper function the write happens to go through.
+    """
+
+    def __init__(self, db, hook):
+        self._db, self._hook, self.points = db, hook, 0
+
+    async def execute(self, sql, params=()):
+        if not self._db.in_transaction:
+            self.points += 1
+            await self._hook(self.points)
+        return await self._db.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+class StaleWriteInterleavingTests(AutomationTestBase):
+    """A stale snapshot may never replace newer intent, at ANY interleaving point,
+    and after every race the newest listing URL must still be what gets prepared."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.created_hashes = []
+        real_create = self.fake.create_emoji
+
+        async def spy(name, png, bot_user_id):
+            self.created_hashes.append(SE.content_identity(png))
+            return await real_create(name, png, bot_user_id)
+        self.fake.create_emoji = spy
+
+    async def _queue_row(self, pid):
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                f"SELECT {','.join(Q.QUEUE_FIELDS)} FROM shop_emoji_queue "
+                "WHERE guild_id=? AND product_id=?", (GUILD, pid))
+            fetched = await cur.fetchone()
+            return Q._row(fetched) if fetched else None
+
+    async def _fresh_product(self, label, url):
+        await self._exec("DELETE FROM shop_items WHERE guild_id=?", (GUILD,))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        self._add_product(label)
+        pid = await self._product_id(label)
+        self.images.put(url, (5, 5, 5, 255))
+        self._set_icon(pid, url)
+        return pid
+
+    async def _dashboard_save_sql(self, pid, url):
+        """What a Dashboard save does at the DB level: commit the listing, then queue it."""
+        async with aiosqlite.connect(DB_PATH) as d:
+            await d.execute("UPDATE shop_items SET icon_url=? WHERE id=?", (url, pid))
+            await d.commit()
+            await Q.enqueue_product(d, GUILD, pid, "n", url, reason="product_saved")
+
+    async def _assert_converges(self, pid, newest_url, label):
+        """Drain the real worker: newest URL prepared, nothing superseded uploaded, not stuck."""
+        await self._drain()
+        icon = (await self._one("SELECT icon_url FROM shop_items WHERE id=?", (pid,)))[0]
+        self.assertEqual(Q.queue_source_url(icon), Q.queue_source_url(newest_url),
+                         f"{label}: the listing is the authoritative intent")
+        self.assertIsNone(await self._queue_row(pid), f"{label}: queue row stuck after drain")
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertTrue(await Q._resolves_ready(db, APP, GUILD, Q.queue_source_url(newest_url)),
+                            f"{label}: the newest image was never prepared")
+        newest_hash = SE.content_identity(self.images.contents[newest_url])
+        self.assertTrue(set(self.created_hashes) <= {newest_hash},
+                        f"{label}: a superseded image was uploaded to Discord")
+        stuck = await self._all("SELECT status FROM shop_emoji_assets "
+                                "WHERE status IN ('preparing','uncertain')")
+        self.assertEqual(stuck, [], f"{label}: asset left recovering")
+
+    async def _sweep(self, label, scenario):
+        """Run ``scenario(db, fired, k, label)`` once per interleaving point.
+
+        ``scenario`` builds the starting state, calls the code under test with the
+        proxied connection (the Dashboard save fires before statement ``k``) and
+        returns ``(pid, newest_url)``.
+        """
+        counted = {"n": 0}
+
+        async def count_only(n):
+            counted["n"] = n
+        async with aiosqlite.connect(DB_PATH) as raw:
+            await scenario(_InterleavingDB(raw, count_only), None, 0, label + "-dry")
+        total = counted["n"]
+        # At minimum the snapshot read and the write must both be interleavable.
+        self.assertGreaterEqual(total, 2, "sweep would not cover both the read and the write")
+        for k in range(1, total + 1):
+            fired = {}
+            self.created_hashes.clear()
+
+            async def act(n, k=k, fired=fired):
+                if n == k and not fired:
+                    fired["go"] = True
+            async with aiosqlite.connect(DB_PATH) as raw:
+                pid, newest_url = await scenario(_InterleavingDB(raw, act), fired, k, f"{label}-{k}")
+            self.assertTrue(fired.get("saved"), f"point {k}: the Dashboard save never ran")
+            row = await self._queue_row(pid)
+            self.assertIsNotNone(row, f"point {k}: newer intent was destroyed")
+            self.assertEqual(row["source_url"], Q.queue_source_url(newest_url),
+                             f"point {k}: a stale write replaced the newer URL")
+            self.assertEqual(row["generation"], fired["gen"],
+                             f"point {k}: a stale write bumped/replaced the newer generation")
+            await self._assert_converges(pid, newest_url, f"{label} point {k}")
+
+    def _arm(self, db, fired, save):
+        """Make the Dashboard save fire at the chosen statement."""
+        inner = db._hook
+
+        async def hook(n):
+            await inner(n)
+            if fired.get("go") and not fired.get("saved"):
+                fired["saved"] = True
+                await save()
+        db._hook = hook
+
+    async def test_requeue_cannot_replace_a_save_made_between_its_check_and_its_write(self):
+        async def scenario(db, fired, k, label):
+            a, b, newest = url_for(1000 + 10 * k), url_for(1001 + 10 * k), url_for(1002 + 10 * k)
+            pid = await self._fresh_product(label, a)
+            self.images.put(b, (1, 2, 3, 255))
+            self.images.put(newest, (7, k % 256, 7, 255))
+            old_row = await self._queue_row(pid)              # generation held by the worker
+            # The Dashboard has committed URL B to shop_items but has not queued it yet.
+            await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?", (b, pid))
+            if fired is not None:
+                async def save():
+                    self._set_icon(pid, newest)               # real Dashboard save
+                    fired["gen"] = (await self._queue_row(pid))["generation"]
+                self._arm(db, fired, save)
+            await Q.requeue_if_current(db, old_row, "n", Q.queue_source_url(b))
+            return pid, newest
+
+        await self._sweep("requeue", scenario)
+
+    async def test_backfill_cannot_replace_a_save_made_after_its_catalog_snapshot(self):
+        async def scenario(db, fired, k, label):
+            a, newest = url_for(2000 + 10 * k), url_for(2001 + 10 * k)
+            pid = await self._fresh_product(label, a)
+            await self._exec("DELETE FROM shop_emoji_queue")   # Backfill sees an unqueued product
+            self.images.put(newest, (9, k % 256, 9, 255))
+            if fired is not None:
+                async def save():
+                    self._set_icon(pid, newest)               # Dashboard saves URL B mid-Backfill
+                    fired["gen"] = (await self._queue_row(pid))["generation"]
+                self._arm(db, fired, save)
+            await Q.enqueue_guild_products(db, GUILD)
+            return pid, newest
+
+        await self._sweep("backfill", scenario)
+
+    async def test_owner_retry_without_a_queue_row_cannot_replace_a_concurrent_save(self):
+        """/emojis/retry with no descriptor reads the listing, then writes a queue row."""
+        import dashboard.api.shop_emoji as endpoint
+
+        class _Connect:
+            """The endpoint's own connection, proxied so every statement is an interleave point."""
+            def __init__(self, hook):
+                self.hook = hook
+
+            async def __aenter__(self):
+                self.raw = await aiosqlite.connect(DB_PATH)
+                return _InterleavingDB(self.raw, self.hook)
+
+            async def __aexit__(self, *exc):
+                await self.raw.close()
+
+        async def scenario(db, fired, k, label):
+            a, newest = url_for(3000 + 10 * k), url_for(3001 + 10 * k)
+            pid = await self._fresh_product(label, a)
+            await self._exec("DELETE FROM shop_emoji_queue")   # never queued / already finished
+            self.images.put(newest, (3, k % 256, 3, 255))
+
+            async def hook(n):
+                await db._hook(n)          # the sweep's counter (dry run) or trigger (point k)
+                if fired and fired.get("go") and not fired.get("saved"):
+                    fired["saved"] = True
+                    await self._dashboard_save_sql(pid, newest)
+                    fired["gen"] = (await self._queue_row(pid))["generation"]
+            ns = SimpleNamespace(connect=lambda path, *a, **kw: _Connect(hook))
+            with patch.object(endpoint, "aiosqlite", ns):
+                r = self.client.post("/api/shop-publisher/emojis/retry",
+                                     json={"product_ids": [pid]},
+                                     headers={"X-CSRF-Token": CSRF})
+            self.assertEqual(r.status_code, 200, r.get_json())
+            return pid, newest
+
+        await self._sweep("owner-retry", scenario)
+
+    async def test_two_dashboard_saves_finishing_out_of_order_converge_on_the_final_listing(self):
+        """Save 1 commits the listing, save 2 commits AND enqueues, then save 1 enqueues.
+
+        Both saves go through the real endpoint on the Dashboard's own loop; save 1's
+        enqueue is held until save 2 has fully returned. That leaves the queue holding
+        the OLDER url while the listing holds the NEWER one (the unfavourable order).
+        """
+        import threading
+        a, x, y = url_for(4000), url_for(4001), url_for(4002)
+        pid = await self._fresh_product("Two Saves", a)
+        self.images.put(x, (200, 20, 20, 255))
+        self.images.put(y, (20, 200, 20, 255))
+        reached, save2_done = threading.Event(), threading.Event()
+        real_enqueue = Q.enqueue_product
+
+        async def held_for_x(db, guild_id, product_id, item_name, icon_url, **kw):
+            if icon_url == x:
+                reached.set()
+                while not save2_done.is_set():          # never block the shared loop
+                    await asyncio.sleep(0.01)
+            return await real_enqueue(db, guild_id, product_id, item_name, icon_url, **kw)
+
+        with patch.object(Q, "enqueue_product", held_for_x):
+            save1 = asyncio.create_task(asyncio.to_thread(self._set_icon, pid, x))
+            self.assertTrue(await asyncio.wait_for(asyncio.to_thread(reached.wait, 30), 35),
+                            "save 1 never reached its enqueue")
+            await asyncio.to_thread(self._set_icon, pid, y)
+            save2_done.set()
+            await asyncio.wait_for(save1, 30)
+
+        icon = (await self._one("SELECT icon_url FROM shop_items WHERE id=?", (pid,)))[0]
+        self.assertEqual(icon, y, "save 2 wrote the listing last")
+        row = await self._queue_row(pid)
+        self.assertEqual(row["source_url"], Q.queue_source_url(x),
+                         "precondition: the older save enqueued last, so the queue is stale")
+        await self._assert_converges(pid, y, "out-of-order saves")
+
+    async def test_fenced_write_refuses_to_resurrect_a_queue_row_that_disappeared(self):
+        """Caller read generation G; another worker finished and deleted the row; stale write arrives."""
+        pid = await self._fresh_product("Resurrect", url_for(5000))
+        row = await self._queue_row(pid)
+        icon = (await self._one("SELECT icon_url FROM shop_items WHERE id=?", (pid,)))[0]
+        await self._exec("DELETE FROM shop_emoji_queue")            # consumed by someone else
+        async with aiosqlite.connect(DB_PATH) as db:
+            refused = await Q.enqueue_product(
+                db, GUILD, pid, "n", icon, expect_icon_url=icon, expect_generation=row["generation"])
+        self.assertIsNone(refused, "a numeric generation names a row that no longer exists")
+        self.assertIsNone(await self._queue_row(pid), "stale work was resurrected")
+        # A caller that genuinely observed NO row keeps its behaviour: it may insert.
+        async with aiosqlite.connect(DB_PATH) as db:
+            written = await Q.enqueue_product(
+                db, GUILD, pid, "n", icon, expect_icon_url=icon, expect_generation=None)
+        self.assertEqual(written, Q.queue_source_url(icon))
+        self.assertEqual((await self._queue_row(pid))["source_url"], Q.queue_source_url(icon))
+
+    async def test_requeue_does_not_resurrect_a_consumed_row_and_discovery_still_converges(self):
+        a, b = url_for(5010), url_for(5011)
+        pid = await self._fresh_product("Requeue Gone", a)
+        self.images.put(b, (30, 60, 90, 255))
+        old_row = await self._queue_row(pid)
+        await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?", (b, pid))   # listing moved on
+        await self._exec("DELETE FROM shop_emoji_queue")            # row consumed after the worker read it
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertFalse(await Q.requeue_if_current(db, old_row, "n", Q.queue_source_url(b)))
+        self.assertIsNone(await self._queue_row(pid), "a consumed row was resurrected by requeue")
+        # Not stranded: the next discovery tick sees no row and queues the listing's URL.
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertEqual((await Q.enqueue_guild_products(db, GUILD))["queued"], 1)
+        await self._assert_converges(pid, b, "requeue then discovery")
+
+    async def test_backfill_does_not_resurrect_a_row_consumed_after_its_snapshot(self):
+        """Two products: while product 1 is being written, product 2's row (already in
+        Backfill's queue snapshot) is consumed by a worker. The write for product 2 must
+        refuse, and the next discovery tick must still queue it."""
+        a1, b1, a2, b2 = url_for(5020), url_for(5021), url_for(5022), url_for(5023)
+        p1 = await self._fresh_product("Backfill One", a1)
+        self._add_product("Backfill Two")
+        p2 = await self._product_id("Backfill Two")
+        self._set_icon(p2, a2)
+        for pid, newer, color in ((p1, b1, (60, 30, 90, 255)), (p2, b2, (90, 30, 60, 255))):
+            self.images.put(newer, color)
+            await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?", (newer, pid))
+        self.assertEqual({(await self._queue_row(p1))["source_url"], (await self._queue_row(p2))["source_url"]},
+                         {Q.queue_source_url(a1), Q.queue_source_url(a2)}, "both rows are in the snapshot")
+        fired, real = {}, Q.enqueue_product
+
+        async def consume_p2_during_p1(db, guild_id, product_id, *args, **kwargs):
+            if not fired:
+                fired["yes"] = True                       # after the snapshot, before p2's write
+                await self._exec("DELETE FROM shop_emoji_queue WHERE product_id=?", (p2,))
+            return await real(db, guild_id, product_id, *args, **kwargs)
+        with patch.object(Q, "enqueue_product", consume_p2_during_p1):
+            async with aiosqlite.connect(DB_PATH) as db:
+                result = await Q.enqueue_guild_products(db, GUILD)
+        self.assertTrue(fired, "the interleaving never happened; test would be vacuous")
+        self.assertEqual(result["queued"], 1, "only product 1 may be written; product 2's row was gone")
+        self.assertEqual((await self._queue_row(p1))["source_url"], Q.queue_source_url(b1))
+        self.assertIsNone(await self._queue_row(p2), "a consumed snapshot row was resurrected")
+        async with aiosqlite.connect(DB_PATH) as db:      # next tick: fresh snapshot, no row for p2
+            self.assertEqual((await Q.enqueue_guild_products(db, GUILD))["queued"], 1)
+        await self._drain()
+        async with aiosqlite.connect(DB_PATH) as db:
+            for newer in (b1, b2):
+                self.assertTrue(await Q._resolves_ready(db, APP, GUILD, Q.queue_source_url(newer)))
+        self.assertTrue(set(self.created_hashes) <= {SE.content_identity(self.images.contents[b1]),
+                                                     SE.content_identity(self.images.contents[b2])},
+                        "a superseded image was uploaded")
+        self.assertEqual(await self._all("SELECT 1 FROM shop_emoji_queue"), [])
+
+    async def test_fenced_write_refuses_a_stale_generation_but_dashboard_saves_stay_authoritative(self):
+        pid = await self._fresh_product("Authority", url_for(60))
+        row = await self._queue_row(pid)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE shop_items SET icon_url=? WHERE id=?", (url_for(61), pid))
+            await db.commit()
+            # Fenced to a generation that is not current: refused, nothing written.
+            refused = await Q.enqueue_product(
+                db, GUILD, pid, "n", url_for(61), expect_icon_url=url_for(61),
+                expect_generation=row["generation"] + 5)
+            self.assertIsNone(refused)
+            self.assertEqual((await self._queue_row(pid))["generation"], row["generation"])
+            # Fenced with "no row seen" must never replace an existing row.
+            self.assertIsNone(await Q.enqueue_product(
+                db, GUILD, pid, "n", url_for(61), expect_icon_url=url_for(61),
+                expect_generation=None))
+            # Fenced to a listing URL that is not what shop_items holds: refused.
+            self.assertIsNone(await Q.enqueue_product(
+                db, GUILD, pid, "n", url_for(61), expect_icon_url=url_for(99),
+                expect_generation=row["generation"]))
+            self.assertEqual((await self._queue_row(pid))["source_url"], row["source_url"])
+            # The Dashboard's own (unfenced) save always wins, whatever generation was seen.
+            self.assertEqual(await Q.enqueue_product(db, GUILD, pid, "n", url_for(61)),
+                             Q.queue_source_url(url_for(61)))
+        after = await self._queue_row(pid)
+        self.assertEqual((after["source_url"], after["generation"]),
+                         (Q.queue_source_url(url_for(61)), row["generation"] + 1))
+
+    async def test_fenced_retraction_of_an_unusable_url_only_removes_the_row_it_saw(self):
+        pid = await self._fresh_product("Retract", url_for(70))
+        row = await self._queue_row(pid)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE shop_items SET icon_url=? WHERE id=?", ("not a url", pid))
+            await db.commit()
+            await Q.enqueue_product(db, GUILD, pid, "n", "not a url",
+                                    expect_icon_url="not a url",
+                                    expect_generation=row["generation"] + 3)
+            self.assertIsNotNone(await self._queue_row(pid), "a stale generation must not delete")
+            await Q.enqueue_product(db, GUILD, pid, "n", "not a url",
+                                    expect_icon_url="not a url",
+                                    expect_generation=row["generation"])
+        self.assertIsNone(await self._queue_row(pid))
+
+    async def test_fenced_writes_still_write_when_nothing_changed(self):
+        pid = await self._fresh_product("Positive", url_for(50))
+        old_row = await self._queue_row(pid)
+        await self._exec("UPDATE shop_items SET icon_url=? WHERE id=?", (url_for(51), pid))
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertTrue(await Q.requeue_if_current(db, old_row, "Positive", url_for(51)))
+        row = await self._queue_row(pid)
+        self.assertEqual((row["source_url"], row["generation"]),
+                         (url_for(51), old_row["generation"] + 1))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        async with aiosqlite.connect(DB_PATH) as db:
+            result = await Q.enqueue_guild_products(db, GUILD)
+        self.assertEqual(result["queued"], 1)
+        self.assertEqual((await self._queue_row(pid))["source_url"], url_for(51))
+
+
+class PostBoundaryReleaseTests(AutomationTestBase):
+    """Block the list that really sits inside `_create_claimed()` — the POST boundary.
+
+    Counting list calls is not enough (the first list of a pass belongs to
+    `run_pass`, not to `_create_claimed`), so the gate keys on being inside
+    `_create_claimed`. Each test asserts the gate engaged.
+    """
+
+    def _gate_inside_create_claimed(self, *, raise_once=None):
+        state = {"inside": False, "hit": asyncio.Event(), "gate": asyncio.Event(), "raised": False}
+        real_cc = SE._create_claimed
+
+        async def wrapped(*args, **kwargs):
+            state["inside"] = True
+            try:
+                return await real_cc(*args, **kwargs)
+            finally:
+                state["inside"] = False
+        real_list = self.fake.list_emojis
+
+        async def listing():
+            if state["inside"]:
+                if raise_once is not None and not state["raised"]:
+                    state["raised"] = True
+                    state["hit"].set()
+                    raise raise_once
+                if raise_once is None:
+                    state["hit"].set()
+                    await state["gate"].wait()
+            return await real_list()
+        patcher = patch.object(SE, "_create_claimed", wrapped)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.fake.list_emojis = listing
+        return state
+
+    async def _assets(self):
+        return await self._all("SELECT status, emoji_id FROM shop_emoji_assets ORDER BY created_at")
+
+    async def _usage(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            return await SE._guild_asset_usage(db, APP, GUILD)
+
+    async def _setup(self, name, idx, color):
+        self._add_product(name)
+        pid = await self._product_id(name)
+        self.images.put(url_for(idx), color)
+        self._set_icon(pid, url_for(idx))
+        return pid
+
+    async def _stale_at_the_final_list(self, change):
+        pid = await self._setup("Boundary Release", 60, (12, 24, 36, 255))
+        self.images.put(url_for(61), (200, 10, 10, 255))
+        state = self._gate_inside_create_claimed()
+        task = asyncio.create_task(self._run_pass())
+        await asyncio.wait_for(state["hit"].wait(), 30)
+        change(pid)
+        state["gate"].set()
+        await asyncio.wait_for(task, 90)
+        return pid
+
+    async def test_stale_at_the_real_final_list_posts_nothing_and_releases_the_claim(self):
+        pid = await self._stale_at_the_final_list(lambda pid: self._set_icon(pid, url_for(61)))
+        self.assertEqual(self.fake.creates, 0, "URL A must never be POSTed")
+        for status, _id in await self._assets():
+            self.assertNotIn(status, {"preparing", "uncertain"},
+                             "an abandoned, never-POSTed claim must not stay in a recovering state")
+        self.assertEqual(await self._usage(), 0, "an unposted claim must not consume quota")
+
+        # The newest URL converges, and returning to the abandoned URL needs no owner recovery.
+        await self._drain()
+        self.assertEqual(self.fake.creates, 1)
+        self._set_icon(pid, url_for(60))
+        reports = await self._drain()
+        self.assertEqual(self.fake.creates, 2)
+        self.assertEqual(sum(r["deferred"] for r in reports), 0,
+                         "no duplicate-risk acknowledgement may be demanded for an emoji never POSTed")
+        self.assertEqual(sorted(s for s, _ in await self._assets()), ["ready", "ready"])
+        self.assertEqual(await self._usage(), len(self.fake.remote))
+
+    async def test_cleared_image_at_the_real_final_list_releases_the_claim(self):
+        await self._stale_at_the_final_list(lambda pid: self._set_icon(pid, ""))
+        self.assertEqual(self.fake.creates, 0)
+        self.assertEqual([s for s, _ in await self._assets() if s in {"preparing", "uncertain"}], [])
+        self.assertEqual(await self._usage(), 0)
+
+    async def test_transient_429_at_the_final_list_leaves_an_ordinarily_retryable_claim(self):
+        pid = await self._setup("Boundary 429", 62, (1, 2, 3, 255))
+        self._gate_inside_create_claimed(raise_once=SE.DiscordAPIError(
+            "Discord API 429: rate limited", code="discord_api_error", status=429,
+            http_status=429, retry_after=1.0))
+        report = await self._run_pass()
+        self.assertEqual((self.fake.creates, report["failed"]), (0, 1))
+        self.assertEqual([s for s, _ in await self._assets() if s in {"preparing", "uncertain"}], [],
+                         "a 429 before any POST must not look like an uncertain create")
+        self.assertEqual(await self._usage(), 0)
+        await self._exec("UPDATE shop_emoji_queue SET next_attempt_at=NULL, state='queued'")
+        reports = await self._drain()
+        self.assertEqual(self.fake.creates, 1)
+        self.assertEqual(sum(r["deferred"] for r in reports), 0)
+        self.assertEqual([s for s, _ in await self._assets()], ["ready"])
+
+    async def test_owner_path_stale_at_the_real_final_list_posts_nothing(self):
+        pid = await self._setup("Boundary Owner", 63, (4, 5, 6, 255))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        self.images.put(url_for(64), (90, 90, 90, 255))
+        state = self._gate_inside_create_claimed()
+        task = asyncio.create_task(SE.prepare_product_emojis(GUILD, [pid]))
+        await asyncio.wait_for(state["hit"].wait(), 30)
+        self._set_icon(pid, url_for(64))
+        state["gate"].set()
+        result = (await asyncio.wait_for(task, 90))["results"][0]
+        self.assertEqual(self.fake.creates, 0)
+        self.assertNotEqual(result["status"], "ready")
+        self.assertEqual([s for s, _ in await self._assets() if s in {"preparing", "uncertain"}], [])
+        self.assertEqual(await self._usage(), 0)
+
+    async def test_uncertain_recovery_stale_at_the_real_final_list_keeps_the_duplicate_guard(self):
+        self.fake.create_timeout_indexes = {1}
+        pid = await self._setup("Boundary Recovery", 65, (8, 9, 10, 255))
+        await self._exec("DELETE FROM shop_emoji_queue")
+        first = (await SE.prepare_product_emojis(GUILD, [pid]))["results"][0]
+        self.assertEqual((first["status"], self.fake.creates), ("uncertain", 1))
+        self.fake.remote.clear()          # Discord shows nothing: only a POST could recreate it
+        await self._exec("UPDATE shop_emoji_assets SET quarantine_until=?",
+                         (SE._iso(SE._utcnow() - SE.timedelta(seconds=1)),))
+        self.images.put(url_for(66), (70, 70, 70, 255))
+        state = self._gate_inside_create_claimed()
+        task = asyncio.create_task(SE.prepare_product_emojis(
+            GUILD, [pid], retry_uncertain=True, acknowledge_duplicate_risk=True))
+        await asyncio.wait_for(state["hit"].wait(), 30)
+        self._set_icon(pid, url_for(66))
+        state["gate"].set()
+        result = (await asyncio.wait_for(task, 90))["results"][0]
+        self.assertEqual(self.fake.creates, 1, "recovery must not POST for a replaced image")
+        self.assertNotEqual(result["status"], "ready")
+        self.assertEqual([s for s, _ in await self._assets()], ["uncertain"],
+                         "an asset with an earlier ambiguous POST must stay uncertain, never become failed")
+
+    # ── release is only ever for a claim whose create request was never sent ──
+    def _spy_release(self):
+        calls = []
+        real = SE._release_unposted_claim
+
+        async def spy(db, asset, reason):
+            calls.append({"creates_at_release": self.fake.creates, "origin": asset.get("claim_origin")})
+            return await real(db, asset, reason)
+        patcher = patch.object(SE, "_release_unposted_claim", spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return calls
+
+    async def _status_of(self, product_name):
+        return (await self._one(
+            "SELECT a.status FROM shop_emoji_assets a JOIN shop_emoji_url_aliases l "
+            "ON l.application_id=a.application_id AND l.content_hash=a.content_hash "
+            "JOIN shop_items i ON i.icon_url=l.source_url WHERE i.name=?", (product_name,)))[0]
+
+    async def test_release_never_runs_once_a_create_request_was_dispatched(self):
+        calls = self._spy_release()
+        # 1. POST sent, response lost (timeout): may exist on Discord -> uncertain.
+        self.fake.create_timeout_indexes = {1}
+        await self._setup("Sent Timeout", 80, (1, 1, 1, 255))
+        await self._run_pass()
+        self.assertEqual((self.fake.creates, await self._status_of("Sent Timeout")), (1, "uncertain"))
+        # 2. POST sent and rejected by Discord: the existing failure path, not a release.
+        self.fake.create_failures = {2}
+        await self._setup("Sent Rejected", 81, (2, 2, 2, 255))
+        await self._run_pass()
+        self.assertEqual(self.fake.creates, 2)
+        self.assertEqual(await self._status_of("Sent Rejected"), "failed")
+        # 3. POST sent and succeeded.
+        await self._setup("Sent Ok", 82, (3, 3, 3, 255))
+        await self._run_pass()
+        self.assertEqual((self.fake.creates, await self._status_of("Sent Ok")), (3, "ready"))
+        # 4. POST sent, then a local failure while recording it: the emoji exists, the
+        #    claim must stay `preparing` (never released), and a later pass adopts it.
+        real_adopt = SE._adopt_asset
+        boom = {"armed": True}
+
+        async def flaky(db, asset, candidate):
+            if boom["armed"]:
+                boom["armed"] = False
+                raise RuntimeError("local failure after the POST")
+            return await real_adopt(db, asset, candidate)
+        with patch.object(SE, "_adopt_asset", flaky):
+            crash_pid = await self._setup("Sent Then Crash", 83, (4, 4, 4, 255))
+            await self._run_pass()
+        self.assertEqual((self.fake.creates, await self._status_of("Sent Then Crash")), (4, "preparing"))
+        # Only THIS product's backoff is lifted (the rejected product above legitimately retries).
+        await self._exec("UPDATE shop_emoji_queue SET next_attempt_at=NULL, state='queued' "
+                         "WHERE product_id=?", (crash_pid,))
+        before = len(self.fake.remote)
+        await self._drain()
+        self.assertEqual(self.fake.creates, 4, "recovery must adopt, never POST a duplicate")
+        self.assertEqual(len(self.fake.remote), before)
+        self.assertEqual(await self._status_of("Sent Then Crash"), "ready")
+        self.assertEqual(calls, [], "a claim was released although a create request had been sent")
+
+    async def test_release_happens_only_before_any_create_and_with_the_right_origin(self):
+        calls = self._spy_release()
+        await self._stale_at_the_final_list(lambda pid: self._set_icon(pid, url_for(61)))
+        self.assertEqual([c["creates_at_release"] for c in calls], [0])
+        self.assertEqual([c["origin"] for c in calls], ["new"])
+        self.assertEqual(self.fake.creates, 0)
+
+    async def test_release_cannot_touch_an_asset_another_process_completed_or_reclaimed(self):
+        content = SE.content_identity(b"release-unit-probe")
+        async with aiosqlite.connect(DB_PATH) as db:
+            _, claimed, _ = await SE._insert_asset_or_claim(
+                db, APP, GUILD, content, [], BOT_ID, emoji_name="unit_probe")
+            self.assertEqual(claimed["claim_origin"], "new")
+            # Another process finished it (Discord had the emoji): ready must stay ready.
+            await SE._adopt_asset(db, claimed, {"id": "1562903222086279111"})
+            after = await SE._release_unposted_claim(db, claimed, "late")
+            self.assertEqual((after["status"], after["emoji_id"]), ("ready", "1562903222086279111"))
+
+            # A claim another worker took over (new attempt id) must not be released by the old holder.
+            other = SE.content_identity(b"release-unit-probe-2")
+            _, first, _ = await SE._insert_asset_or_claim(
+                db, APP, GUILD, other, [], BOT_ID, emoji_name="unit_probe_two")
+            await SE._mark_failed(db, first, "first holder gave up")
+            failed_row = await SE._get_asset(db, APP, other)
+            second = await SE._claim_existing(db, failed_row, GUILD)
+            self.assertEqual(second["claim_origin"], "recovered")
+            self.assertNotEqual(second["attempt_id"], first["attempt_id"])
+            still = await SE._release_unposted_claim(db, first, "stale holder")
+            self.assertEqual((still["status"], still["attempt_id"]), ("preparing", second["attempt_id"]))
+
+            # Release of a claim taken from `uncertain` returns to `uncertain` (duplicate guard kept).
+            third = SE.content_identity(b"release-unit-probe-3")
+            _, fresh, _ = await SE._insert_asset_or_claim(
+                db, APP, GUILD, third, [], BOT_ID, emoji_name="unit_probe_three")
+            await SE._mark_uncertain(db, fresh, "earlier POST may have reached Discord")
+            await db.execute("UPDATE shop_emoji_assets SET quarantine_until=? WHERE content_hash=?",
+                             (SE._iso(SE._utcnow() - SE.timedelta(seconds=1)), third))
+            await db.commit()
+            reclaimed = await SE._claim_existing(
+                db, await SE._get_asset(db, APP, third), GUILD, allow_uncertain=True)
+            self.assertEqual(reclaimed["claim_origin"], "uncertain")
+            released = await SE._release_unposted_claim(db, reclaimed, "never sent this time")
+            self.assertEqual(released["status"], "uncertain")
+            self.assertIsNotNone(released["quarantine_until"])
+
+            # A claim from a fresh row goes to `failed` with no attempt left behind.
+            fourth = SE.content_identity(b"release-unit-probe-4")
+            _, fresh4, _ = await SE._insert_asset_or_claim(
+                db, APP, GUILD, fourth, [], BOT_ID, emoji_name="unit_probe_four")
+            gone = await SE._release_unposted_claim(db, fresh4, "never sent")
+            self.assertEqual((gone["status"], gone["attempt_id"], gone["emoji_id"]), ("failed", None, None))
+
+    async def test_released_claim_leaves_alias_unresolvable_and_deletes_nothing(self):
+        pid = await self._stale_at_the_final_list(lambda pid: self._set_icon(pid, url_for(61)))
+        a_alias = await self._one("SELECT content_hash FROM shop_emoji_url_aliases WHERE source_url=?",
+                                  (Q.queue_source_url(url_for(60)),))
+        self.assertIsNotNone(a_alias, "the alias row is kept")
+        self.assertEqual((await self._one(
+            "SELECT status FROM shop_emoji_assets WHERE content_hash=?", (a_alias[0],)))[0], "failed")
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertFalse(await Q._resolves_ready(db, APP, GUILD, Q.queue_source_url(url_for(60))),
+                             "an alias to a non-ready asset must not resolve")
+        self.assertEqual((self.fake.creates, self.fake.deletes, self.fake.patch_requests), (0, 0, 0))
+
+    async def test_a_shared_image_released_by_one_product_is_prepared_once_for_the_other(self):
+        first_pid = {}
+        real_row = W._process_row
+
+        async def tracking(*args, **kwargs):
+            first_pid.setdefault("pid", args[2]["product_id"])   # _process_row(db, discord, row, ...)
+            return await real_row(*args, **kwargs)
+        p1 = await self._setup("Shared One", 90, (11, 22, 33, 255))
+        self._add_product("Shared Two")
+        p2 = await self._product_id("Shared Two")
+        self._set_icon(p2, url_for(90))
+        self.images.put(url_for(91), (99, 88, 77, 255))
+        state = self._gate_inside_create_claimed()
+        with patch.object(W, "_process_row", tracking):
+            task = asyncio.create_task(self._run_pass())
+            await asyncio.wait_for(state["hit"].wait(), 30)
+            # Whichever product holds the claim moves to another image; the other keeps A.
+            self._set_icon(first_pid["pid"], url_for(91))
+            state["gate"].set()
+            await asyncio.wait_for(task, 90)
+        await self._drain()
+        self.assertEqual(self.fake.creates, 2, "image A once (for the product still using it), image B once")
+        self.assertEqual(sorted(s for s, _ in await self._assets()), ["ready", "ready"])
+        self.assertEqual(await self._usage(), len(self.fake.remote))
+        self.assertEqual(await self._all("SELECT 1 FROM shop_emoji_queue"), [])
+
+    async def test_a_released_claim_cannot_be_retaken_past_the_guild_quota(self):
+        pid = await self._stale_at_the_final_list(lambda pid: self._set_icon(pid, url_for(61)))
+        await self._drain()                                   # newest image (B) converges
+        creates_before = self.fake.creates
+        async with aiosqlite.connect(DB_PATH) as db:
+            for i in range(SE.GUILD_ASSET_LIMIT):
+                await db.execute(
+                    "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,emoji_id,animated,"
+                    "creator_guild_id,pipeline_version,status,created_at,updated_at) "
+                    "VALUES (?,?,?,?,0,?,?,'ready',?,?)",
+                    (APP, SE.content_identity(f"quota-{i}".encode()), f"quota_{i}", str(2000000000000000000 + i),
+                     GUILD, SE.PIPELINE_VERSION, SE._iso(), SE._iso()))
+            await db.commit()
+        self._set_icon(pid, url_for(60))                      # back to the released image
+        await self._drain()
+        self.assertEqual(self.fake.creates, creates_before, "the quota must still block the re-claim")
+
+
+class PreDispatchCancellationTests(AutomationTestBase):
+    """Cancel (or raise) at every await between claim acquisition and the POST.
+
+    A claim must be handed back only when no create request can have been
+    dispatched, and must be left to the uncertain/recovery machinery the moment
+    one may have been. Each point is entered by gating a real function the worker
+    really calls; every test asserts the gate engaged.
+    """
+
+    POINTS = ("claim_acquisition", "alias_write", "validator_after_claim",
+              "final_list", "validator_at_boundary")
+
+    async def _setup(self, name, idx, color):
+        self._add_product(name)
+        pid = await self._product_id(name)
+        self.images.put(url_for(idx), color)
+        self._set_icon(pid, url_for(idx))
+        return pid
+
+    async def _statuses(self):
+        return [r[0] for r in await self._all("SELECT status FROM shop_emoji_assets")]
+
+    async def _usage(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            return await SE._guild_asset_usage(db, APP, GUILD)
+
+    async def _claim_exists(self):
+        """True once THIS point's attempt holds a claim (orphans from earlier points don't count)."""
+        rows = await self._all("SELECT attempt_id FROM shop_emoji_assets WHERE status='preparing'")
+        return any(r[0] not in self._known_attempts for r in rows)
+
+    def _install(self, stack, point, mode):
+        """Patch the real function for ``point``; it blocks forever (cancel) or raises."""
+        hit, seen = asyncio.Event(), {"n": 0, "inside": False}
+
+        async def trigger():
+            hit.set()
+            if mode == "raise":
+                raise RuntimeError(f"injected failure at {point}")
+            await asyncio.Event().wait()           # parked until the task is cancelled
+
+        if point == "claim_acquisition":
+            real = SE._get_asset
+
+            async def get_asset(*a, **k):
+                if not seen.get("done") and await self._claim_exists():
+                    seen["done"] = True            # first read after the claim was written
+                    await trigger()
+                return await real(*a, **k)
+            stack.enter_context(patch.object(SE, "_get_asset", get_asset))
+        elif point == "alias_write":
+            real = SE._upsert_alias
+
+            async def upsert(*a, **k):
+                if not seen.get("done") and await self._claim_exists():
+                    seen["done"] = True
+                    await trigger()
+                return await real(*a, **k)
+            stack.enter_context(patch.object(SE, "_upsert_alias", upsert))
+        elif point in ("validator_after_claim", "validator_at_boundary"):
+            real = SE._guard_source
+            want = 1 if point == "validator_after_claim" else 2
+
+            async def guard(validate):
+                if await self._claim_exists():
+                    seen["n"] += 1
+                    if seen["n"] == want:
+                        await trigger()
+                return await real(validate)
+            stack.enter_context(patch.object(SE, "_guard_source", guard))
+        else:                                      # final_list: the list inside _create_claimed
+            real_cc, real_list = SE._create_claimed, self.fake.list_emojis
+
+            async def cc(*a, **k):
+                seen["inside"] = True
+                try:
+                    return await real_cc(*a, **k)
+                finally:
+                    seen["inside"] = False
+
+            async def listing():
+                if seen["inside"] and not seen.get("done"):
+                    seen["done"] = True
+                    await trigger()
+                return await real_list()
+            stack.enter_context(patch.object(SE, "_create_claimed", cc))
+            self.fake.list_emojis = listing
+        return hit
+
+    async def _run_point(self, point, mode, idx):
+        import contextlib
+        pid = await self._setup(f"Pre {point} {mode}", idx, (idx % 250, 40, 90, 255))
+        base_creates, base_usage = self.fake.creates, await self._usage()
+        self._known_attempts = {r[0] for r in await self._all(
+            "SELECT attempt_id FROM shop_emoji_assets WHERE status='preparing'")}
+        recovering = lambda statuses: len([x for x in statuses if x in {"preparing", "uncertain"}])
+        base_recovering = recovering(await self._statuses())   # judge this point on its own
+        with contextlib.ExitStack() as stack:
+            hit = self._install(stack, point, mode)
+            task = asyncio.create_task(self._run_pass())
+            if mode == "cancel":
+                await asyncio.wait_for(hit.wait(), 30)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            else:
+                await asyncio.wait_for(task, 60)
+                self.assertTrue(hit.is_set(), "the injected failure never ran")
+        label = f"{point}/{mode}"
+        self.assertEqual(self.fake.creates, base_creates, f"{label}: nothing may be POSTed")
+        self.assertEqual(recovering(await self._statuses()), base_recovering,
+                         f"{label}: an undispatched claim must not stay recovering")
+        self.assertEqual(await self._usage(), base_usage, f"{label}: quota must be released")
+        if mode == "raise":                         # the worker's own retry backoff
+            await self._exec("UPDATE shop_emoji_queue SET next_attempt_at=NULL, state='queued' "
+                             "WHERE product_id=?", (pid,))
+        reports = await self._drain()
+        self.assertEqual(self.fake.creates, base_creates + 1, f"{label}: must converge with one create")
+        self.assertEqual(sum(r["deferred"] for r in reports), 0,
+                         f"{label}: no acknowledgement may be demanded for a never-sent create")
+        self.assertEqual(await self._all("SELECT 1 FROM shop_emoji_queue WHERE product_id=?", (pid,)), [],
+                         f"{label}: queue row stuck")
+        self.assertEqual(await self._usage(), base_usage + 1)
+
+    async def test_cancellation_at_every_pre_dispatch_point_releases_the_claim(self):
+        for n, point in enumerate(self.POINTS):
+            with self.subTest(point=point, mode="cancel"):
+                await self._run_point(point, "cancel", 110 + n)
+
+    async def test_an_exception_at_every_pre_dispatch_point_releases_the_claim(self):
+        for n, point in enumerate(self.POINTS):
+            with self.subTest(point=point, mode="raise"):
+                await self._run_point(point, "raise", 130 + n)
+
+    async def _cancel_during_post(self, completes_remotely, idx):
+        """Park inside create_emoji(), i.e. AFTER dispatch began, then cancel."""
+        pid = await self._setup("Post Cancel", idx, (idx % 250, 90, 40, 255))
+        hit = asyncio.Event()
+        real_create = self.fake.create_emoji
+
+        async def create(name, png, bot_user_id):
+            if completes_remotely:
+                await real_create(name, png, bot_user_id)   # Discord created it...
+            hit.set()
+            await asyncio.Event().wait()                     # ...but we never saw the response
+
+        self.fake.create_emoji = create
+        task = asyncio.create_task(self._run_pass())
+        await asyncio.wait_for(hit.wait(), 30)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.fake.create_emoji = real_create
+        return pid
+
+    async def test_guard_contract_a_dispatched_claim_is_never_released_and_release_happens_once(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            async def claim(tag):
+                h = SE.content_identity(f"guard-contract-{tag}".encode())
+                _, c, _ = await SE._insert_asset_or_claim(db, APP, GUILD, h, [], BOT_ID,
+                                                          emoji_name=f"guard_{tag}")
+                return h, c
+
+            # Before dispatch: cancellation releases the claim.
+            h1, c1 = await claim("a")
+            with self.assertRaises(asyncio.CancelledError):
+                async with SE._PreDispatch(db, c1):
+                    raise asyncio.CancelledError()
+            self.assertEqual((await SE._get_asset(db, APP, h1))["status"], "failed")
+
+            # After dispatch began: the very same exit must leave the claim untouched.
+            h2, c2 = await claim("b")
+            c2["dispatch_started"] = True
+            for exc in (asyncio.CancelledError(), RuntimeError("late"), SE.StalePreparation()):
+                with self.assertRaises(type(exc)):
+                    async with SE._PreDispatch(db, c2):
+                        raise exc
+            kept = await SE._get_asset(db, APP, h2)
+            self.assertEqual((kept["status"], kept["attempt_id"]), ("preparing", c2["attempt_id"]))
+
+            # Nested guards over one claim release it exactly once.
+            h3, c3 = await claim("c")
+            calls = []
+            real = SE._release_unposted_claim
+
+            async def counting(*a, **k):
+                calls.append(1)
+                return await real(*a, **k)
+            with patch.object(SE, "_release_unposted_claim", counting):
+                with self.assertRaises(RuntimeError):
+                    async with SE._PreDispatch(db, c3):
+                        async with SE._PreDispatch(db, c3):
+                            raise RuntimeError("boom")
+            self.assertEqual(len(calls), 1)
+
+    async def test_a_second_cancellation_during_claim_release_cannot_abandon_the_cleanup(self):
+        """Cancel once (release starts), cancel again while it runs: the release must still finish."""
+        import contextlib
+        pid = await self._setup("Double Cancel", 160, (160, 40, 40, 255))
+        started, gate = asyncio.Event(), asyncio.Event()
+        real_release = SE._release_unposted_claim
+
+        async def slow_release(*a, **k):
+            started.set()
+            await gate.wait()                      # holds the release open between the two cancels
+            return await real_release(*a, **k)
+        task = None
+        try:
+            with contextlib.ExitStack() as stack:
+                hit = self._install(stack, "final_list", "cancel")
+                stack.enter_context(patch.object(SE, "_release_unposted_claim", slow_release))
+                task = asyncio.create_task(self._run_pass())
+                await asyncio.wait_for(hit.wait(), 30)
+                task.cancel()                                          # 1st: release begins
+                await asyncio.wait_for(started.wait(), 30)
+                task.cancel()                                          # 2nd: parent is waiting on it
+                await asyncio.sleep(0.05)
+                self.assertFalse(task.done(), "the parent left while its cleanup was still running")
+                gate.set()
+                with self.assertRaises(asyncio.CancelledError):        # cancellation is not swallowed
+                    await asyncio.wait_for(task, 30)
+        finally:
+            gate.set()
+            await asyncio.sleep(0.05)
+        self.assertEqual([s for s in await self._statuses() if s in {"preparing", "uncertain"}], [],
+                         "the claim must be released before the connection is closed")
+        self.assertEqual((self.fake.creates, await self._usage()), (0, 0))
+
+    async def test_finish_cleanup_survives_repeated_cancellation_and_still_raises_it(self):
+        done = []
+
+        async def cleanup():
+            await asyncio.sleep(0.05)
+            done.append("finished")
+            return "result"
+        task = asyncio.create_task(SE._finish_cleanup(cleanup()))
+        await asyncio.sleep(0)
+        for _ in range(3):
+            task.cancel()
+            await asyncio.sleep(0.005)
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(done, ["finished"])
+        # Without cancellation it behaves like a plain await, result and exceptions included.
+        self.assertEqual(await SE._finish_cleanup(cleanup()), "result")
+
+        async def failing():
+            raise ValueError("cleanup failed")
+        with self.assertRaises(ValueError):
+            await SE._finish_cleanup(failing())
+
+        # A cancellation that arrived while the cleanup then failed is still not swallowed.
+        async def fails_late():
+            await asyncio.sleep(0.03)
+            raise ValueError("late failure")
+        task = asyncio.create_task(SE._finish_cleanup(fails_late()))
+        await asyncio.sleep(0.005)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+    async def test_cancellation_after_dispatch_never_releases_an_unrecorded_request(self):
+        pid = await self._cancel_during_post(False, 150)
+        self.assertEqual(await self._statuses(), ["preparing"],
+                         "a request may have been sent: the claim must NOT be released")
+        # Recovery: absence from one listing is no proof; it ages into uncertain, never re-POSTs blindly.
+        await self._exec("UPDATE shop_emoji_assets SET attempt_started_at='2000-01-01T00:00:00+00:00' "
+                         "WHERE status='preparing'")
+        await self._exec("UPDATE shop_emoji_queue SET next_attempt_at=NULL, state='queued' "
+                         "WHERE product_id=?", (pid,))
+        reports = await self._drain()
+        self.assertEqual(self.fake.creates, 0, "no blind second POST after a possibly-sent one")
+        self.assertEqual(await self._statuses(), ["uncertain"])
+        self.assertGreaterEqual(sum(r["deferred"] for r in reports), 1)
+
+    async def test_cancellation_after_a_completed_request_is_adopted_not_duplicated(self):
+        pid = await self._cancel_during_post(True, 151)
+        self.assertEqual(await self._statuses(), ["preparing"])
+        self.assertEqual(len(self.fake.remote), 1, "Discord did create the emoji")
+        await self._exec("UPDATE shop_emoji_queue SET next_attempt_at=NULL, state='queued' "
+                         "WHERE product_id=?", (pid,))
+        await self._drain()
+        self.assertEqual(len(self.fake.remote), 1, "recovery must adopt, never POST a duplicate")
+        self.assertEqual(await self._statuses(), ["ready"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
