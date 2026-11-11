@@ -37,6 +37,7 @@ decision, not a patch), **UNVERIFIED** (no honest way to test it here),
 | `/api/*` JSON error contract (404/405/500, no HTML, no internals) | **FIXED AND PROVEN** | `dashboard/app.py` handlers switch on the `/api` prefix; `scripts/test_api_error_contract.py` — 9 tests, 5 failures + 1 error without the change |
 | Multi-process SQLite/WAL behaviour (queue CAS, `BEGIN IMMEDIATE`, busy timeout) | **TESTED AND PROVEN — no code change needed** | `scripts/test_shop_emoji_multiprocess.py` — 7 tests over independent processes; stale generation cannot complete newer intent; one winner per generation/content hash; no lost writes |
 | Application capacity (`len(remote)`) and internal guild quota | **VERIFIED, no change** | Discord documents 2000 app-owned emoji and an unpaginated `items` list; boundary tests already existed at `LIMIT` and `LIMIT-1` |
+| Worker takeover / stale-worker writes (B1: `attempt_id` fencing) | **VERIFIED AND NOW PROVEN — no code change needed** | The fence already existed in `_adopt_asset`/`_mark_*`; new `test_a_stale_worker_cannot_adopt_into_a_newer_attempt` holds attempt-1, lets another process re-claim as attempt-2, and asserts the stale create reports `late_completion` and binds nothing. Dropping the `attempt_id` condition reports `created` instead |
 | 429 during create (ambiguity, budget, scheduling) | **VERIFIED, already covered** | `PrASafetyWorkerTests` asserts `uncertain` asset + `retry` row + `attempts == 0` + schedule ≥ `retry_after` + no further request in the pass |
 | Cross-guild name/privacy (a shared emoji's name carries one guild's product label) | **CONFIRMED OPEN / DESIGN REQUIRED** | Reproduced by reading `product_names_for_asset` (all guilds) + `canonical_label_for_asset`; the trade-offs are listed under "Round-5 open items" — the fix changes visible names, so it needs your decision |
 | Delivery-overlay file `__PR-A_MANIFEST__.txt` in the repository | **FIXED** | Removed; the file itself said "not part of the project: do not commit it" and named the older base `64e4871` / PR-A commit `4d00a95` |
@@ -49,7 +50,7 @@ decision, not a patch), **UNVERIFIED** (no honest way to test it here),
 |---|---|
 | `utils/shop_emoji.py` | `delete_confirmed_duplicate()` now asks whether the target emoji ID is bound to **any** asset row of the application (any content hash, any creator guild) immediately before `DELETE`, and refuses with `emoji_in_use`. `preflight_prepared_emoji_ids()` now resolves every list-omitted ID with Get Application Emoji: `present` continues, `absent` is `product_emoji_missing`, `unknown` is the new `product_emoji_presence_unknown`. Comment at the create boundary records *why* `len(remote)` is the authoritative capacity measure. |
 | `dashboard/app.py` | One central error-contract switch: `/api/*` gets `{"success": false, "code", "error"}` for 400/403/404/405/500 (500 is generic and logged); HTML pages keep their rendered pages byte-for-byte. |
-| `scripts/test_shop_emoji.py` | +7 tests: application-wide binding guard (refused / allowed / still guild-gated / recorded ID in a non-ready row) and publication preflight presence semantics (present-by-get, unknown, 429). |
+| `scripts/test_shop_emoji.py` | +8 tests: application-wide binding guard (refused / allowed / still guild-gated / recorded ID in a non-ready row) and publication preflight presence semantics (present-by-get, unknown, 429). |
 | `scripts/test_api_error_contract.py` | New file, 9 tests. |
 | `scripts/test_shop_emoji_multiprocess.py` | New file, 7 tests over real subprocesses + the deterministic two-connection WAL case. |
 | `__PR-A_MANIFEST__.txt` | Deleted. |
@@ -718,7 +719,7 @@ Python 3.11.2, SQLite 3.40.1. Exit codes are the test process's own.
 
 | Command | Result | Exit |
 |---|---|---|
-| `PYTHONPATH=. python -m pytest scripts/test_shop_emoji.py -q` | **209 passed** (was 202) | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_emoji.py -q` | **210 passed** (was 202) | 0 |
 | `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 173 — OK** | 0 |
 | `PYTHONPATH=. python scripts/test_api_error_contract.py` | **Ran 9 — OK** (new) | 0 |
 | `PYTHONPATH=. python scripts/test_shop_emoji_multiprocess.py` | **Ran 7 — OK** (new) | 0 |
@@ -748,6 +749,7 @@ restored — the commands are in the commit messages):
 | application-wide binding check | `test_duplicate_delete_refuses_an_id_bound_to_another_guilds_asset`: `DID NOT RAISE ShopEmojiError` — the DELETE proceeded |
 | binding protection for non-ready rows | `test_duplicate_delete_refuses_an_id_the_asset_row_still_records` fails |
 | Get-based presence confirmation | the two presence tests report `product_emoji_missing` instead of `product_emoji_presence_unknown` / success |
+| `attempt_id` CAS in `_adopt_asset` | `test_a_stale_worker_cannot_adopt_into_a_newer_attempt` reports `created` and binds the stale emoji into the newer attempt |
 | `/api` JSON error contract | 5 failures + 1 error in `scripts/test_api_error_contract.py` |
 
 ### Round-4 test → fix map (each was RED before its fix, GREEN after)
