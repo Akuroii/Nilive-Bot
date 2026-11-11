@@ -1,17 +1,84 @@
-# PR #122 — Acceptance Report (audit round 3)
+# PR #122 — Acceptance Report (audit round 3, extended by round 5)
 
 Same PR, same branch. **OPEN / NOT MERGED / NOT DEPLOYED.**
 
 | | |
 |---|---|
-| Branch | `arena/5e11d3cf-nilive-bot` |
-| Audited HEAD | `1f73000293a4c527c39e5ee2bc1fd0f7bffbc503` |
+| PR head branch | `arena/5e11d3cf-nilive-bot` |
+| PR head (round 5 started here) | `bb15cd88d89e6a960959bf23a5b70f50892839a1` |
+| Round-5 commits live on | `arena/d6852d6a-nilive-bot`, branched from `bb15cd88…` — opening a PR back into the PR head branch keeps PR #122 reviewable without rewriting its history |
+| HEAD audited in round 3 (now stale) | `1f73000293a4c527c39e5ee2bc1fd0f7bffbc503` |
 | Base | `e0ca73853be97c5ebbf1e3dd66e70c76595ecd52` |
+| Round 3 report written against | `1f73000` — statements below that depend on a line number or a count were re-checked in round 5 where they matter |
+
+Everything below is history plus the current contract. **Round 5 adds a status
+table that distinguishes what is proven from what is not, and it is the section
+to trust first.**
 
 No replacement implementation, no new branch, no rewrite of the queue/worker/
 preparation/reconciliation core. Inventory (`cogs/wallet.py`), Rank
 (`utils/rank_card_data.py`) and `utils/rank_card_renderer.py` remain
 **byte-identical to base**.
+
+---
+
+## Round 5 — verification status (audited `bb15cd8`)
+
+Status vocabulary, used strictly: **FIXED AND PROVEN** (code change + a test that
+fails without it), **PARTIALLY FIXED** (a proven part, a proven-open remainder),
+**CONFIRMED OPEN** (reproduced, not fixed), **DESIGN REQUIRED** (needs a product
+decision, not a patch), **UNVERIFIED** (no honest way to test it here),
+**NOT APPLICABLE**.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Shared-resource deletion safety (an emoji ID bound to *another* guild's asset) | **FIXED AND PROVEN** | `emoji_name_conflict` check immediately before `DELETE`; `test_duplicate_delete_refuses_an_id_bound_to_another_guilds_asset` fails with `DID NOT RAISE` when the check is removed |
+| Publication preflight: a list omission is not absence | **FIXED AND PROVEN** | `get_emoji` decides `present`/`absent`/`unknown` per missing ID; new code `product_emoji_presence_unknown`; 2 new tests, both red without the fix |
+| `/api/*` JSON error contract (404/405/500, no HTML, no internals) | **FIXED AND PROVEN** | `dashboard/app.py` handlers switch on the `/api` prefix; `scripts/test_api_error_contract.py` — 9 tests, 5 failures + 1 error without the change |
+| Multi-process SQLite/WAL behaviour (queue CAS, `BEGIN IMMEDIATE`, busy timeout) | **TESTED AND PROVEN — no code change needed** | `scripts/test_shop_emoji_multiprocess.py` — 7 tests over independent processes; stale generation cannot complete newer intent; one winner per generation/content hash; no lost writes |
+| Application capacity (`len(remote)`) and internal guild quota | **VERIFIED, no change** | Discord documents 2000 app-owned emoji and an unpaginated `items` list; boundary tests already existed at `LIMIT` and `LIMIT-1` |
+| 429 during create (ambiguity, budget, scheduling) | **VERIFIED, already covered** | `PrASafetyWorkerTests` asserts `uncertain` asset + `retry` row + `attempts == 0` + schedule ≥ `retry_after` + no further request in the pass |
+| Cross-guild name/privacy (a shared emoji's name carries one guild's product label) | **CONFIRMED OPEN / DESIGN REQUIRED** | Reproduced by reading `product_names_for_asset` (all guilds) + `canonical_label_for_asset`; the trade-offs are listed under "Round-5 open items" — the fix changes visible names, so it needs your decision |
+| Delivery-overlay file `__PR-A_MANIFEST__.txt` in the repository | **FIXED** | Removed; the file itself said "not part of the project: do not commit it" and named the older base `64e4871` / PR-A commit `4d00a95` |
+| `utils/level_claims.py` concurrent `init_db` | **CONFIRMED OPEN (pre-existing, out of scope)** | Reproduced from two real processes: `duplicate column name: operation_id`. Byte-identical to base; not touched here |
+| Live Discord API / Railway runtime | **UNVERIFIED** | No real emoji is created or deleted from this environment, by instruction. Every Discord statement above is a mocked-API statement |
+
+### Round-5 code changes
+
+| File | Change |
+|---|---|
+| `utils/shop_emoji.py` | `delete_confirmed_duplicate()` now asks whether the target emoji ID is bound to **any** asset row of the application (any content hash, any creator guild) immediately before `DELETE`, and refuses with `emoji_in_use`. `preflight_prepared_emoji_ids()` now resolves every list-omitted ID with Get Application Emoji: `present` continues, `absent` is `product_emoji_missing`, `unknown` is the new `product_emoji_presence_unknown`. Comment at the create boundary records *why* `len(remote)` is the authoritative capacity measure. |
+| `dashboard/app.py` | One central error-contract switch: `/api/*` gets `{"success": false, "code", "error"}` for 400/403/404/405/500 (500 is generic and logged); HTML pages keep their rendered pages byte-for-byte. |
+| `scripts/test_shop_emoji.py` | +7 tests: application-wide binding guard (refused / allowed / still guild-gated / recorded ID in a non-ready row) and publication preflight presence semantics (present-by-get, unknown, 429). |
+| `scripts/test_api_error_contract.py` | New file, 9 tests. |
+| `scripts/test_shop_emoji_multiprocess.py` | New file, 7 tests over real subprocesses + the deterministic two-connection WAL case. |
+| `__PR-A_MANIFEST__.txt` | Deleted. |
+
+### Round-5 open items (not fixed here, and why)
+
+1. **Shared-emoji names can carry another guild's product label** (C3). The alias
+   table is content-keyed and shared, and `product_names_for_asset()` returns the
+   names of *every* guild bound to that content, so `canonical_product_label()`
+   can pick another tenant's listing name. Severity is low (an emoji *name* is
+   visible only where the emoji itself is already used, and the name is
+   cosmetic — identity is the content hash), but it is a real cross-tenant
+   detail. Options, all of which change visible names: (a) hash-only names for
+   content bound to more than one guild; (b) names from the creator guild's
+   labels only (rejected by instruction as an automatic default); (c) leave as
+   is and document. Needs your decision.
+2. **Residual race on the deletion guard.** The binding check, the fresh list and
+   the ownership check run before the `DELETE`; another process could adopt that
+   exact ID in between. The window is one HTTP round trip and requires an owner
+   to have confirmed `DELETE <id>`; closing it completely would need an
+   application-wide lease, which this feature does not have. Documented, not
+   fixed.
+3. **`utils/level_claims.py`** concurrent-init race (see the table).
+4. **Everything Discord-facing is mocked.** Nothing here proves live Discord
+   behaviour; the round-5 tests prove *our* handling of documented responses.
+5. **Cross-process capacity.** `len(remote)` is read from one list snapshot;
+   two processes can each believe there is one slot left. Discord's own 400 is
+   the authority, and it is classified as a definite rejection, so the outcome is
+   a reported failure, not a duplicate.
 
 ---
 
@@ -643,6 +710,45 @@ too, so it is **pre-existing and unchanged by this PR**; its two acorn-backed ch
 not run. With acorn present those checks pass (177 passed, 0 failed) — verified once in a
 throwaway copy, not added as a dependency here to avoid touching the dashboard's runtime
 surface.
+
+### Round-5 test evidence (commands, real exit codes)
+
+Run from the repository root on 2026-11-11 at `bb15cd8` + the round-5 commits,
+Python 3.11.2, SQLite 3.40.1. Exit codes are the test process's own.
+
+| Command | Result | Exit |
+|---|---|---|
+| `PYTHONPATH=. python -m pytest scripts/test_shop_emoji.py -q` | **209 passed** (was 202) | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 173 — OK** | 0 |
+| `PYTHONPATH=. python scripts/test_api_error_contract.py` | **Ran 9 — OK** (new) | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_multiprocess.py` | **Ran 7 — OK** (new) | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_migration.py` | Ran 6 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_api.py` | Ran 8 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_json_body_api.py` | Ran 1 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_publisher_api.py` | Ran 19 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_publication_reconcile.py` | Ran 30 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_categories_api.py` | Ran 16 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_designs_api.py` | Ran 22 — OK | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_publications.py -q` | 23 passed | 0 |
+| `PYTHONPATH=. python -m pytest test_db_migration_concurrency.py -q` | 9 passed, 2 subtests | 0 |
+| `PYTHONPATH=. python scripts/test_shop_publisher.py` | 115/115 passed | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_options.py -q` | 5 passed | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_product_management.py -q` | 50 passed, 8 subtests | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_icon_resolution.py -q` | 13 passed | 0 |
+
+Not run in this round: the jsdom/`npm test` harnesses (no frontend file was
+touched by round 5; they were green in round 4), and anything that would touch
+live Discord or Railway.
+
+**Removal proofs** (the fix is reverted, the suite is re-run, the fix is
+restored — the commands are in the commit messages):
+
+| Fix reverted | Observed failure |
+|---|---|
+| application-wide binding check | `test_duplicate_delete_refuses_an_id_bound_to_another_guilds_asset`: `DID NOT RAISE ShopEmojiError` — the DELETE proceeded |
+| binding protection for non-ready rows | `test_duplicate_delete_refuses_an_id_the_asset_row_still_records` fails |
+| Get-based presence confirmation | the two presence tests report `product_emoji_missing` instead of `product_emoji_presence_unknown` / success |
+| `/api` JSON error contract | 5 failures + 1 error in `scripts/test_api_error_contract.py` |
 
 ### Round-4 test → fix map (each was RED before its fix, GREEN after)
 
