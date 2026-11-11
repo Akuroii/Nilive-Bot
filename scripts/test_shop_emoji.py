@@ -2102,3 +2102,34 @@ def test_duplicate_delete_refuses_an_id_the_asset_row_still_records(shop):
     assert error.value.code == "bound_emoji_protected"
     assert shop.fake.delete_calls == []
     assert asset_row(shop, content_hash)["status"] == "missing"
+
+
+# ── Takeover: a stale worker cannot write after ownership moved (B1) ────────
+# Ownership of an asset attempt is the `attempt_id` compare-and-swap. A worker
+# that dispatched a create and then lost the row (another process re-claimed it)
+# must not adopt its result into the newer attempt: it reports `late_completion`
+# and leaves the row exactly as the new owner wrote it.
+
+def test_a_stale_worker_cannot_adopt_into_a_newer_attempt(shop):
+    content_hash = put_asset(shop, status="preparing", attempt="attempt-1")
+    stale_asset = dict(asset_row(shop, content_hash), claim_origin="new")
+    # Another process takes over: same content, a NEW attempt id.
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_emoji_assets SET attempt_id='attempt-2' "
+                   "WHERE application_id=? AND content_hash=?", (APP, content_hash))
+        db.commit()
+    shop.fake.remote = []
+
+    async def stale_create():
+        async with SE.aiosqlite.connect(shop.path) as db:
+            return await SE._create_claimed(db, shop.fake, stale_asset, PNG1, BOT)
+
+    result = run(stale_create())
+    assert result["code"] == "late_completion", result
+    assert len(shop.fake.create_calls) == 1
+    # The newer attempt is untouched: still preparing, still owned by attempt-2,
+    # and no emoji ID was bound from the stale worker's result.
+    current = asset_row(shop, content_hash)
+    assert current["status"] == "preparing"
+    assert current["attempt_id"] == "attempt-2"
+    assert current["emoji_id"] is None
