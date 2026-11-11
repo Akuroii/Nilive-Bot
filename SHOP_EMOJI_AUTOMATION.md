@@ -138,6 +138,19 @@ every deletion) to close a window our own paths cannot enter. That trade-off is
 yours; the code is unchanged in that respect and the status stays **PARTIALLY
 FIXED**.
 
+**If you want the lease instead**, the smallest version that would actually close
+it is: one additive table
+`shop_emoji_reservations(application_id, emoji_id, content_hash, expires_at,
+PRIMARY KEY (application_id, emoji_id))`; the delete path inserts the reservation
+inside its `BEGIN IMMEDIATE` transaction *before* the binding check, and every
+adopt path (`_adopt_asset`, `_insert_asset_or_claim`) refuses an `emoji_id` whose
+reservation is still live. Expiry replaces cleanup, so a crashed delete cannot
+block an ID forever, and a refused adopt just reports `uncertain` as it does
+today. That is roughly a table, one writer and two readers — but it is a new
+durable coordination primitive on the same SQLite file, so it needs its own
+crash/expiry tests and is not something to slip into this round. Say the word and
+it becomes its own commit; otherwise this stays as written.
+
 ---
 
 ## Behaviour reference (PR-A safety hardening)
