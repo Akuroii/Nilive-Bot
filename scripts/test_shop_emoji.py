@@ -2104,13 +2104,16 @@ def test_duplicate_delete_refuses_an_id_the_asset_row_still_records(shop):
     assert asset_row(shop, content_hash)["status"] == "missing"
 
 
-# ── Takeover: a stale worker cannot write after ownership moved (B1) ────────
-# Ownership of an asset attempt is the `attempt_id` compare-and-swap. A worker
-# that dispatched a create and then lost the row (another process re-claimed it)
-# must not adopt its result into the newer attempt: it reports `late_completion`
-# and leaves the row exactly as the new owner wrote it.
+# ── Takeover: a stale attempt snapshot cannot write (B1, same process) ──────
+# Ownership of an asset attempt is the `attempt_id` compare-and-swap. This is the
+# CAS-level regression: the takeover is simulated by writing the newer attempt id
+# directly, so it proves the fence and NOT that a second process performed the
+# takeover. The cross-process proof is
+# `scripts/test_shop_emoji_multiprocess.py::
+#  test_a_second_process_takes_over_and_the_stale_worker_cannot_write`,
+# where a child process ages and re-claims the row before the stale create runs.
 
-def test_a_stale_worker_cannot_adopt_into_a_newer_attempt(shop):
+def test_a_stale_attempt_snapshot_cannot_adopt_into_a_newer_attempt_same_process(shop):
     content_hash = put_asset(shop, status="preparing", attempt="attempt-1")
     stale_asset = dict(asset_row(shop, content_hash), claim_origin="new")
     # Another process takes over: same content, a NEW attempt id.

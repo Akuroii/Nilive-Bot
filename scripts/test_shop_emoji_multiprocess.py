@@ -43,6 +43,8 @@ os.environ.setdefault("SECRET_KEY", "multiprocess-scratch-0123456789abcdef")
 os.environ.setdefault("NERO_ENVIRONMENT", "test")
 
 GUILD, PRODUCT = 9101, 7
+APP = "123456789012345678"
+BOT_ID = "999999999999999999"
 STORM_ITERATIONS = 60
 CHILD_TIMEOUT = 120
 
@@ -70,6 +72,7 @@ GO = {go!r}
 GUILD = {guild!r}
 PRODUCT = {product!r}
 ITERATIONS = {iterations!r}
+CONTENT_HASH = {content_hash!r}
 
 
 def touch(marker):
@@ -151,6 +154,19 @@ async def main(role):
         print(json.dumps({{"role": role, "claimed": created, "errors": errors}}))
         return
 
+    if role == "takeover_claim":
+        # A SECOND process performs the takeover of a stale attempt: it ages the
+        # claim (as the read-only reconcile does) and then re-claims the same
+        # content under a brand-new attempt id.
+        async with aiosqlite.connect(PATH, timeout=5) as db:
+            stale = await SE._get_asset(db, {app!r}, CONTENT_HASH)
+            aged = await SE._mark_uncertain(db, stale, "claim aged by another process")
+            claimed = await SE._claim_existing(db, aged, GUILD, allow_uncertain=True)
+        print(json.dumps({{"role": role, "claimed": bool(claimed),
+                          "attempt": (claimed or {{}}).get("attempt_id"),
+                          "status": (claimed or {{}}).get("status")}}))
+        return
+
     if role == "ensure_schema":
         # Two processes initialising ONE file at the same time: the Dashboard and
         # the Bot really do start together on a deploy, and these additive
@@ -177,7 +193,8 @@ def _wait_for(markers, timeout=CHILD_TIMEOUT):
             time.sleep(0.005)
 
 
-def _run_children(path, roles, ready=None, go=None, app=None, handshake=True):
+def _run_children(path, roles, ready=None, go=None, app=None, handshake=True,
+                  content_hash=""):
     """Start every role as an INDEPENDENT process and return parsed results."""
     folder = Path(path).parent
     ready_paths = [str(folder / f"ready-{index}") for index in range(len(roles))]
@@ -187,7 +204,7 @@ def _run_children(path, roles, ready=None, go=None, app=None, handshake=True):
         [sys.executable, "-c", CHILD_SOURCE.format(
             root=str(ROOT), path=str(path), ready=ready_paths[index], go=go,
             guild=GUILD, product=PRODUCT, iterations=STORM_ITERATIONS,
-            app=app or "123456789012345678"), role],
+            app=app or "123456789012345678", content_hash=content_hash), role],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         for index, role in enumerate(roles)]
     if go and handshake:
@@ -201,6 +218,26 @@ def _run_children(path, roles, ready=None, go=None, app=None, handshake=True):
         assert child.returncode == 0, f"child failed: {err}"
         results.append(json.loads(out.strip().splitlines()[-1]))
     return results
+
+
+class _CreateOnlyFake:
+    """The two Discord calls `_create_claimed` makes, nothing else."""
+
+    def __init__(self, application_id, name):
+        self.application_id = application_id
+        self.remote = []
+        self.created = []
+        self._name = name
+
+    async def list_emojis(self):
+        return list(self.remote)
+
+    async def create_emoji(self, name, final_png, bot_user_id):
+        emoji = {"id": "7001", "name": name, "animated": False,
+                 "application_id": self.application_id, "user": {"id": bot_user_id}}
+        self.created.append(emoji)
+        self.remote.append(emoji)
+        return emoji
 
 
 class MultiprocessQueueTests(unittest.TestCase):
@@ -245,7 +282,7 @@ class MultiprocessQueueTests(unittest.TestCase):
         source = CHILD_SOURCE.format(
             root=str(ROOT), path=str(self.path), ready=str(ready or self.ready),
             go=str(self.go), guild=GUILD, product=PRODUCT,
-            iterations=STORM_ITERATIONS, app="123456789012345678")
+            iterations=STORM_ITERATIONS, app=APP, content_hash="")
         return subprocess.Popen(
             [sys.executable, "-c", source, role],
             env=dict(os.environ, DATABASE_PATH=str(self.path), PYTHONPATH=str(ROOT)),
@@ -356,7 +393,95 @@ class MultiprocessQueueTests(unittest.TestCase):
         self._integrity()
 
 
-    # ── 5. both processes may initialise the same file at once ────────────
+    # ── 5. a SECOND process takes over; the stale worker cannot write ──────
+    def _create_asset_tables(self):
+        with sqlite3.connect(str(self.path)) as db:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS shop_emoji_assets (
+                    application_id TEXT NOT NULL, content_hash TEXT NOT NULL,
+                    emoji_name TEXT NOT NULL, emoji_id TEXT,
+                    animated INTEGER NOT NULL DEFAULT 0, creator_guild_id INTEGER,
+                    pipeline_version TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN
+                        ('preparing','ready','uncertain','missing','failed')),
+                    attempt_id TEXT, attempt_started_at TEXT, quarantine_until TEXT,
+                    last_error TEXT, managed_name INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (application_id, content_hash))
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS shop_emoji_url_aliases (
+                    application_id TEXT NOT NULL, guild_id INTEGER NOT NULL,
+                    source_url TEXT NOT NULL, content_hash TEXT NOT NULL,
+                    recovery_ack_required INTEGER NOT NULL DEFAULT 0,
+                    recovery_not_before TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (application_id, guild_id, source_url))
+            """)
+            db.commit()
+
+    def _asset_row(self, content_hash):
+        from utils import shop_emoji as SE
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT {', '.join(SE._ASSET_FIELDS)} FROM shop_emoji_assets "
+                "WHERE application_id=? AND content_hash=?", (APP, content_hash)).fetchone()
+        return dict(row) if row else None
+
+    def test_a_second_process_takes_over_and_the_stale_worker_cannot_write(self):
+        """The takeover really happens in ANOTHER PROCESS.
+
+        Process A claimed the content (attempt-A) and stalls. Process B ages the
+        claim and re-claims it (new attempt id) - `_claim_existing`, the same
+        path an explicit owner retry takes. Only then does A finish its create.
+        A must not bind its result into B's attempt.
+        """
+        from utils import shop_emoji as SE
+
+        self._create_asset_tables()
+        content_hash = "d" * 64
+        with sqlite3.connect(str(self.path)) as db:
+            db.execute(
+                "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,"
+                "animated,creator_guild_id,pipeline_version,status,attempt_id,attempt_started_at) "
+                "VALUES (?,?,?,0,?,?,'preparing','attempt-A',?)",
+                (APP, content_hash, SE.deterministic_emoji_name(content_hash), GUILD,
+                 SE.PIPELINE_VERSION, SE._iso()))
+            db.commit()
+        stale_asset = dict(self._asset_row(content_hash), claim_origin="new")
+
+        results = _run_children(self.path, ["takeover_claim"], app=APP,
+                                handshake=False, content_hash=content_hash)
+        takeover = results[0]
+        self.assertTrue(takeover["claimed"], takeover)
+        self.assertEqual(takeover["status"], "preparing")
+        self.assertNotEqual(takeover["attempt"], "attempt-A")
+        self.assertEqual(self._asset_row(content_hash)["attempt_id"], takeover["attempt"],
+                         "the child process did not own the row after the takeover")
+
+        # Process A finally completes its POST, holding the pre-takeover snapshot.
+        result = asyncio.run(self._stale_create(stale_asset, content_hash))
+        self.assertEqual(result["code"], "late_completion", result)
+
+        row = self._asset_row(content_hash)
+        self.assertEqual(row["attempt_id"], takeover["attempt"],
+                         "the stale worker overwrote the new owner's attempt")
+        self.assertEqual(row["status"], "preparing")
+        self.assertIsNone(row["emoji_id"],
+                          "the stale worker bound its emoji into the new attempt")
+        self._integrity()
+
+    async def _stale_create(self, stale_asset, content_hash):
+        from utils import shop_emoji as SE
+        import aiosqlite
+        fake = _CreateOnlyFake(APP, SE.deterministic_emoji_name(content_hash))
+        async with aiosqlite.connect(str(self.path)) as db:
+            return await SE._create_claimed(db, fake, stale_asset, b"final-normalized-png",
+                                            BOT_ID)
+
+    # ── 6. both processes may initialise the same file at once ────────────
     def test_two_processes_can_run_the_additive_migrations_together(self):
         """The emoji migrations specifically (``ensure_shop_emoji_schema``).
 
