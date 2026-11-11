@@ -2133,3 +2133,79 @@ def test_a_stale_worker_cannot_adopt_into_a_newer_attempt(shop):
     assert current["status"] == "preparing"
     assert current["attempt_id"] == "attempt-2"
     assert current["emoji_id"] is None
+
+
+# ── C1: the row must not change while the duplicate is being verified ───────
+# The fresh list call suspends the coroutine, so another process (or another
+# task in this one) can bind this content to one of the same-named emojis while
+# the delete is in flight. The delete therefore re-reads the row immediately
+# before DELETE and refuses if the decision's inputs moved.
+
+def _mutate_during_list(shop, sql, params):
+    """Deterministically run ``sql`` inside the fake's list call."""
+    async def hook():
+        with sqlite3.connect(shop.path) as db:
+            db.execute(sql, params)
+            db.commit()
+    shop.fake.list_hook = hook
+
+
+def test_delete_refuses_when_the_asset_is_bound_after_the_fresh_list(shop):
+    content_hash = put_asset(shop, status="uncertain", emoji_id=None)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+    _mutate_during_list(
+        shop,
+        "UPDATE shop_emoji_assets SET status='ready', emoji_id='3001', attempt_id=NULL "
+        "WHERE application_id=? AND content_hash=?", (APP, content_hash))
+
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert error.value.code == "asset_changed_during_delete"
+    assert error.value.status == 409
+    assert shop.fake.delete_calls == []
+    assert asset_row(shop, content_hash)["emoji_id"] == "3001"
+
+
+def test_delete_refuses_when_another_writer_binds_the_target_id_mid_flight(shop):
+    content_hash = put_asset(shop, status="uncertain", emoji_id=None)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+    _mutate_during_list(
+        shop,
+        "UPDATE shop_emoji_assets SET status='ready', emoji_id='3002', attempt_id=NULL "
+        "WHERE application_id=? AND content_hash=?", (APP, content_hash))
+
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert error.value.code == "asset_changed_during_delete"
+    assert shop.fake.delete_calls == []
+    assert asset_row(shop, content_hash)["emoji_id"] == "3002"
+
+
+def test_delete_still_succeeds_when_nothing_moved(shop):
+    # Control for the two cases above: an unchanged row is deleted as before.
+    content_hash = put_asset(shop, status="ready", emoji_id="3001", attempt=None)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+    deleted = run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert deleted["deleted_emoji_id"] == "3002"
+    assert shop.fake.delete_calls == ["3002"]
+
+
+def test_two_same_named_emojis_can_never_be_adopted_together(shop):
+    """The invariant the delete guard leans on: adoption needs a UNIQUE match.
+
+    While two same-named emojis exist, no path may bind either of them, which is
+    why deleting the unbound duplicate cannot race with its own adoption.
+    """
+    content_hash = put_asset(shop, status="uncertain", emoji_id=None)
+    first, second = remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)
+    shop.fake.remote = [first, second]
+    result = run(SE.reconcile_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "uncertain" and result["duplicates"] == ["3001", "3002"]
+    assert asset_row(shop, content_hash)["emoji_id"] is None
+    assert shop.fake.create_calls == [] and shop.fake.delete_calls == []
+
+    # With the duplicate gone the survivor becomes adoptable - and it is the
+    # survivor, never the emoji that was deleted.
+    shop.fake.remote = [first]
+    adopted = run(SE.reconcile_product_emojis(GUILD, [1]))["results"][0]
+    assert adopted["status"] == "ready" and adopted["emoji_id"] == "3001"

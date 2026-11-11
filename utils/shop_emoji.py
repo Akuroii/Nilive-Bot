@@ -2405,6 +2405,25 @@ async def delete_confirmed_duplicate(guild_id, content_hash, emoji_id, *, confir
                         f"({bound_elsewhere[:12]}...); deleting it would break that consumer.",
                         code="emoji_in_use", status=409,
                         details={"content_hash": bound_elsewhere})
+                # ── ROW-UNCHANGED RE-CHECK ── The list call above suspended this
+                # coroutine, so another process (or another task in this one) may
+                # have moved this asset while it was in flight - for example a
+                # reconcile that bound THIS content to one of the two same-named
+                # emojis. Deleting on the strength of a stale snapshot would then
+                # remove a row's own bound ID. Re-read the row and require the
+                # three fields the decision was based on to be unchanged; both
+                # reads and the DELETE below are adjacent, with no Discord call
+                # between them, which bounds the remaining window to one indexed
+                # SELECT.
+                current = await _get_asset(db, discord.application_id, content_hash)
+                if (current is None
+                        or current["status"] != asset["status"]
+                        or str(current.get("emoji_id") or "") != str(asset.get("emoji_id") or "")
+                        or str(current.get("attempt_id") or "") != str(asset.get("attempt_id") or "")):
+                    raise ShopEmojiError(
+                        "The prepared asset changed while the duplicate was being verified; "
+                        "nothing was deleted. Refresh and confirm again.",
+                        code="asset_changed_during_delete", status=409)
                 try:
                     await discord.delete_emoji(str(emoji_id))
                 except DiscordAPIError as exc:
