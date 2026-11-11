@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1008,6 +1009,12 @@ def health():
         db_path=DB_PATH,
         db_exists=db_exists,
         db_size_bytes=db_size_bytes,
+        # The RUNTIME SQLite version of the process serving this page. Python's
+        # sqlite3 links against the system libsqlite3, so this is the version
+        # every query on this deployment actually uses - the fact needed to
+        # judge whether a deployment is exposed to a known SQLite defect (e.g.
+        # the WAL-reset bug fixed in 3.51.3). Read-only: no schema, no write.
+        sqlite_version=sqlite3.sqlite_version,
         **ctx)
 
 
