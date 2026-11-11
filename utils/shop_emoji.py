@@ -24,6 +24,7 @@ import io
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -56,6 +57,15 @@ QUARANTINE_SECONDS = 15 * 60
 STARTUP_RECONCILE_LIMIT = 25
 MAX_PRODUCTS_PER_REQUEST = 25
 APPLICATION_EMOJI_LIMIT = 2000
+# Mutating-request outcomes Discord documents as a definitive rejection (the
+# request was understood and refused). Every OTHER non-2xx status of a mutating
+# request (1xx/3xx, 408/409/413/422, 5xx, anything unrecognised) is ambiguous:
+# it must preserve duplicate protection rather than be treated as "nothing
+# was created". 429 is handled separately (documented retry instruction).
+DEFINITIVE_REJECTION_STATUSES = frozenset({400, 401, 403, 404, 405})
+DISCORD_UNKNOWN_EMOJI_CODE = 10014      # JSON error code "Unknown Emoji"
+DEFAULT_RATE_LIMIT_SECONDS = 60.0       # only when Discord supplied no delay
+MAX_RATE_LIMIT_SECONDS = 24 * 3600.0    # sanity cap on a server-provided delay
 # Durable shared-pool safeguard: ready/preparing/uncertain assets count against
 # their creator guild even after every alias has moved away. Failed and
 # confirmed-missing assets do not consume this per-guild allowance.
@@ -202,11 +212,65 @@ class SourceImageError(ShopEmojiError):
 
 class DiscordAPIError(ShopEmojiError):
     def __init__(self, message, *, code="discord_api_error", status=502,
-                 http_status=None, uncertain=False, retry_after=None):
+                 http_status=None, uncertain=False, retry_after=None,
+                 discord_code=None):
         super().__init__(message, code=code, status=status)
         self.http_status = http_status
         self.uncertain = uncertain
         self.retry_after = retry_after
+        self.discord_code = discord_code
+
+
+class DiscordRateLimited(DiscordAPIError):
+    """HTTP 429. ``retry_after`` is the seconds (float) Discord told us to wait.
+
+    Discord documents ``Retry-After`` / ``retry_after`` as the time to wait
+    before retrying, but does not state that a rate-limited request was left
+    unprocessed. So for a MUTATING request ``uncertain`` stays True (duplicate
+    protection, exactly as before); the rate limit only adds a schedule. A
+    non-mutating request that is rate limited is simply retried later."""
+
+    def __init__(self, message, *, retry_after, scope=None, is_global=False,
+                 retry_after_provided=True, uncertain=False, method="GET"):
+        super().__init__(message,
+                         code="create_uncertain" if uncertain and method == "POST" else "discord_rate_limited",
+                         status=429, http_status=429, uncertain=uncertain,
+                         retry_after=retry_after)
+        self.scope = scope
+        self.is_global = is_global
+        self.retry_after_provided = retry_after_provided
+
+
+def _parse_retry_after(*values):
+    """Largest finite, non-negative delay among the server-provided values.
+
+    Both the ``Retry-After`` header and the JSON ``retry_after`` field are
+    honoured; taking the maximum guarantees the next attempt is never earlier
+    than ANY delay Discord supplied. ``None`` means Discord supplied none.
+    """
+    found = []
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number >= 0:
+            found.append(number)
+    return min(max(found), MAX_RATE_LIMIT_SECONDS) if found else None
+
+
+class EmojiLookup:
+    """Result of Get Application Emoji: ``present`` | ``absent`` | ``unknown``.
+
+    ``absent`` is returned ONLY for a 404 carrying Discord's "Unknown Emoji"
+    code for the exact, validated application and emoji ID. Anything else that
+    is not a 200 for that ID (403, 5xx, timeout, connection failure, malformed
+    or mismatching body) is ``unknown`` and must never be read as absence.
+    """
+    __slots__ = ("state", "emoji", "detail")
+
+    def __init__(self, state, emoji=None, detail=""):
+        self.state, self.emoji, self.detail = state, emoji, detail
 
 
 def _utcnow():
@@ -733,8 +797,29 @@ def _ownership_supported(emoji, application_id, bot_user_id=None):
     return str(user["id"]) == str(bot_user_id)
 
 
+# Strict ASCII snowflake syntax. ``str.isdigit()`` accepts characters such as
+# "²" (and int() then raises) or Arabic-Indic / fullwidth digits (which pass but
+# are not Discord IDs), so syntax is decided by an explicit [0-9] pattern.
+_EMOJI_ID_RE = re.compile(r"[1-9][0-9]{0,19}")
+
+# SQLite equivalent of the same syntax (GLOB classes are ASCII-only). Interpolate
+# with the column expression, e.g. SQL_VALID_EMOJI_ID.format(col="e.emoji_id").
+SQL_VALID_EMOJI_ID = (
+    "({col} IS NOT NULL AND typeof({col})='text' AND length({col}) BETWEEN 1 AND 20 "
+    "AND {col} GLOB '[1-9]*' AND {col} NOT GLOB '*[^0-9]*')")
+
+
 def _valid_emoji_id(value):
-    return isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).isdigit() and int(value) > 0
+    """True only for a syntactically valid snowflake. Never raises."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        return False
+    return _EMOJI_ID_RE.fullmatch(text) is not None
 
 
 def _matching_name(asset, remote):
@@ -871,6 +956,50 @@ async def _mark_missing(db, asset):
          asset["application_id"], asset["content_hash"], asset.get("emoji_id")))
     await db.commit()
     return await _get_asset(db, asset["application_id"], asset["content_hash"])
+
+
+INVALID_READY_PREFIX = "invalid_ready_asset:"
+
+
+async def _mark_ready_unreconciled(db, asset, message):
+    """Withdraw trust from a ``ready`` row whose bound emoji ID is unusable.
+
+    The row is moved to ``uncertain`` (never ``failed``/``missing``): an earlier
+    create may really have succeeded and only the stored ID is damaged, so a
+    replacement must never be created blindly. It keeps its damaged ``emoji_id``
+    as evidence, gets a fresh attempt id (so the ordinary uncertain-recovery
+    compare-and-swaps apply) and a quarantine, and is then handled by the existing
+    read-only reconcile (ownership + content-hash name evidence) or by an
+    explicit, acknowledged owner recovery. Compare-and-swap on ``status='ready'``
+    and the exact stored ID.
+    """
+    now = _iso()
+    quarantine = _iso(_utcnow() + timedelta(seconds=QUARANTINE_SECONDS))
+    await db.execute(
+        "UPDATE shop_emoji_assets SET status='uncertain',attempt_id=?,attempt_started_at=?,"
+        "quarantine_until=?,last_error=?,updated_at=? WHERE application_id=? AND content_hash=? "
+        "AND status='ready' AND COALESCE(emoji_id,'')=COALESCE(?, '')",
+        (uuid.uuid4().hex, now, quarantine, f"{INVALID_READY_PREFIX} {message}", now,
+         asset["application_id"], asset["content_hash"],
+         None if asset.get("emoji_id") is None else str(asset.get("emoji_id"))))
+    await db.commit()
+    return await _get_asset(db, asset["application_id"], asset["content_hash"])
+
+
+async def _fail_claim(db, asset, message):
+    """Settle a claim after a definite failure of THIS request (rejection / full).
+
+    A claim taken from ``uncertain`` returns to ``uncertain``: a later definite
+    rejection does not prove an EARLIER ambiguous POST failed, and ``failed`` is
+    a retry state that skips the duplicate-risk acknowledgement. Claims from a
+    fresh row or from ``failed``/``missing`` become ``failed`` as before.
+    """
+    if asset.get("claim_origin") == "uncertain":
+        return await _mark_uncertain(
+            db, asset,
+            f"{message} (an earlier ambiguous creation may still have succeeded; "
+            "this rejection does not prove it did not)")
+    return await _mark_failed(db, asset, message)
 
 
 async def _guild_asset_usage(db, application_id, guild_id):
@@ -1037,14 +1166,35 @@ async def _reconcile_asset(db, asset, remote, bot_user_id, *, stale_after=PREPAR
     return asset, []
 
 
-async def _refresh_ready_asset(db, asset, remote, bot_user_id):
+async def _refresh_ready_asset(db, asset, remote, bot_user_id, discord=None):
+    """Re-check a ``ready`` asset against Discord.
+
+    * Unusable bound ID: not trusted, moved to ``uncertain`` (never recreated).
+    * Bound ID absent from ``remote``: a list omission is NOT proof. The exact
+      Get Application Emoji endpoint decides: present -> checked below, absent
+      (404 Unknown Emoji) -> ``missing``, unknown (403/5xx/timeout/...) -> the
+      asset is left untouched. Without a ``discord`` client nothing can be
+      confirmed, so nothing changes.
+    """
     if asset["status"] != "ready":
         return asset
     if not _valid_emoji_id(asset.get("emoji_id")):
-        return await _mark_failed(db, asset, "The ready asset has no usable bound emoji ID.")
+        return await _mark_ready_unreconciled(
+            db, asset,
+            "The ready asset has no usable bound emoji ID; reconcile before relying on it "
+            "(no replacement is created automatically).")
     bound = next((emoji for emoji in remote if str(emoji.get("id")) == str(asset["emoji_id"])), None)
     if bound is None:
-        return await _mark_missing(db, asset)
+        if discord is None:
+            return asset
+        lookup = await discord.get_emoji(asset["emoji_id"])
+        if lookup.state == "absent":
+            return await _mark_missing(db, asset)
+        if lookup.state == "unknown":
+            log.warning("bound emoji %s presence is unknown (%s); asset left unchanged",
+                        asset.get("emoji_id"), lookup.detail)
+            return asset
+        bound = lookup.emoji
     animated_mismatch = bool(bound.get("animated", False)) != bool(asset["animated"])
     owned = _ownership_supported(bound, asset["application_id"], bot_user_id)
     same_name = bound.get("name") == asset["emoji_name"]
@@ -1111,8 +1261,15 @@ async def attach_prepared_emojis(db, guild_id, products, *, application_id=None)
         (application_id, guild_id, *urls))
     markup = {}
     for source_url, emoji_id, name, animated in await cur.fetchall():
-        if _valid_emoji_id(emoji_id):
-            markup[source_url] = build_custom_emoji(emoji_id, name, bool(animated))
+        # One damaged row must cost one icon, never the whole batch. It is logged
+        # (not silent) and surfaced by the report / worker as an invalid asset.
+        try:
+            if _valid_emoji_id(emoji_id):
+                markup[source_url] = build_custom_emoji(emoji_id, name, bool(animated))
+            else:
+                log.warning("ready emoji asset for %s has an unusable bound ID; icon omitted", source_url)
+        except Exception as exc:  # noqa: BLE001 - isolate a malformed row
+            log.warning("could not build emoji markup for %s: %r", source_url, exc)
     for index, product in enumerate(products):
         try:
             product["app_emoji"] = markup.get(canonicalize_url(sources[index] or ""), "")
@@ -1213,23 +1370,45 @@ class DiscordAPI:
                         raise DiscordAPIError("Discord returned an unreadable success response.",
                                               code="create_uncertain" if method == "POST" else "discord_uncertain",
                                               uncertain=mutating) from exc
-                detail, retry_after = raw.decode("utf-8", "replace")[:1000], None
+                detail, body_retry, discord_code = raw.decode("utf-8", "replace")[:1000], None, None
                 try:
                     body = json.loads(raw.decode("utf-8"))
                     detail = str(body.get("message") or detail)
-                    retry_after = body.get("retry_after")
+                    body_retry = body.get("retry_after")
+                    discord_code = body.get("code")
                 except (UnicodeDecodeError, ValueError, AttributeError):
                     pass
-                uncertain = mutating and (response.status >= 500 or response.status == 429)
-                # Definitive 4xx responses (including 401/403/404) keep their
-                # status and are not retryable. Only 429/5xx/transport failures
-                # use retryable/uncertain semantics.
+                if response.status == 429:
+                    # Documented: wait Retry-After / retry_after before retrying. Not
+                    # a business failure, so the caller schedules (never counts) it.
+                    # A mutating request stays ambiguous: Discord does not say a
+                    # rate-limited request was left unprocessed.
+                    retry_after = _parse_retry_after(response.headers.get("Retry-After"), body_retry)
+                    provided = retry_after is not None
+                    if retry_after is None:
+                        retry_after = DEFAULT_RATE_LIMIT_SECONDS
+                    scope = response.headers.get("X-RateLimit-Scope")
+                    is_global = (str(response.headers.get("X-RateLimit-Global", "")).lower() == "true"
+                                 or scope == "global")
+                    log.warning(
+                        "Discord rate limited %s %s: retry_after=%.2fs scope=%s global=%s "
+                        "retry_after_from_discord=%s", method, path, retry_after, scope, is_global, provided)
+                    raise DiscordRateLimited(
+                        f"Discord API 429: {detail}", retry_after=retry_after, scope=scope,
+                        is_global=is_global, retry_after_provided=provided,
+                        uncertain=mutating, method=method)
+                # Only documented, definitive rejections of a MUTATING request
+                # prove nothing was changed. Any other non-2xx outcome (3xx we
+                # refuse to follow, 5xx, 408/409/413/422, anything unrecognised)
+                # is ambiguous and must preserve duplicate protection.
+                uncertain = mutating and response.status not in DEFINITIVE_REJECTION_STATUSES
                 error_status = (response.status if 400 <= response.status < 500 else 502)
                 raise DiscordAPIError(
                     f"Discord API {response.status}: {detail}",
                     code="create_uncertain" if uncertain and method == "POST" else "discord_api_error",
                     status=error_status,
-                    http_status=response.status, uncertain=uncertain, retry_after=retry_after,
+                    http_status=response.status, uncertain=uncertain, retry_after=body_retry,
+                    discord_code=discord_code,
                 )
         except DiscordAPIError:
             raise
@@ -1264,6 +1443,31 @@ class DiscordAPI:
             raise ShopEmojiError("Discord returned an incomplete application-emoji list.",
                                  code="emoji_list_invalid", status=502)
         return items
+
+    async def get_emoji(self, emoji_id):
+        """Get Application Emoji for one bound ID (read-only; never raises on 404).
+
+        Returns an :class:`EmojiLookup`. Only a 200 whose body is that exact ID is
+        ``present``; only a 404 with Discord's Unknown Emoji code is ``absent``.
+        A 429 propagates as :class:`DiscordRateLimited` so the caller can schedule
+        the retry; every other inconclusive outcome is ``unknown``.
+        """
+        if not _valid_emoji_id(emoji_id):
+            return EmojiLookup("unknown", None, "invalid emoji ID; nothing was requested")
+        emoji_id = str(emoji_id)
+        try:
+            result = await self._request(
+                "GET", f"/applications/{self.application_id}/emojis/{emoji_id}")
+        except DiscordRateLimited:
+            raise
+        except DiscordAPIError as exc:
+            if exc.http_status == 404 and exc.discord_code == DISCORD_UNKNOWN_EMOJI_CODE:
+                return EmojiLookup("absent", None, str(exc))
+            return EmojiLookup("unknown", None, str(exc))
+        if (isinstance(result, dict) and str(result.get("id")) == emoji_id
+                and isinstance(result.get("name"), str)):
+            return EmojiLookup("present", result, "")
+        return EmojiLookup("unknown", None, "Discord returned an unexpected emoji body")
 
     async def create_emoji(self, name, final_png, bot_user_id):
         data_uri = "data:image/png;base64," + base64.b64encode(final_png).decode("ascii")
@@ -1535,7 +1739,7 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id,
         if reconciled["status"] != "preparing" or reconciled.get("attempt_id") != asset.get("attempt_id"):
             return _result(reconciled, duplicates=duplicates)
         if len(remote) >= APPLICATION_EMOJI_LIMIT:
-            failed = await _mark_failed(db, asset, "The application's total emoji capacity is full.")
+            failed = await _fail_claim(db, asset, "The application's total emoji capacity is full.")
             if failed["status"] == "ready":
                 return _result(failed, code="reconciled")
             return _result(failed, code="emoji_capacity", message=failed["last_error"])
@@ -1551,13 +1755,19 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id,
     except DiscordAPIError as exc:
         if exc.uncertain:
             uncertain = await _mark_uncertain(db, asset, str(exc))
+            if isinstance(exc, DiscordRateLimited):
+                # 429 on a create is still ambiguous (see DiscordRateLimited); it only
+                # adds the server-provided schedule for the next recheck.
+                limited = _result(uncertain, code="create_uncertain", message=str(exc))
+                limited["rate_limit_retry_after"] = float(exc.retry_after)
+                return limited
             if uncertain["status"] == "ready":
                 return _result(
                     uncertain, code="create_uncertain",
                     message=("The create request had an uncertain outcome while this asset was bound by another operation. "
                              "Reconcile application emojis to check for a possible duplicate."))
             return _result(uncertain, code="create_uncertain", message=str(exc))
-        failed = await _mark_failed(db, asset, str(exc))
+        failed = await _fail_claim(db, asset, str(exc))
         if failed["status"] == "ready":
             return _result(failed, code="reconciled")
         return _result(failed, code="discord_rejected", message=str(exc))
@@ -1598,7 +1808,7 @@ async def _remap_changed_source(db, discord, guild_id, source_url, old_asset,
         if not any(str(e.get("id")) == str(new_asset.get("emoji_id")) for e in remote):
             remote = await discord.list_emojis()
             new_duplicates = _duplicates(new_asset, _matching_name(new_asset, remote))
-        new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id)
+        new_asset = await _refresh_ready_asset(db, new_asset, remote, bot_user_id, discord=discord)
     async with _PreDispatch(db, new_claimed):    # no-op while `new_claimed` is None
         await _upsert_alias(db, discord.application_id, guild_id, source_url, changed_hash)
     if new_claimed is not None and new_asset["status"] == "preparing":
@@ -1724,7 +1934,7 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
         # the ready DB read before it can be treated as confirmed deletion.
         if not any(str(e.get("id")) == str(alias_asset.get("emoji_id")) for e in remote):
             remote = await discord.list_emojis()
-        alias_asset = await _refresh_ready_asset(db, alias_asset, remote, bot_user_id)
+        alias_asset = await _refresh_ready_asset(db, alias_asset, remote, bot_user_id, discord=discord)
 
     final_png = await _download_and_normalize(source_url)
     # ── FENCE ── the download is the long operation. If the product's image
@@ -1766,7 +1976,7 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
     elif asset["status"] == "ready":
         if not any(str(e.get("id")) == str(asset.get("emoji_id")) for e in remote):
             remote = await discord.list_emojis()
-        asset = await _refresh_ready_asset(db, asset, remote, bot_user_id)
+        asset = await _refresh_ready_asset(db, asset, remote, bot_user_id, discord=discord)
 
     # Aliases may point at a non-ready asset, but only ready assets resolve.
     async with _PreDispatch(db, claimed):        # no-op while `claimed` is None
@@ -1789,10 +1999,28 @@ async def _prepare_one(db, discord, guild_id, source_url, remote, bot_user_id,
     elif claimed is None and asset["status"] in {"failed", "missing"}:
         # A present bound ID with conflicting metadata needs owner recovery;
         # only a confirmed missing bound ID may be recreated normally.
-        if (asset["status"] == "failed" and _valid_emoji_id(asset.get("emoji_id"))
-                and any(str(e.get("id")) == str(asset["emoji_id"]) for e in remote)):
-            return _result(asset, code="bound_emoji_conflict",
-                           message=asset.get("last_error") or "The bound emoji requires owner recovery."), remote
+        if _valid_emoji_id(asset.get("emoji_id")):
+            # A list omission is not proof of absence: ask for this exact ID.
+            bound = next((e for e in remote if str(e.get("id")) == str(asset["emoji_id"])), None)
+            if bound is None:
+                lookup = await discord.get_emoji(asset["emoji_id"])
+                if lookup.state == "unknown":
+                    return _result(
+                        asset, code="emoji_state_unknown",
+                        message=("Discord did not confirm whether the previously bound emoji still exists "
+                                 f"({lookup.detail}); no replacement will be created until it does.")), remote
+                bound = lookup.emoji if lookup.state == "present" else None
+            if bound is not None:
+                if (asset["status"] == "missing"
+                        and _ownership_supported(bound, discord.application_id, bot_user_id)
+                        and bool(bound.get("animated", False)) == bool(asset["animated"])
+                        and _name_matches_content(bound.get("name"), asset["content_hash"])):
+                    # The emoji reappeared (the earlier absence was wrong): re-bind it.
+                    asset = await _adopt_asset(db, asset, bound)
+                    if asset["status"] == "ready":
+                        return _result(asset, code="reconciled"), remote
+                return _result(asset, code="bound_emoji_conflict",
+                               message=asset.get("last_error") or "The bound emoji requires owner recovery."), remote
         # Known deletion of a bound ID is different from an uncertain create
         # with no known ID and never requires the uncertain-retry acknowledgement.
         matches = _matching_name(asset, remote)
@@ -1915,7 +2143,15 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                         url_products.setdefault(url, []).append(pid)
                         by_url[pid] = url
                     url_results = {}
+                    rate_limited = None     # seconds Discord asked us to wait (first 429 of the batch)
                     for url in order:
+                        if rate_limited is not None:
+                            # Discord told us to wait: do not keep sending requests.
+                            url_results[url] = {
+                                "status": "failed", "code": "rate_limited", "emoji": "", "duplicates": [],
+                                "message": "Discord rate limited this batch; try again later.",
+                                "rate_limit_retry_after": float(rate_limited)}
+                            continue
                         try:
                             result, remote = await _prepare_one(
                                 db, discord, guild_id, url, remote, bot_user_id,
@@ -1926,6 +2162,9 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                                 # emoji for the image it no longer uses.
                                 validate_source=_fence_for_url(
                                     db, guild_id, url, url_products[url]))
+                            if result.get("rate_limit_retry_after") is not None:
+                                # A create was rate limited (the asset is uncertain): stop here.
+                                rate_limited = float(result["rate_limit_retry_after"])
                             if result.get("status") == "ready" and result.get("emoji_id"):
                                 # Later URLs in this batch must see creations or
                                 # adoptions made earlier in that same batch.
@@ -1937,6 +2176,11 @@ async def prepare_product_emojis(guild_id, product_ids, *, retry_uncertain=False
                                     "application_id": discord.application_id,
                                     "user": {"id": bot_user_id},
                                 })
+                        except DiscordRateLimited as exc:
+                            rate_limited = float(exc.retry_after)
+                            result = {"status": "failed", "code": "rate_limited",
+                                      "message": str(exc), "emoji": "", "duplicates": [],
+                                      "rate_limit_retry_after": float(exc.retry_after)}
                         except (SourceImageError, ShopEmojiError) as exc:
                             result = {"status": "failed", "code": exc.code,
                                       "message": str(exc), "emoji": "", "duplicates": [],
@@ -2008,7 +2252,7 @@ async def reconcile_product_emojis(guild_id, product_ids):
                         if asset["status"] in {"preparing", "uncertain", "failed", "missing"}:
                             asset, duplicates = await _reconcile_asset(db, asset, remote, bot_user_id)
                         elif asset["status"] == "ready":
-                            asset = await _refresh_ready_asset(db, asset, remote, bot_user_id)
+                            asset = await _refresh_ready_asset(db, asset, remote, bot_user_id, discord=discord)
                             duplicates = _duplicates(asset, _matching_name(asset, remote))
                         results.append({"product_id": pid,
                                         **_result(asset, duplicates=duplicates, code="reconciled")})

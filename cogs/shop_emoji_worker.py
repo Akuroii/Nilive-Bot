@@ -13,9 +13,11 @@ this build cannot start creating application emojis for every connected
 server. New and changed products are still queued automatically by the
 Dashboard save path, which is already an authorised, owner-issued action.
 
-The loops never overlap with the manual prepare action: both go through
-``utils.shop_emoji_worker.run_pass``, which holds a process-wide lock, and the
-underlying queue writes are generation-fenced in the database.
+Passes never overlap *inside this process*: ``utils.shop_emoji_worker.run_pass``
+holds a per-process lock. The Dashboard prepare action runs in a different
+process and does not take that lock. Between processes the only serialisation is
+the database: generation-fenced queue writes and the compare-and-swap that claims
+an asset. See SHOP_EMOJI_AUTOMATION.md, "Behaviour reference".
 
 Nothing here reads or writes Inventory or Rank state, and no loop touches
 Discord unless there is due work — an idle bot makes zero API calls.

@@ -15,6 +15,194 @@ preparation/reconciliation core. Inventory (`cogs/wallet.py`), Rank
 
 ---
 
+## Behaviour reference (PR-A safety hardening)
+
+This section describes what the code does now. The audit rounds below record history
+and some of their statements predate this section. Where they differ, this section wins.
+
+### Asset states
+
+An application emoji asset is one row per (application, content hash). It has one of
+five states.
+
+| State | Meaning |
+|---|---|
+| `preparing` | A process holds a claim (`attempt_id`) and may be about to send, or has sent, a create request. |
+| `uncertain` | A create request may have reached Discord and the outcome is unknown. Duplicate risk. |
+| `ready` | Bound to a syntactically valid emoji ID (see "Malformed rows"). |
+| `failed` | Nothing was created. Safe to claim again. |
+| `missing` | Discord confirmed that the bound emoji ID does not exist. |
+
+| From | To | Condition |
+|---|---|---|
+| (none) | `preparing` | Insert plus claim under `BEGIN IMMEDIATE`. |
+| `failed` / `missing` | `preparing` | Claim by compare-and-swap, after the name and bound-ID checks below. |
+| `uncertain` | `preparing` | Only an explicit owner retry with acknowledgement, after the quarantine has elapsed. |
+| `preparing` | `ready` | Create confirmed, or an owned emoji with the content-derived name adopted. |
+| `preparing` | `uncertain` | Ambiguous outcome, or a claim older than 60 s found by reconcile. |
+| `preparing` | `failed` | Definite failure of this request, and the claim did not start in `uncertain`. |
+| `ready` | `missing` | `GET /applications/{id}/emojis/{emoji_id}` returned 404 with JSON code 10014. |
+| `ready` | `uncertain` | The bound emoji ID is unusable (see "Malformed rows"). |
+| `uncertain` | `ready` | Read-only reconcile finds exactly one emoji that the bot owns with the content-derived name. |
+
+### Uncertain-origin protection
+
+Every claim remembers where it started (`claim_origin`: new, failed, missing or
+uncertain). A claim that started in `uncertain` can only return to `uncertain` or
+become `ready`. These outcomes no longer turn it into `failed`:
+
+* a definite rejection (HTTP 400, 401, 403, 404 or 405) of the recovery POST,
+* a full application emoji list (2000),
+* a cancellation or error before dispatch,
+* HTTP 429, 5xx, a timeout, a connection reset or a malformed 2xx body.
+
+A rejection of the second POST proves nothing about the first one. The first one
+may have succeeded. The quarantine restarts (15 minutes, `QUARANTINE_SECONDS`) and
+the next recovery needs acknowledgement again.
+
+Claims that started in a fresh row, `failed` or `missing` keep the old behaviour: a
+definite rejection or a full list settles them as `failed`.
+
+### How the transport classifies a mutating request
+
+The transport never follows redirects (`allow_redirects=False`) and never replays a
+request. For POST, PATCH and DELETE:
+
+| Response | Result |
+|---|---|
+| 2xx with the expected body | Success. |
+| 400, 401, 403, 404, 405 | Definite rejection. Nothing changed. |
+| Anything else: 1xx, 3xx, 408, 409, 413, 422, 429, 5xx, unknown codes | Ambiguous. For a create this means `uncertain`. |
+| Timeout, connection failure, 2xx with a body that does not match | Ambiguous. |
+
+A GET that fails is not ambiguous. The caller retries it later.
+
+### What `missing` means
+
+`missing` means one thing: Discord's Get Application Emoji endpoint answered 404 with
+JSON error code 10014 (Unknown emoji) for that exact, validated application and emoji
+ID. Discord lists 10014 in its JSON error code table. Its Emoji Resource page does
+not describe the 404 body of this endpoint. If the real body ever differs, the code
+reports "unknown" and the asset stays as it is. That direction is safe.
+
+An emoji missing from `list_emojis()` is not enough. The code asks the exact endpoint.
+
+| Answer for a bound ID | Result |
+|---|---|
+| 200 with the same ID | Present. The usual ownership and name checks run. |
+| 404 with code 10014 | Absent. `ready` becomes `missing`. |
+| 403, 5xx, timeout, connection failure, other 404, mismatching body | Unknown. Nothing changes. No create. |
+| 429 | Rate limited. Nothing changes. The retry is scheduled. |
+
+For `failed` and `missing` assets that still carry an emoji ID, the same question
+runs before any new POST. Present means the bound emoji conflicts and needs owner
+recovery (or, for `missing`, the emoji is re-bound when it is owned, not animated and
+carries the content-derived name). Unknown blocks the create and reports
+`emoji_state_unknown`.
+
+For an ambiguous create with no stored ID, the code has only the application emoji
+list and the deterministic name. It adopts one emoji that the bot owns and whose name
+is derived from the content hash. A name match does not prove the image bytes match.
+Discord exposes no image hash. Without a match the asset stays `uncertain` and only an
+acknowledged owner retry can create again. A second list after the quarantine is more
+evidence, not proof.
+
+### Rate limits (HTTP 429)
+
+* The delay is the larger of the `Retry-After` header and the JSON `retry_after`
+  field. If Discord sends neither, the code uses 60 s (`DEFAULT_RATE_LIMIT_SECONDS`).
+  It never waits longer than 24 hours on one answer.
+* The worker pauses every Discord request in its process until that time has passed.
+  The pause lives in memory, so another process learns the limit from its own 429.
+* A rate-limited read before dispatch releases the claim, moves the queue row to
+  `retry` no earlier than the delay, and gives back the attempt that the claim counted.
+  The row does not move towards the park limit.
+* A rate-limited create stays ambiguous. The asset becomes `uncertain` (or stays
+  `uncertain`). The queue row waits for the longer of the delay and the 900 s recheck
+  window, and the attempt is given back.
+* The explicit prepare action stops sending after the first 429 in a batch.
+* The Dashboard answers with HTTP 429, a JSON body with `retry_after`, and a
+  `Retry-After` header rounded up to whole seconds.
+* The log records the method, path, delay, scope, global flag and whether Discord
+  supplied the delay.
+
+The code does not assume route buckets for emoji endpoints. Discord states that these
+routes use their own limits and may return 429.
+
+### Dispatch and cancellation boundary
+
+1. **Claim.** `_insert_asset_or_claim` or `_claim_existing` writes `preparing` and a new
+   `attempt_id` in one `BEGIN IMMEDIATE` transaction, as a compare-and-swap.
+2. **Release before dispatch.** `_PreDispatch` wraps every step between the claim and
+   the POST. Any exception in that window, including `CancelledError` and
+   `StalePreparation`, releases the claim with `_release_unposted_claim`. A claim from
+   `uncertain` returns to `uncertain`. Other claims return to `failed`.
+3. **`dispatch_started`.** `_create_claimed` sets this in-memory flag immediately
+   before `create_emoji()`, with no `await` in between. It is not stored in the
+   database.
+4. **No release after dispatch.** Once the flag is set, nothing releases the claim. A
+   cancelled or timed-out POST proves nothing. The row stays `preparing` and reconcile
+   turns it into `uncertain` after 60 s (`PREPARING_STALE_SECONDS`).
+5. **Release once.** A `released` flag stops nested guards from releasing twice.
+6. **Cleanup.** `_finish_cleanup` runs the release to the end even when further
+   cancellations arrive. It remembers the cancellation and raises it after the cleanup
+   finishes. The cleanup is one indexed UPDATE under the SQLite busy timeout.
+7. **Cleanup failure.** `_release_unposted_claim` logs a failed release and does not
+   raise. The row then stays `preparing` and ages into `uncertain`. That is stricter
+   than needed and safe.
+
+### Retry budget and quarantine
+
+* `MAX_AUTO_ATTEMPTS` is 4. Each claim counts one attempt. A queue row that fails with
+  a business error waits 900 s times its attempt count (`RETRY_BACKOFF_SECONDS`) and
+  parks after the fourth attempt.
+* These outcomes do not spend the budget: an outage at pass level, a 429, an
+  inconclusive Get Application Emoji answer, and `uncertain` assets (the worker never
+  re-sends them).
+* The quarantine lasts 900 s. It starts when a row becomes `uncertain` and restarts
+  when a recovery attempt returns to `uncertain`.
+* The guild limit is 100 assets and counts `ready`, `preparing` and `uncertain`. A
+  released claim returns to `failed` and stops counting at once. Discord's limit of
+  2000 application emojis is checked against a fresh list before each POST.
+
+### Malformed rows
+
+"Prepared" means status `ready` and an emoji ID that matches `^[1-9][0-9]{0,19}$`
+(ASCII digits only). The check never raises. The report, Backfill, the worker, the
+rename scan, the Dashboard publisher and the Inventory and Rank attachment use the
+same rule. SQL uses an equivalent `GLOB` expression.
+
+A `ready` row with an unusable ID is not reused and not marked done. The first touch
+moves it to `uncertain` with `last_error` starting `invalid_ready_asset:`, keeps the
+damaged ID as evidence, and starts the quarantine. The worker then defers the queue
+row. The code never creates a replacement from a malformed row, because the earlier
+create may have worked and only the stored ID may be damaged.
+
+Recovery uses the existing path. Read-only reconcile adopts one emoji that the bot
+owns whose name is derived from the content hash. That evidence shows the emoji came
+from this pipeline for this content. It does not prove the image bytes match. If no
+emoji matches, only an acknowledged owner retry after the quarantine can create again.
+
+`GET /api/shop-publisher/emojis/report` lists these rows in `invalid_ready_assets`
+for the guild. An attachment batch skips a malformed row and keeps the other icons.
+
+### Crash and recovery limits
+
+* A crash after dispatch leaves `preparing`. It becomes `uncertain` after 60 s. If the
+  emoji was created, reconcile adopts it. If it was not, the owner needs the
+  acknowledged retry.
+* A crash during a release leaves `preparing`, with the same result.
+* The in-process lock covers one process only. The bot and the Dashboard are separate
+  processes. Between them only the database serialises work: the generation fence on
+  queue rows and the compare-and-swap on assets. The lock does not stop two processes
+  from listing at the same time. The compare-and-swap still lets only one claim win.
+* The code cannot prove that an emoji's image matches a content hash.
+* The code cannot prove that a lost response means "not created".
+* Discord does not document list consistency for application emojis. The code does not
+  rely on it, and it does not rely on it being strong either.
+
+---
+
 ## Round-3 findings — what was wrong and what changed
 
 ### 1. A stale download could still CREATE an emoji (critical)

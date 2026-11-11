@@ -73,10 +73,32 @@ class PassReport(dict):
     """Plain dict subclass so callers/tests read fields without a class."""
 
 
+# Discord told this process to wait (HTTP 429, Retry-After / retry_after). Kept as
+# a wall-clock deadline so every later pass in this process stays quiet until it
+# elapses instead of probing Discord again every tick. Per-process by design; a
+# second process learns the same limit from its own 429.
+_rate_limit_until = 0.0
+
+
+def _rate_limit_remaining():
+    return max(0.0, _rate_limit_until - time.time())
+
+
+def _note_rate_limit(retry_after, report=None):
+    global _rate_limit_until
+    seconds = max(0.0, float(retry_after))
+    _rate_limit_until = max(_rate_limit_until, time.time() + seconds)
+    if report is not None:
+        report["rate_limited"] = report.get("rate_limited", 0) + 1
+        report["rate_limited_for"] = round(_rate_limit_remaining(), 3)
+    log.warning("shop emoji worker: Discord rate limited; next Discord request in this "
+                "process no earlier than %.1fs from now", seconds)
+
+
 def _empty_report():
     return PassReport(processed=0, created=0, reused=0, reconciled=0, renamed=0,
                       deferred=0, failed=0, parked=0, skipped=0, stale=0, pruned=0,
-                      budget_exhausted=False, results=[])
+                      budget_exhausted=False, rate_limited=0, results=[])
 
 
 async def _load_listing(db, guild_id, product_id):
@@ -87,13 +109,20 @@ async def _load_listing(db, guild_id, product_id):
 
 
 async def _alias_asset(db, application_id, guild_id, source_url):
-    """Ready asset for this exact URL in this guild, if any (read-only)."""
+    """Prepared asset for this exact URL in this guild, if any (read-only).
+
+    "Prepared" means ready AND a syntactically valid bound emoji ID, the same
+    definition the report, Backfill and attachment use. A ready row with an
+    unusable ID is deliberately NOT returned: it must not be reused or marked
+    done. It continues into ``_prepare_one``, which withdraws its trust and holds
+    it as an unreconciled asset instead of creating a replacement.
+    """
     cur = await db.execute(
         f"SELECT {SE._ASSET_SELECT_E} FROM shop_emoji_url_aliases a "
         "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
         "AND e.content_hash=a.content_hash "
         "WHERE a.application_id=? AND a.guild_id=? AND a.source_url=? "
-        "AND e.status='ready'",
+        "AND e.status='ready' AND " + SE.SQL_VALID_EMOJI_ID.format(col="e.emoji_id"),
         (application_id, guild_id, source_url))
     return SE._asset(await cur.fetchone())
 
@@ -122,8 +151,21 @@ async def _rename_or_defer(db, discord, asset, target, report):
         "WHERE application_id=? AND content_hash=?",
         (SE._iso(), asset["application_id"], asset["content_hash"]))
     await db.commit()
+    if _rate_limit_remaining() > 0:
+        report["results"].append({"code": "rename_rate_limited",
+                                  "message": "Discord asked this process to wait; rename deferred.",
+                                  "content_hash": asset["content_hash"]})
+        return await SE._get_asset(db, asset["application_id"], asset["content_hash"])
     try:
         await discord.rename_emoji(asset["emoji_id"], target)
+    except SE.DiscordRateLimited as exc:
+        # Cosmetic: nothing changed. Remember the wait so no further request is
+        # sent; the rename is retried by a later pass.
+        _note_rate_limit(exc.retry_after, report)
+        report["results"].append({"code": "rename_rate_limited", "message": str(exc),
+                                  "content_hash": asset["content_hash"],
+                                  "retry_after": exc.retry_after})
+        return await SE._get_asset(db, asset["application_id"], asset["content_hash"])
     except SE.DiscordAPIError as exc:
         if exc.uncertain:
             # Cosmetic and identity-preserving: the next refresh accepts either
@@ -300,6 +342,18 @@ async def _process_row(db, discord, row, remote, bot_user_id, report):
         report["results"].append({"product_id": product_id, "code": exc.code,
                                   "message": str(exc)})
         return "source_error"
+    except SE.DiscordRateLimited as exc:
+        # Not a business failure: honour the server-provided delay, hand back the
+        # attempt counted at claim time and stop spending requests. Any claim the
+        # pipeline held was released to the state it came from.
+        _note_rate_limit(exc.retry_after, report)
+        await Q.defer_without_attempt(db, row, f"discord_rate_limited: {exc}", exc.retry_after)
+        log.info("shop emoji worker: product %s rescheduled no earlier than %.1fs from now "
+                 "(Discord rate limit; attempt not counted)", product_id, float(exc.retry_after))
+        report["deferred"] += 1
+        report["results"].append({"product_id": product_id, "code": "rate_limited",
+                                  "retry_after": exc.retry_after, "message": str(exc)})
+        return "rate_limited"
     except SE.ShopEmojiError as exc:
         # Quota is a real, reportable state; do not turn it into a hot retry
         # loop (mark_failed backs off), and never raise the limit silently.
@@ -333,6 +387,31 @@ async def _process_row(db, discord, row, remote, bot_user_id, report):
         report["results"].append({"product_id": product_id, "code": code,
                                   "status": status, "emoji_id": result.get("emoji_id")})
         return "ready"
+
+    if result.get("rate_limit_retry_after") is not None:
+        # The create request itself was rate limited. The asset is `uncertain`
+        # (a 429 on a mutating request stays ambiguous), so nothing is retried
+        # blindly; the row is rescheduled no earlier than Discord's delay or the
+        # normal recheck window, whichever is later, and the attempt is refunded.
+        retry_after = float(result["rate_limit_retry_after"])
+        _note_rate_limit(retry_after, report)
+        await Q.defer_without_attempt(
+            db, row, f"discord_rate_limited: {result.get('message')}",
+            max(retry_after, Q.RETRY_BACKOFF_SECONDS))
+        log.info("shop emoji worker: product %s rescheduled no earlier than %.1fs from now "
+                 "(rate-limited create; asset stays uncertain; attempt not counted)",
+                 product_id, max(retry_after, float(Q.RETRY_BACKOFF_SECONDS)))
+        report["deferred"] += 1
+        report["results"].append({"product_id": product_id, "code": "rate_limited",
+                                  "status": status, "retry_after": retry_after})
+        return "rate_limited"
+    if code == "emoji_state_unknown":
+        # Discord did not say whether a previously bound emoji still exists. No
+        # replacement may be created, and an inconclusive answer is not a failure.
+        await Q.defer_without_attempt(db, row, result.get("message") or code, Q.RETRY_BACKOFF_SECONDS)
+        report["deferred"] += 1
+        report["results"].append({"product_id": product_id, "code": code, "status": status})
+        return "state_unknown"
 
     if status in {"preparing", "uncertain"}:
         # Ambiguous create. Never POST again from here: reconcile read-only and
@@ -395,6 +474,14 @@ async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
         report["skipped_no_credentials"] = True
         return report
 
+    waiting = _rate_limit_remaining()
+    if waiting > 0:
+        # Discord asked this process to wait; do not authenticate, list or fetch.
+        report["rate_limited"] = 1
+        report["rate_limited_for"] = round(waiting, 3)
+        report["skipped_rate_limited"] = True
+        return report
+
     async with _lock():
         started = time.monotonic()
         async with aiosqlite.connect(DB_PATH) as db:
@@ -423,6 +510,8 @@ async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
                         # A 429/5xx here is a transient "Discord is unavailable",
                         # not a product failure: leave every row untouched and
                         # record it so the next tick retries after the interval.
+                        if isinstance(exc, SE.DiscordRateLimited):
+                            _note_rate_limit(exc.retry_after, report)
                         report["discord_unavailable"] = str(exc)
                         return report
 
@@ -437,6 +526,8 @@ async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
                         remote = await discord.list_emojis()
                     except SE.DiscordAPIError as exc:
                         # Same rule as above: back off, do not consume attempts.
+                        if isinstance(exc, SE.DiscordRateLimited):
+                            _note_rate_limit(exc.retry_after, report)
                         report["discord_unavailable"] = str(exc)
                         return report
                     for row in rows:
@@ -445,8 +536,10 @@ async def run_pass(*, guild_id=None, limit=Q.DEFAULT_BATCH_LIMIT,
                             break
                         report["processed"] += 1
                         try:
-                            await _process_row(db, discord, row, remote,
-                                               bot_user_id, report)
+                            outcome = await _process_row(db, discord, row, remote,
+                                                         bot_user_id, report)
+                            if outcome == "rate_limited":
+                                break       # Discord said wait: send nothing more
                         except asyncio.CancelledError:
                             raise
                         except Exception as exc:  # noqa: BLE001 - a pass must survive
@@ -502,7 +595,7 @@ async def _rename_candidates(db, application_id, *, guild_id=None, after=None,
     """
     sql = (f"SELECT {SE._ASSET_SELECT_E} FROM shop_emoji_assets e "
            "WHERE e.application_id=? AND e.status='ready' "
-           "AND e.emoji_id IS NOT NULL AND e.emoji_id<>''")
+           "AND " + SE.SQL_VALID_EMOJI_ID.format(col="e.emoji_id"))
     params = [application_id]
     if guild_id is not None:
         sql += " AND e.creator_guild_id=?"
@@ -560,7 +653,7 @@ async def rename_all(*, guild_id=None, apply=False, limit=None,
             cursor_sql = (
                 "SELECT MAX(content_hash) FROM ("
                 "  SELECT content_hash FROM shop_emoji_assets WHERE application_id=? "
-                "  AND status='ready' AND emoji_id IS NOT NULL AND emoji_id<>'' ")
+                "  AND status='ready' AND " + SE.SQL_VALID_EMOJI_ID.format(col="emoji_id") + " ")
             cursor_params = [app_id]
             if guild_id is not None:
                 cursor_sql += "  AND creator_guild_id=? "

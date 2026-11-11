@@ -6,6 +6,7 @@ these mutating preparation/deletion operations.
 """
 
 import asyncio
+import math
 
 import aiosqlite
 from flask import jsonify, request
@@ -18,7 +19,11 @@ from dashboard.utils.async_utils import run_async
 from database import DB_PATH
 from utils.shop_emoji import (
     GUILD_ASSET_LIMIT,
+    INVALID_READY_PREFIX,
+    SQL_VALID_EMOJI_ID,
+    DiscordRateLimited,
     ShopEmojiError,
+    _valid_emoji_id,
     delete_confirmed_duplicate,
     prepare_product_emojis,
     reconcile_product_emojis,
@@ -32,7 +37,11 @@ def _error_response(exc):
     retry_after = getattr(exc, "retry_after", None)
     if retry_after is not None:
         payload["retry_after"] = retry_after
-    return jsonify(payload), exc.status
+    response = jsonify(payload)
+    if isinstance(exc, DiscordRateLimited) and retry_after is not None:
+        # Whole seconds, rounded up: the client must never retry earlier than Discord said.
+        response.headers["Retry-After"] = str(max(1, math.ceil(float(retry_after))))
+    return response, exc.status
 
 
 def _reject_url_targets(data):
@@ -328,7 +337,7 @@ def api_shop_emoji_report():
                 "JOIN shop_emoji_assets e ON e.application_id=a.application_id "
                 "  AND e.content_hash=a.content_hash "
                 "WHERE a.application_id=? AND a.guild_id=? AND e.status='ready' "
-                "AND e.emoji_id IS NOT NULL AND e.emoji_id<>'' "
+                "AND " + SQL_VALID_EMOJI_ID.format(col="e.emoji_id") + " "
                 "GROUP BY a.content_hash HAVING COUNT(DISTINCT a.source_url) > 1",
                 (app_id, guild_id))).fetchall()
 
@@ -342,6 +351,27 @@ def api_shop_emoji_report():
                 "SELECT COUNT(*) FROM shop_emoji_assets WHERE application_id=? "
                 "AND status IN ('ready','preparing','uncertain') AND creator_guild_id=?",
                 (app_id, guild_id))).fetchone())[0]
+
+            # Assets this guild's aliases point at whose "ready" state cannot be
+            # trusted (unusable bound ID), plus the ones already withdrawn into
+            # `uncertain` for that reason. Surfaced, never silently consumed.
+            invalid_ready = []
+            for h, status, emoji_id, last_error in await (await db.execute(
+                    "SELECT DISTINCT e.content_hash,e.status,e.emoji_id,e.last_error "
+                    "FROM shop_emoji_url_aliases a JOIN shop_emoji_assets e "
+                    "ON e.application_id=a.application_id AND e.content_hash=a.content_hash "
+                    "WHERE a.application_id=? AND a.guild_id=? AND "
+                    "((e.status='ready' AND NOT " + SQL_VALID_EMOJI_ID.format(col="e.emoji_id") + ") "
+                    "OR (e.status='uncertain' AND e.last_error LIKE ?))",
+                    (app_id, guild_id, INVALID_READY_PREFIX + "%"))).fetchall():
+                if status == "ready" and _valid_emoji_id(emoji_id):
+                    continue
+                invalid_ready.append({
+                    "content_hash": h, "status": status,
+                    "reason": last_error or "The ready asset's bound emoji ID is unusable.",
+                    "action": ("Reconcile application emojis. If it cannot be matched safely, "
+                               "an explicit, acknowledged recovery is required; no replacement "
+                               "is created automatically.")})
 
             url_counts = {}
             for entry in catalog["prepared"] + catalog["unprepared"]:
@@ -368,6 +398,7 @@ def api_shop_emoji_report():
                     "shared_url_groups": sorted(c for c in url_counts.values() if c > 1),
                     "content_reused_groups": [{"content_hash": h, "products": n}
                                               for h, n in content_users],
+                    "invalid_ready_assets": invalid_ready,
                     "quota": {"used": used, "limit": GUILD_ASSET_LIMIT},
                     "quota_limited": used >= GUILD_ASSET_LIMIT,
                     "uncertain": uncertain_n,

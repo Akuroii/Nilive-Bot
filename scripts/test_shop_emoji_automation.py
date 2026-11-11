@@ -138,6 +138,17 @@ class FakeDiscord:
             out["user"] = emoji.get("user", {"id": BOT_ID})
         return out
 
+    async def get_emoji(self, emoji_id):
+        """Get Application Emoji; by default the same truth as list_emojis()."""
+        self.get_calls = getattr(self, "get_calls", []) + [str(emoji_id)]
+        hook = getattr(self, "get_behavior", None)
+        if hook is not None:
+            return hook(str(emoji_id))
+        for emoji in self.remote:
+            if str(emoji.get("id")) == str(emoji_id):
+                return SE.EmojiLookup("present", self._view(emoji))
+        return SE.EmojiLookup("absent")
+
     async def list_emojis(self):
         self.lists += 1
         self.list_calls.append(self.lists)
@@ -149,6 +160,11 @@ class FakeDiscord:
             await gate.wait()
         if self.list_status:
             status = self.list_status.get("status", 500)
+            if status == 429:
+                # Mirror DiscordAPI._request: a 429 is a DiscordRateLimited.
+                raise SE.DiscordRateLimited(
+                    f"Discord API {status}: simulated",
+                    retry_after=self.list_status.get("retry_after") or SE.DEFAULT_RATE_LIMIT_SECONDS)
             raise SE.DiscordAPIError(
                 f"Discord API {status}: simulated",
                 code="discord_api_error", status=status, http_status=status,
@@ -265,6 +281,7 @@ class AutomationTestBase(unittest.IsolatedAsyncioTestCase):
         await ensure_tables()
         SE._preparation_locks.clear()
         W._pass_lock = None
+        W._rate_limit_until = 0.0     # a Discord wait must never leak between cases
         os.environ["DISCORD_CLIENT_ID"] = APP
         os.environ["DISCORD_TOKEN"] = "test-token-not-real"
 
@@ -4277,6 +4294,174 @@ class PreDispatchCancellationTests(AutomationTestBase):
         await self._drain()
         self.assertEqual(len(self.fake.remote), 1, "recovery must adopt, never POST a duplicate")
         self.assertEqual(await self._statuses(), ["ready"])
+
+
+# ── PR-A: rate limits, protected states and invalid rows through the worker ──
+class CreateRateLimitedFake(FakeDiscord):
+    """Every create is answered with HTTP 429 (a mutating request: ambiguous)."""
+
+    def __init__(self, retry_after=30.0, **kwargs):
+        super().__init__(**kwargs)
+        self.retry_after = retry_after
+
+    async def create_emoji(self, name, final_png, bot_user_id):
+        self.creates += 1
+        raise SE.DiscordRateLimited("Discord API 429: slow down", retry_after=self.retry_after,
+                                    uncertain=True, method="POST")
+
+
+class SecondListRateLimitedFake(FakeDiscord):
+    """The pass-level list succeeds; the pre-create re-list is rate limited (a read)."""
+
+    async def list_emojis(self):
+        result = await super().list_emojis()
+        if self.lists >= 2:
+            raise SE.DiscordRateLimited("Discord API 429: slow down", retry_after=20)
+        return result
+
+
+class PrASafetyWorkerTests(AutomationTestBase):
+    def _use(self, fake):
+        self.fake = fake
+        patch.object(SE, "DiscordAPI", lambda *a, **k: fake).start()
+
+    async def _queue(self):
+        return await self._one(
+            "SELECT state, attempts, next_attempt_at FROM shop_emoji_queue ORDER BY product_id")
+
+    async def _statuses(self):
+        return [r[0] for r in await self._all("SELECT status FROM shop_emoji_assets")]
+
+    def _seconds_until(self, iso_value):
+        return (SE._parse_time(iso_value) - SE._utcnow()).total_seconds()
+
+    async def _seed_asset(self, url, *, status, emoji_id):
+        content_hash = SE.content_identity(self.images.contents[url])
+        await self._exec(
+            "INSERT INTO shop_emoji_assets (application_id,content_hash,emoji_name,emoji_id,animated,"
+            "creator_guild_id,pipeline_version,status) VALUES (?,?,?,?,0,?,?,?)",
+            (APP, content_hash, SE.deterministic_emoji_name(content_hash), emoji_id, GUILD,
+             SE.PIPELINE_VERSION, status))
+        await self._exec(
+            "INSERT OR REPLACE INTO shop_emoji_url_aliases (application_id,guild_id,source_url,content_hash) "
+            "VALUES (?,?,?,?)", (APP, GUILD, url, content_hash))
+        return content_hash
+
+    async def test_429_on_create_is_ambiguous_deferred_without_spending_budget_and_pauses_the_worker(self):
+        await self._seed_products(2)
+        self._use(CreateRateLimitedFake(retry_after=2000))
+        report = await self._run_pass()
+        self.assertEqual(self.fake.creates, 1, "Discord said wait: the second product is not tried")
+        self.assertGreaterEqual(report["rate_limited"], 1)
+        self.assertEqual(await self._statuses(), ["uncertain"], "a 429'd POST stays ambiguous")
+        rows = await self._all("SELECT product_id, state, attempts, next_attempt_at FROM shop_emoji_queue "
+                               "ORDER BY product_id")
+        limited = [r for r in rows if r[3] and self._seconds_until(r[3]) > 1000]
+        self.assertEqual(len(limited), 1)
+        self.assertEqual(limited[0][1], Q.STATE_RETRY)
+        self.assertEqual(limited[0][2], 0, "a rate limit does not spend the failure budget")
+        self.assertGreaterEqual(self._seconds_until(limited[0][3]), 1990,
+                                "never earlier than Discord's retry_after")
+        lists_before = self.fake.lists
+        again = await self._run_pass()
+        self.assertTrue(again.get("skipped_rate_limited"))
+        self.assertEqual(again["processed"], 0)
+        self.assertEqual(self.fake.lists, lists_before, "no request while Discord asked us to wait")
+        self.assertEqual(self.fake.creates, 1)
+
+    async def test_429_on_create_never_schedules_before_the_normal_recheck_window(self):
+        await self._seed_products(1)
+        self._use(CreateRateLimitedFake(retry_after=3))
+        await self._run_pass()
+        row = await self._one("SELECT attempts, next_attempt_at FROM shop_emoji_queue")
+        self.assertEqual(row[0], 0)
+        self.assertGreaterEqual(self._seconds_until(row[1]), Q.RETRY_BACKOFF_SECONDS - 5)
+
+    async def test_pass_level_429_pauses_later_passes_and_spends_nothing(self):
+        await self._seed_products(1)
+        self._use(FakeDiscord(list_status={"status": 429, "retry_after": 30}))
+        report = await self._run_pass()
+        self.assertGreaterEqual(report["rate_limited"], 1)
+        self.assertGreater(W._rate_limit_remaining(), 25)
+        lists = self.fake.lists
+        again = await self._run_pass()
+        self.assertTrue(again.get("skipped_rate_limited"))
+        self.assertEqual(self.fake.lists, lists)
+        self.assertEqual((await self._one("SELECT attempts FROM shop_emoji_queue"))[0], 0)
+        self.assertEqual(self.fake.creates, 0)
+
+    async def test_429_on_a_read_before_dispatch_releases_the_claim_and_spends_no_attempt(self):
+        await self._seed_products(1)
+        self._use(SecondListRateLimitedFake())
+        report = await self._run_pass()
+        self.assertEqual(self.fake.creates, 0, "nothing was dispatched")
+        self.assertGreaterEqual(report["rate_limited"], 1)
+        # The claim was released (never dispatched): a fresh asset goes back to failed,
+        # which is safe because no POST was sent.
+        self.assertEqual(await self._statuses(), ["failed"])
+        state, attempts, next_at = await self._queue()
+        self.assertEqual((state, attempts), (Q.STATE_RETRY, 0))
+        self.assertGreaterEqual(self._seconds_until(next_at), 15)
+
+    async def test_inconclusive_get_defers_without_budget_and_never_posts(self):
+        (pid,) = await self._seed_products(1)
+        await self._seed_asset(url_for(0), status="missing", emoji_id="4001")
+        self.fake.get_behavior = lambda emoji_id: SE.EmojiLookup("unknown", None, "HTTP 503")
+        await self._run_pass()
+        self.assertEqual(self.fake.creates, 0)
+        self.assertEqual(await self._statuses(), ["missing"])
+        state, attempts, next_at = await self._queue()
+        self.assertEqual((state, attempts), (Q.STATE_RETRY, 0))
+        self.assertGreaterEqual(self._seconds_until(next_at), Q.RETRY_BACKOFF_SECONDS - 5)
+
+    async def test_malformed_ready_row_is_not_reused_not_marked_done_and_not_recreated(self):
+        (pid,) = await self._seed_products(1)
+        content_hash = await self._seed_asset(url_for(0), status="ready", emoji_id="\u00b2")
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertIsNone(await W._alias_asset(db, APP, GUILD, url_for(0)),
+                              "a ready row without a usable ID is not 'prepared'")
+        # Surfaced before the worker touches it...
+        before = self.client.get("/api/shop-publisher/emojis/report",
+                                 headers={"X-CSRF-Token": CSRF}).get_json()
+        self.assertEqual([e["content_hash"] for e in before["invalid_ready_assets"]], [content_hash])
+        self.assertFalse(before["fully_prepared"])
+        report = await self._run_pass()
+        self.assertEqual(self.fake.creates, 0, "never a blind creation")
+        self.assertEqual(report["reused"], 0)
+        self.assertEqual(report["deferred"], 1)
+        self.assertEqual(await self._statuses(), ["uncertain"])
+        self.assertEqual(await self._queue_state(pid), Q.STATE_RETRY, "the intent is kept, not consumed")
+        # ...and still surfaced afterwards, now as a withdrawn (uncertain) asset.
+        after = self.client.get("/api/shop-publisher/emojis/report",
+                                headers={"X-CSRF-Token": CSRF}).get_json()
+        self.assertEqual([(e["content_hash"], e["status"]) for e in after["invalid_ready_assets"]],
+                         [(content_hash, "uncertain")])
+        self.assertTrue(after["invalid_ready_assets"][0]["reason"].startswith(SE.INVALID_READY_PREFIX))
+
+    async def test_dashboard_prepare_reports_a_rate_limit_as_json_429_with_retry_after(self):
+        (pid,) = await self._seed_products(1)
+        self._use(FakeDiscord(list_status={"status": 429, "retry_after": 7.2}))
+        r = self.client.post("/api/shop-publisher/emojis/prepare", json={"product_ids": [pid]},
+                             headers={"X-CSRF-Token": CSRF})
+        self.assertEqual(r.status_code, 429)
+        self.assertTrue(r.is_json)
+        body = r.get_json()
+        self.assertEqual(body["code"], "discord_rate_limited")
+        self.assertAlmostEqual(body["retry_after"], 7.2)
+        self.assertEqual(r.headers["Retry-After"], "8", "rounded UP, never earlier than Discord said")
+        self.assertEqual(self.fake.creates, 0)
+
+    async def test_publisher_catalog_errors_are_json_not_the_html_500_page(self):
+        with patch("dashboard.api.shop_publisher.attach_prepared_emojis",
+                   AsyncMock(side_effect=RuntimeError("sqlite3 /app/data/nero.db SECRET-DETAIL"))):
+            r = self.client.get("/api/shop-publisher/catalog")
+        self.assertEqual(r.status_code, 500)
+        self.assertTrue(r.is_json, r.data[:200])
+        self.assertEqual(r.get_json()["code"], "catalog_failed")
+        self.assertNotIn("SECRET-DETAIL", r.get_data(as_text=True))
+        self.assertNotIn("nero.db", r.get_data(as_text=True))
+        ok = self.client.get("/api/shop-publisher/catalog")
+        self.assertEqual(ok.status_code, 200, "the happy path is unchanged")
 
 
 if __name__ == "__main__":

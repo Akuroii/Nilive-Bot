@@ -50,6 +50,8 @@ file for a single restart-survivable source of truth.
 
 from __future__ import annotations
 
+import math
+
 import aiosqlite
 
 from utils.shop_emoji import SourceImageError, canonicalize_url
@@ -781,6 +783,26 @@ async def defer_uncertain(db, row, message):
     return bool(cur.rowcount)
 
 
+async def defer_without_attempt(db, row, message, delay_seconds):
+    """Reschedule this generation for no earlier than ``delay_seconds`` and give
+    back the attempt ``record_attempt`` counted at claim time.
+
+    For outcomes that are not a business failure: Discord rate limiting (the
+    delay is the server-provided ``retry_after``) and an inconclusive Discord
+    answer. They must not spend the 4-attempt budget that parks a product. The
+    delay is rounded UP so the retry is never earlier than requested. A stale
+    generation is ignored.
+    """
+    delay = max(1, int(math.ceil(float(delay_seconds))))
+    cur = await db.execute(
+        "UPDATE shop_emoji_queue SET last_error=?, state=?, attempts=MAX(attempts-1,0), "
+        "next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?), "
+        f"updated_at={_now_sql()} WHERE guild_id=? AND product_id=? AND generation=?",
+        (str(message)[:500], STATE_RETRY, f"+{delay} seconds", *_fence(row)))
+    await db.commit()
+    return bool(cur.rowcount)
+
+
 async def still_current(db, row):
     """Is this exact generation still the queued intent? (cheap pre-check)."""
     cur = await db.execute(
@@ -805,5 +827,5 @@ __all__ = [
     "reactivate", "authorize_backfill", "is_authorized", "authorized_guilds",
     "revoke_backfill", "record_sweep", "clear_product", "prune_orphans", "due",
     "stats", "parked_rows", "next_attempt_at", "record_attempt", "mark_done",
-    "mark_failed", "defer_uncertain", "still_current", "descriptor",
+    "mark_failed", "defer_uncertain", "defer_without_attempt", "still_current", "descriptor",
 ]

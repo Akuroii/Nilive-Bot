@@ -58,6 +58,21 @@ class FakeDiscord:
     async def bot_user_id(self):
         return BOT
 
+    async def get_emoji(self, emoji_id):
+        """Get Application Emoji. By default it tells the same truth as list_emojis().
+
+        Tests may set ``get_behavior`` (callable id -> EmojiLookup or raises) to model
+        a disagreeing / inconclusive endpoint.
+        """
+        self.get_calls = getattr(self, "get_calls", []) + [str(emoji_id)]
+        hook = getattr(self, "get_behavior", None)
+        if hook is not None:
+            return hook(str(emoji_id))
+        for emoji in self.remote:
+            if str(emoji.get("id")) == str(emoji_id):
+                return SE.EmojiLookup("present", dict(emoji))
+        return SE.EmojiLookup("absent")
+
     async def list_emojis(self):
         self.list_calls += 1
         if self.list_error:
@@ -908,14 +923,19 @@ def test_changed_source_ready_without_bound_id_is_not_clean_success(shop):
         GUILD, [1], retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
 
     _assert_changed_source_alias_result(shop, old_hash, old_before, new_hash, result)
-    assert result["status"] == "failed"
-    assert result["code"] == "failed"
-    assert result["message"] == "The ready asset has no usable bound emoji ID."
+    # A ready row whose bound ID is unusable is no longer sent down the failed ->
+    # recreate path (an earlier create may have succeeded with only the ID damaged).
+    # It is withdrawn into `uncertain` and stays protected; nothing is created.
+    assert result["status"] == "uncertain"
+    assert result["code"] == "create_uncertain"
+    assert result["message"] == (
+        "invalid_ready_asset: The ready asset has no usable bound emoji ID; reconcile before "
+        "relying on it (no replacement is created automatically).")
     assert result["emoji_id"] is None and result["emoji"] == ""
     assert result["duplicates"] == []
-    assert result["retry_after"] is None
+    assert result["retry_after"] is not None      # the quarantine the uncertain state carries
     current = asset_row(shop, new_hash)
-    assert current["status"] == "failed" and current["emoji_id"] is None
+    assert current["status"] == "uncertain" and current["emoji_id"] is None
     assert current["last_error"] == result["message"]
     assert shop.fake.create_calls == []
     assert shop.fake.delete_calls == []
@@ -1512,3 +1532,461 @@ def test_changed_source_remap_post_is_fenced_at_the_boundary(shop):
     uploaded = [png for _name, png, _bot in shop.fake.create_calls]
     assert PNG2 not in uploaded, (
         "the remap uploaded the replacement image after the listing reverted")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PR-A safety hardening
+#   A1 uncertain-origin protection · A2 missing-state protection ·
+#   A3 rate limits · A4 strict ASCII emoji-ID validation / invalid ready rows
+# Every Discord interaction is a fake; nothing here touches the network.
+# ═══════════════════════════════════════════════════════════════════════════
+import os
+
+NAME_BASE = "x"
+
+
+def _expire_quarantine(shop, content_hash):
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_emoji_assets SET quarantine_until=? WHERE content_hash=?",
+                   (SE._iso(SE._utcnow() - timedelta(seconds=1)), content_hash))
+
+
+def _ambiguous_create(shop, error=None):
+    """Drive a first create to `uncertain`; return its content hash."""
+    shop.fake.create_error = error or SE.DiscordAPIError("5xx", uncertain=True)
+    first = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert first["status"] == "uncertain", first
+    _expire_quarantine(shop, first["content_hash"])
+    shop.fake.create_error = None
+    return first["content_hash"]
+
+
+def _ack_retry(products=(1,)):
+    return run(SE.prepare_product_emojis(
+        GUILD, list(products), retry_uncertain=True, acknowledge_duplicate_risk=True))["results"][0]
+
+
+# ── A1: an operation that started from `uncertain` can never settle as failed ──
+@pytest.mark.parametrize("rejection", [
+    SE.DiscordAPIError("Discord API 400: invalid", status=400, http_status=400),
+    SE.DiscordAPIError("Discord API 403: forbidden", status=403, http_status=403),
+    SE.DiscordAPIError("Discord API 404: unknown", status=404, http_status=404),
+])
+def test_a1_definite_4xx_during_uncertain_recovery_keeps_asset_uncertain(shop, rejection):
+    content_hash = _ambiguous_create(shop)
+    shop.fake.create_error = rejection
+    retried = _ack_retry()
+    # A later 4xx does not prove the EARLIER ambiguous POST failed.
+    assert retried["status"] == "uncertain"
+    row = asset_row(shop, content_hash)
+    assert row["status"] == "uncertain" and row["status"] not in {"failed", "missing"}
+    assert row["quarantine_until"], "the duplicate-risk quarantine is restarted"
+    assert len(shop.fake.create_calls) == 2
+
+
+def test_a1_a_fresh_create_with_a_definite_4xx_still_fails_normally(shop):
+    shop.fake.create_error = SE.DiscordAPIError("Discord API 400: invalid", status=400, http_status=400)
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "failed" and result["code"] == "discord_rejected"
+    assert asset_row(shop, result["content_hash"])["status"] == "failed"
+
+
+def test_a1_capacity_full_during_uncertain_recovery_keeps_asset_uncertain(shop):
+    content_hash = _ambiguous_create(shop)
+    shop.fake.remote = [
+        {"id": str(5_000 + i), "name": f"other_{i}", "animated": False,
+         "application_id": APP, "user": {"id": BOT}}
+        for i in range(SE.APPLICATION_EMOJI_LIMIT)]
+    posts_before = len(shop.fake.create_calls)
+    retried = _ack_retry()
+    assert retried["status"] == "uncertain" and retried["code"] == "emoji_capacity"
+    assert asset_row(shop, content_hash)["status"] == "uncertain"
+    assert len(shop.fake.create_calls) == posts_before, "no POST once capacity is full"
+
+
+def test_a1_429_during_uncertain_recovery_keeps_asset_uncertain_and_carries_the_delay(shop):
+    content_hash = _ambiguous_create(shop)
+    shop.fake.create_error = SE.DiscordRateLimited(
+        "Discord API 429", retry_after=7.5, uncertain=True, method="POST")
+    retried = _ack_retry()
+    assert retried["status"] == "uncertain"
+    assert retried["rate_limit_retry_after"] == 7.5
+    assert asset_row(shop, content_hash)["status"] == "uncertain"
+
+
+@pytest.mark.parametrize("error", [
+    SE.DiscordAPIError("Discord API 502: bad gateway", status=502, http_status=502, uncertain=True),
+    SE.DiscordAPIError("Discord transport did not confirm the operation.",
+                       code="create_uncertain", status=504, uncertain=True),
+    SE.DiscordAPIError("connection reset", code="create_uncertain", status=504, uncertain=True),
+])
+def test_a1_5xx_timeout_and_reset_during_uncertain_recovery_stay_uncertain(shop, error):
+    content_hash = _ambiguous_create(shop)
+    shop.fake.create_error = error
+    assert _ack_retry()["status"] == "uncertain"
+    assert asset_row(shop, content_hash)["status"] == "uncertain"
+
+
+def test_a1_lost_response_during_recovery_is_reconciled_not_reposted(shop):
+    content_hash = _ambiguous_create(shop)
+
+    async def landed_but_response_lost(name, final_png, bot_user_id):
+        shop.fake.remote.append(remote_emoji(content_hash, 8001))     # Discord accepted it...
+    shop.fake.create_hook = landed_but_response_lost
+    shop.fake.create_error = SE.DiscordAPIError("timeout", code="create_uncertain",
+                                                status=504, uncertain=True)
+    assert _ack_retry()["status"] == "uncertain"
+    shop.fake.create_hook, shop.fake.create_error = None, None
+    posts = len(shop.fake.create_calls)
+    reconciled = run(SE.reconcile_product_emojis(GUILD, [1]))["results"][0]
+    assert reconciled["status"] == "ready" and reconciled["emoji_id"] == "8001"
+    assert len(shop.fake.create_calls) == posts, "convergence needed no further POST"
+
+
+def test_a1_process_interruption_after_dispatch_never_releases_the_claim(shop):
+    content_hash = _ambiguous_create(shop)
+
+    async def interrupted(name, final_png, bot_user_id):
+        raise asyncio.CancelledError()
+    shop.fake.create_hook = interrupted
+    with pytest.raises(asyncio.CancelledError):
+        _ack_retry()
+    row = asset_row(shop, content_hash)
+    # The POST may have reached Discord: the claim is NOT handed back to failed.
+    assert row["status"] == "preparing" and row["attempt_id"]
+    # After a restart the stale claim ages into `uncertain`, never into `failed`.
+    with sqlite3.connect(shop.path) as db:
+        db.execute("UPDATE shop_emoji_assets SET attempt_started_at=? WHERE content_hash=?",
+                   (SE._iso(SE._utcnow() - timedelta(seconds=SE.PREPARING_STALE_SECONDS + 5)),
+                    content_hash))
+    shop.fake.create_hook = None
+    run(SE.reconcile_product_emojis(GUILD, [1]))
+    assert asset_row(shop, content_hash)["status"] == "uncertain"
+
+
+# ── A1: mutating-request classification (transport) ────────────────────────
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 405])
+def test_a1_documented_definitive_rejections_of_a_mutating_request_are_definite(status):
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([FakeResponse(status, b'{"message":"no"}')])
+    with pytest.raises(SE.DiscordAPIError) as error:
+        run(client._request("POST", "/applications/test/emojis", mutating=True))
+    assert error.value.uncertain is False and error.value.http_status == status
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308, 408, 409, 413, 418, 422, 500, 502, 503, 504, 599])
+def test_a1_every_unrecognised_mutating_status_is_ambiguous_and_never_replayed(status):
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    headers = {"Location": "https://discord.com/api/v10/elsewhere"} if 300 <= status < 400 else {}
+    # A second, "successful" response is queued to prove it is never requested.
+    client._session = FakeSession([FakeResponse(status, b"", headers), FakeResponse(200, b'{"id":"1"}')])
+    with pytest.raises(SE.DiscordAPIError) as error:
+        run(client._request("POST", "/applications/test/emojis", mutating=True))
+    assert error.value.uncertain is True and error.value.code == "create_uncertain"
+    assert len(client._session.calls) == 1, "an unexpected mutating response is never replayed"
+    assert client._session.calls[0][1]["allow_redirects"] is False
+
+
+def test_a1_a_non_mutating_redirect_is_not_followed_either():
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([FakeResponse(302, b"", {"Location": "https://x.example/"}),
+                                   FakeResponse(200, b"{}")])
+    with pytest.raises(SE.DiscordAPIError) as error:
+        run(client._request("GET", "/applications/test/emojis"))
+    assert error.value.uncertain is False
+    assert len(client._session.calls) == 1 and client._session.calls[0][1]["allow_redirects"] is False
+
+
+# ── A3: rate limits ────────────────────────────────────────────────────────
+@pytest.mark.parametrize("values, expected", [
+    (("12", 1.5), 12.0), ((None, 4.25), 4.25), (("3", None), 3.0), (("0", 0), 0.0),
+    (("abc", None), None), ((None, None), None), (("-5", -1), None),
+    (("nan", "inf"), None), ((None, 10 ** 9), SE.MAX_RATE_LIMIT_SECONDS), (("1e2", None), 100.0),
+])
+def test_a3_retry_after_uses_the_largest_valid_server_delay(values, expected):
+    assert SE._parse_retry_after(*values) == expected
+
+
+def test_a3_429_honours_header_and_json_field_and_keeps_mutating_requests_ambiguous():
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([FakeResponse(
+        429, b'{"message":"slow down","retry_after":1.5,"global":false}',
+        {"Retry-After": "12", "X-RateLimit-Scope": "shared"})])
+    with pytest.raises(SE.DiscordRateLimited) as error:
+        run(client._request("POST", "/applications/test/emojis", mutating=True))
+    exc = error.value
+    assert exc.retry_after == 12.0 and exc.scope == "shared" and exc.is_global is False
+    assert exc.retry_after_provided is True
+    assert exc.uncertain is True and exc.code == "create_uncertain" and exc.http_status == 429
+    assert isinstance(exc, SE.DiscordAPIError)
+
+
+def test_a3_429_on_a_read_is_not_uncertain_and_falls_back_only_without_a_server_delay():
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([
+        FakeResponse(429, b'{"message":"x","retry_after":4.25,"global":true}', {"X-RateLimit-Global": "true"}),
+        FakeResponse(429, b"not json")])
+    with pytest.raises(SE.DiscordRateLimited) as first:
+        run(client._request("GET", "/applications/test/emojis"))
+    assert first.value.retry_after == 4.25 and first.value.is_global and not first.value.uncertain
+    with pytest.raises(SE.DiscordRateLimited) as second:
+        run(client._request("GET", "/applications/test/emojis"))
+    assert second.value.retry_after == SE.DEFAULT_RATE_LIMIT_SECONDS
+    assert second.value.retry_after_provided is False
+
+
+def test_a3_429_is_logged_with_its_schedule(caplog):
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([FakeResponse(429, b'{"retry_after":2}', {})])
+    with caplog.at_level("WARNING", logger=SE.log.name):
+        with pytest.raises(SE.DiscordRateLimited):
+            run(client._request("GET", "/applications/test/emojis"))
+    assert any("rate limited" in r.message and "retry_after=2.00s" in r.message for r in caplog.records)
+
+
+def test_a3_explicit_batch_stops_sending_after_the_first_rate_limit(shop):
+    shop.images[URL2] = PNG2
+    shop.fake.list_error = None
+    original = shop.fake.create_emoji
+
+    async def limited(name, final_png, bot_user_id):
+        shop.fake.create_calls.append((name, final_png, bot_user_id))
+        raise SE.DiscordRateLimited("Discord API 429", retry_after=9, uncertain=True, method="POST")
+    shop.fake.create_emoji = limited
+    results = run(SE.prepare_product_emojis(GUILD, [1, 3]))["results"]
+    assert len(shop.fake.create_calls) == 1, "the second URL must not be attempted"
+    assert results[0]["status"] == "uncertain" and results[0]["rate_limit_retry_after"] == 9.0
+    assert results[1]["code"] == "rate_limited" and results[1]["rate_limit_retry_after"] == 9.0
+    shop.fake.create_emoji = original
+
+
+# ── A2: `missing` needs the exact Get Application Emoji endpoint ───────────
+class RaisingSession(FakeSession):
+    def __init__(self, error):
+        super().__init__([])
+        self.error = error
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((url, kwargs))
+        raise self.error
+
+
+def _get_emoji(session, emoji_id="4001"):
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = session
+    return run(client.get_emoji(emoji_id)), session
+
+
+def test_a2_get_emoji_present_requires_the_exact_id():
+    ok, session = _get_emoji(FakeSession([FakeResponse(200, json.dumps(
+        {"id": "4001", "name": "n", "animated": False}).encode())]))
+    assert ok.state == "present" and ok.emoji["id"] == "4001"
+    assert session.calls[0][0].endswith(f"/applications/{APP}/emojis/4001")
+    other, _ = _get_emoji(FakeSession([FakeResponse(200, json.dumps({"id": "9", "name": "n"}).encode())]))
+    assert other.state == "unknown"
+    garbled, _ = _get_emoji(FakeSession([FakeResponse(200, b"[]")]))
+    assert garbled.state == "unknown"
+
+
+def test_a2_only_404_unknown_emoji_is_absence():
+    absent, _ = _get_emoji(FakeSession([FakeResponse(
+        404, b'{"message":"Unknown Emoji","code":10014}')]))
+    assert absent.state == "absent"
+    for response in (FakeResponse(404, b"<html>nginx</html>"),
+                     FakeResponse(404, b'{"message":"Unknown Application","code":10002}'),
+                     FakeResponse(404, b'{"message":"Not Found"}'),
+                     FakeResponse(403, b'{"message":"Missing Access","code":50001}'),
+                     FakeResponse(500, b""), FakeResponse(502, b""), FakeResponse(302, b"")):
+        result, _ = _get_emoji(FakeSession([response]))
+        assert result.state == "unknown", (response.status, result.state)
+
+
+@pytest.mark.parametrize("error", [asyncio.TimeoutError(), aiohttp.ClientConnectionError("reset"),
+                                   OSError("network down")])
+def test_a2_timeout_and_connection_failure_are_unknown_not_absent(error):
+    result, _ = _get_emoji(RaisingSession(error))
+    assert result.state == "unknown"
+
+
+def test_a2_429_is_reported_for_scheduling_and_an_invalid_id_sends_nothing():
+    client = SE.DiscordAPI(application_id=APP, token="secret")
+    client._session = FakeSession([FakeResponse(429, b'{"retry_after":3}', {})])
+    with pytest.raises(SE.DiscordRateLimited):
+        run(client.get_emoji("4001"))
+    session = FakeSession([])
+    for bad in ("²", "", "0", "abc", None, "٣"):
+        client._session = session
+        assert run(client.get_emoji(bad)).state == "unknown"
+    assert session.calls == []
+
+
+def test_a2_list_omission_alone_never_marks_missing_or_posts(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="4001", attempt=None)
+    shop.fake.remote = []                                         # the list omits it...
+    shop.fake.get_behavior = lambda emoji_id: SE.EmojiLookup(     # ...but the exact GET finds it
+        "present", remote_emoji(content_hash, emoji_id))
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "ready" and result["emoji_id"] == "4001"
+    assert asset_row(shop, content_hash)["status"] == "ready"
+    assert shop.fake.create_calls == []
+    assert shop.fake.get_calls and set(shop.fake.get_calls) == {"4001"}   # only the bound ID is asked about
+
+
+def test_a2_exact_get_absence_is_what_marks_missing_and_allows_recovery(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="4001", attempt=None)
+    shop.fake.remote = []
+    recovered = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert shop.fake.get_calls[0] == "4001"
+    assert recovered["status"] == "ready" and recovered["emoji_id"] != "4001"
+    assert len(shop.fake.create_calls) == 1
+    assert asset_row(shop, content_hash)["status"] == "ready"
+
+
+@pytest.mark.parametrize("lookup", [
+    SE.EmojiLookup("unknown", None, "HTTP 403"), SE.EmojiLookup("unknown", None, "HTTP 500"),
+])
+def test_a2_inconclusive_get_for_a_ready_asset_changes_nothing_and_never_posts(shop, lookup):
+    content_hash = put_asset(shop, status="ready", emoji_id="4001", attempt=None)
+    shop.fake.remote = []
+    shop.fake.get_behavior = lambda emoji_id: lookup
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "ready" and result["emoji_id"] == "4001"
+    assert asset_row(shop, content_hash)["status"] == "ready"
+    assert shop.fake.create_calls == []
+
+
+@pytest.mark.parametrize("status", ["missing", "failed"])
+def test_a2_inconclusive_get_for_a_bound_nonready_asset_blocks_any_post(shop, status):
+    content_hash = put_asset(shop, status=status, emoji_id="4001", attempt=None)
+    shop.fake.remote = []
+    shop.fake.get_behavior = lambda emoji_id: SE.EmojiLookup("unknown", None, "HTTP 503")
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["code"] == "emoji_state_unknown" and result["status"] == status
+    assert asset_row(shop, content_hash)["status"] == status
+    assert shop.fake.create_calls == []
+
+
+def test_a2_rate_limited_get_changes_nothing_and_reports_the_delay(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="4001", attempt=None)
+    shop.fake.remote = []
+
+    def limited(emoji_id):
+        raise SE.DiscordRateLimited("Discord API 429", retry_after=3)
+    shop.fake.get_behavior = limited
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["code"] == "rate_limited" and result["rate_limit_retry_after"] == 3.0
+    assert asset_row(shop, content_hash)["status"] == "ready"
+    assert shop.fake.create_calls == []
+
+
+def test_a2_a_missing_asset_whose_emoji_reappeared_is_rebound_not_recreated(shop):
+    content_hash = put_asset(shop, status="missing", emoji_id="4001", attempt=None)
+    shop.fake.remote = [remote_emoji(content_hash, 4001)]
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "ready" and result["emoji_id"] == "4001"
+    assert shop.fake.create_calls == []
+
+
+def test_a2_ambiguous_post_without_a_persisted_id_stays_protected(shop):
+    content_hash = _ambiguous_create(shop)
+    posts = len(shop.fake.create_calls)
+    # Quarantine has elapsed and nothing matches, but there is NO acknowledgement:
+    # absence from a list is not proof, so nothing is created.
+    result = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "uncertain"
+    assert len(shop.fake.create_calls) == posts
+    assert asset_row(shop, content_hash)["emoji_id"] is None
+
+
+# ── A4: strict ASCII emoji IDs; malformed `ready` rows are surfaced ────────
+VALID_IDS = ["1", "42", "123456789012345678", "12345678901234567890", 5, 9007199254740993]
+INVALID_IDS = ["²", "³", "١٢٣", "９９", "٣", "0", "-1", "", " 12", "12 ", "1_0", "1.0", "abc", "0123",
+               "123456789012345678901", "12\n", None, True, False, 0, -7, 1.5, b"12", [], {}, object()]
+
+
+@pytest.mark.parametrize("value", VALID_IDS)
+def test_a4_valid_ids(value):
+    assert SE._valid_emoji_id(value) is True
+
+
+@pytest.mark.parametrize("value", INVALID_IDS)
+def test_a4_invalid_ids_return_false_and_never_raise(value):
+    assert SE._valid_emoji_id(value) is False
+
+
+def test_a4_the_sql_predicate_agrees_with_the_python_validator():
+    values = [v for v in VALID_IDS + INVALID_IDS if isinstance(v, str)]
+    with sqlite3.connect(":memory:") as db:
+        db.execute("CREATE TABLE t (v TEXT)")
+        db.executemany("INSERT INTO t VALUES (?)", [(v,) for v in values] + [(None,)])
+        accepted = {row[0] for row in db.execute(
+            "SELECT v FROM t WHERE " + SE.SQL_VALID_EMOJI_ID.format(col="v"))}
+    assert accepted == {v for v in values if SE._valid_emoji_id(v)}
+
+
+def _put_ready(shop, final_png, emoji_id, url):
+    content_hash = SE.content_identity(final_png)
+    with sqlite3.connect(shop.path) as db:
+        db.execute(
+            "INSERT OR REPLACE INTO shop_emoji_assets (application_id,content_hash,emoji_name,emoji_id,"
+            "animated,creator_guild_id,pipeline_version,status) VALUES(?,?,?,?,0,?,?,'ready')",
+            (APP, content_hash, SE.deterministic_emoji_name(content_hash), emoji_id, GUILD,
+             SE.PIPELINE_VERSION))
+        db.execute("INSERT OR REPLACE INTO shop_emoji_url_aliases "
+                   "(application_id,guild_id,source_url,content_hash) VALUES(?,?,?,?)",
+                   (APP, GUILD, url, content_hash))
+    return content_hash
+
+
+def test_a4_one_malformed_row_costs_one_icon_not_the_batch(shop):
+    import aiosqlite
+
+    _put_ready(shop, PNG1, "4001", URL1)
+    _put_ready(shop, PNG2, "²", URL2)
+
+    async def attach():
+        async with aiosqlite.connect(shop.path) as db:
+            return await SE.attach_prepared_emojis(db, GUILD, [{"id": 1}, {"id": 3}])
+    first, second = run(attach())
+    assert first["app_emoji"].startswith("<:") and "4001" in first["app_emoji"]
+    assert second["app_emoji"] == ""
+
+
+@pytest.mark.parametrize("bad_id", [None, "", "0", "abc", "²", "١٢٣", "９９", "-1", "9" * 25])
+def test_a4_malformed_ready_row_is_withdrawn_and_never_triggers_a_blind_create(shop, bad_id):
+    content_hash = put_asset(shop, status="ready", emoji_id=bad_id, attempt=None)
+    shop.fake.remote = []
+    first = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert first["status"] == "uncertain" and first["emoji"] == ""
+    assert first["message"].startswith(SE.INVALID_READY_PREFIX)
+    row = asset_row(shop, content_hash)
+    assert row["status"] == "uncertain" and row["quarantine_until"] and row["attempt_id"]
+    assert row["emoji_id"] == bad_id, "the damaged value is kept as evidence"
+    again = run(SE.prepare_product_emojis(GUILD, [1]))["results"][0]
+    assert again["status"] == "uncertain"
+    assert shop.fake.create_calls == [], "no replacement is ever created from a malformed row"
+
+
+def test_a4_a_withdrawn_row_is_repaired_only_by_ownership_and_content_evidence(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="²", attempt=None)
+    shop.fake.remote = []
+    run(SE.prepare_product_emojis(GUILD, [1]))
+    assert asset_row(shop, content_hash)["status"] == "uncertain"
+    # Read-only reconcile: an owned emoji whose name is the content-derived one is adopted.
+    shop.fake.remote = [remote_emoji(content_hash, 7001)]
+    repaired = run(SE.reconcile_product_emojis(GUILD, [1]))["results"][0]
+    assert repaired["status"] == "ready" and repaired["emoji_id"] == "7001"
+    assert shop.fake.create_calls == []
+
+
+def test_a4_an_untrusted_name_match_does_not_repair_a_withdrawn_row(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="abc", attempt=None)
+    shop.fake.remote = []
+    run(SE.prepare_product_emojis(GUILD, [1]))
+    foreign = remote_emoji(content_hash, 7002)
+    del foreign["user"]                       # no bot-uploader provenance
+    shop.fake.remote = [foreign]
+    result = run(SE.reconcile_product_emojis(GUILD, [1]))["results"][0]
+    assert result["status"] == "uncertain"
+    assert asset_row(shop, content_hash)["emoji_id"] == "abc"
+    assert shop.fake.create_calls == []
