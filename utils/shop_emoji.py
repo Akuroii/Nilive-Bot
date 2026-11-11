@@ -1738,6 +1738,17 @@ async def _create_claimed(db, discord, asset, final_png, bot_user_id,
             return _result(reconciled, code="deterministic_name_conflict", duplicates=duplicates)
         if reconciled["status"] != "preparing" or reconciled.get("attempt_id") != asset.get("attempt_id"):
             return _result(reconciled, duplicates=duplicates)
+        # Capacity is an APPLICATION-wide fact, not a per-guild or per-request
+        # one: Discord documents "an application can own up to 2000 emojis",
+        # owned by the app and usable only by it, whether uploaded through the
+        # API or through the app's settings in the portal. ``remote`` is the
+        # List Application Emojis snapshot for that application (one complete
+        # ``items`` array - the route documents no pagination), so its length is
+        # the only authoritative count available; nothing here is derived from
+        # rate-limit headers, which Discord documents as unreliable for emoji
+        # routes. Request limits are handled where they belong: a 429 schedules
+        # (never fails) the work, and a rejection at this boundary is a definite
+        # answer that releases the claim.
         if len(remote) >= APPLICATION_EMOJI_LIMIT:
             failed = await _fail_claim(db, asset, "The application's total emoji capacity is full.")
             if failed["status"] == "ready":
@@ -2330,9 +2341,16 @@ async def delete_confirmed_duplicate(guild_id, content_hash, emoji_id, *, confir
                     if not _valid_emoji_id(asset.get("emoji_id")):
                         raise ShopEmojiError("The ready asset has no usable bound emoji ID.",
                                              code="duplicate_bound_id_required", status=409)
-                    if str(asset["emoji_id"]) == str(emoji_id):
-                        raise ShopEmojiError("The bound emoji ID cannot be deleted as a duplicate.",
-                                             code="bound_emoji_protected", status=409)
+                # Any status, not only ``ready``: a row that still records this
+                # exact emoji ID (a ``missing`` row keeps its ID as evidence, a
+                # ``failed`` row may carry one from an earlier life) is the only
+                # local proof of what that ID was created for. Deleting it would
+                # destroy that evidence and could not be undone, so it is
+                # protected exactly like a ready binding.
+                if (_valid_emoji_id(asset.get("emoji_id"))
+                        and str(asset["emoji_id"]) == str(emoji_id)):
+                    raise ShopEmojiError("The bound emoji ID cannot be deleted as a duplicate.",
+                                         code="bound_emoji_protected", status=409)
                 remote = await discord.list_emojis()
                 matches = _matching_name(asset, remote)
                 ids = {str(emoji["id"]) for emoji in matches}
@@ -2344,6 +2362,27 @@ async def delete_confirmed_duplicate(guild_id, content_hash, emoji_id, *, confir
                 if not _ownership_supported(target, discord.application_id, bot_user_id):
                     raise ShopEmojiError("The duplicate's ownership metadata does not permit deletion.",
                                          code="duplicate_ownership_conflict", status=409)
+                # ── APPLICATION-WIDE binding check ── An application emoji is a
+                # SHARED resource: it is owned by the application, not by the
+                # guild that asked for the deletion, and nothing in Discord ties
+                # it to one server. The alias row checked above proves only that
+                # THIS content hash is referenced here; it says nothing about
+                # another guild's asset row that may hold this exact emoji ID.
+                # ``shop_emoji_assets`` is keyed by (application_id, content_hash)
+                # but the emoji_id it stores is application-scoped, so the
+                # question "is this ID still bound?" must be asked across every
+                # content hash and every creator guild - never guild-scoped.
+                # Deleting a still-bound ID would silently break the other
+                # consumer's icon, so this runs immediately before DELETE (the
+                # fresh list above has already proven the ID still exists).
+                bound_elsewhere = await emoji_name_conflict(
+                    db, discord.application_id, emoji_id, content_hash)
+                if bound_elsewhere:
+                    raise ShopEmojiError(
+                        "This Discord emoji is still bound to another prepared asset "
+                        f"({bound_elsewhere[:12]}...); deleting it would break that consumer.",
+                        code="emoji_in_use", status=409,
+                        details={"content_hash": bound_elsewhere})
                 try:
                     await discord.delete_emoji(str(emoji_id))
                 except DiscordAPIError as exc:

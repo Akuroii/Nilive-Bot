@@ -1990,3 +1990,69 @@ def test_a4_an_untrusted_name_match_does_not_repair_a_withdrawn_row(shop):
     assert result["status"] == "uncertain"
     assert asset_row(shop, content_hash)["emoji_id"] == "abc"
     assert shop.fake.create_calls == []
+
+
+# ── Shared-resource deletion safety (application-wide binding) ──────────────
+# An application emoji belongs to the APPLICATION, not to the guild that asked
+# for the cleanup. The duplicate-delete guard therefore has to ask "is this ID
+# still bound anywhere?" across every content hash and every creator guild.
+
+def put_foreign_asset(shop, final_png, status, emoji_id, guild):
+    """One asset row owned by another guild, with no alias for ``GUILD``."""
+    content_hash = SE.content_identity(final_png)
+    with sqlite3.connect(shop.path) as db:
+        db.execute(
+            "INSERT OR REPLACE INTO shop_emoji_assets "
+            "(application_id,content_hash,emoji_name,emoji_id,animated,creator_guild_id,pipeline_version,status,"
+            "attempt_id,attempt_started_at,quarantine_until,last_error) VALUES(?,?,?,?,0,?,?,?,?,?,?,?)",
+            (APP, content_hash, SE.deterministic_emoji_name(content_hash), emoji_id, guild,
+             SE.PIPELINE_VERSION, status, None, None, None, "foreign tenant row"))
+    return content_hash
+
+
+def test_duplicate_delete_refuses_an_id_bound_to_another_guilds_asset(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="3001", attempt=None)
+    foreign_hash = put_foreign_asset(shop, b"another image owned by guild 2",
+                                     status="missing", emoji_id="3002", guild=GUILD + 1)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert error.value.code == "emoji_in_use"
+    assert error.value.status == 409
+    assert error.value.details == {"content_hash": foreign_hash}
+    assert shop.fake.delete_calls == []
+    assert "3002" in {str(emoji["id"]) for emoji in shop.fake.remote}
+
+
+def test_duplicate_delete_is_allowed_once_no_asset_holds_the_id(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="3001", attempt=None)
+    foreign_hash = put_foreign_asset(shop, b"another image owned by guild 2",
+                                     status="failed", emoji_id=None, guild=GUILD + 1)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+
+    deleted = run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3002", confirm=True))
+    assert deleted["deleted_emoji_id"] == "3002"
+    assert shop.fake.delete_calls == ["3002"]
+    assert asset_row(shop, foreign_hash)["emoji_id"] is None
+
+
+def test_duplicate_delete_still_requires_this_guilds_alias(shop):
+    foreign_hash = put_foreign_asset(shop, PNG2, status="failed", emoji_id=None, guild=GUILD)
+    shop.fake.remote = [remote_emoji(foreign_hash, 3601), remote_emoji(foreign_hash, 3602)]
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.delete_confirmed_duplicate(GUILD, foreign_hash, "3602", confirm=True))
+    assert error.value.code == "unknown_emoji_asset"
+    assert shop.fake.delete_calls == []
+
+
+def test_duplicate_delete_refuses_an_id_the_asset_row_still_records(shop):
+    # A `missing` row keeps its emoji_id as evidence of what was created. The
+    # fresh list now shows that ID again: it must not be deleted as a "duplicate".
+    content_hash = put_asset(shop, status="missing", emoji_id="3001", attempt=None)
+    shop.fake.remote = [remote_emoji(content_hash, 3001), remote_emoji(content_hash, 3002)]
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.delete_confirmed_duplicate(GUILD, content_hash, "3001", confirm=True))
+    assert error.value.code == "bound_emoji_protected"
+    assert shop.fake.delete_calls == []
+    assert asset_row(shop, content_hash)["status"] == "missing"
