@@ -1,24 +1,36 @@
-"""Multi-process proof for the Shop emoji queue on ONE SQLite file (P1).
+"""SQLite WAL behaviour for the Shop emoji queue, at two different scopes.
 
-Why a real multi-process test: the Dashboard and the Bot are SEPARATE processes
-writing the same SQLite file (``Dashboard -> shop_emoji_queue`` work rows, ``Bot
--> shop_emoji_worker`` progress writes). "It works in threads" says nothing about
-that, and the failure modes here are library-level:
+What is actually exercised, so the evidence is not inflated:
 
-  * WAL allows many readers + ONE writer. Two writers serialize through the
-    write lock; without a busy timeout the loser fails immediately with
-    ``database is locked`` (SQLITE_BUSY).
-  * A DEFERRED transaction that reads first and writes later can fail with
-    SQLITE_BUSY_SNAPSHOT *even with a busy timeout*, because its read snapshot
-    is stale. ``BEGIN IMMEDIATE`` takes the write lock before reading, which is
-    exactly what ``utils.shop_emoji._claim_existing``/``_insert_asset_or_claim``
-    do. The deterministic two-connection case is asserted below (no sleeps, no
-    thread racing).
-  * Durable intent is fenced by the queue ``generation``, not by locks: a writer
-    holding a stale snapshot must be REFUSED, in another process too.
+``MultiprocessQueueTests`` - 6 tests, each starting ONE OR MORE SEPARATE
+``python`` processes (``subprocess.Popen``) against a temp database:
+  * a stale queue generation cannot complete newer intent written by another
+    process (marker-file handshake, no sleeps);
+  * two processes racing to finish one generation: exactly one wins;
+  * two processes writing the same row concurrently: no "database is locked",
+    no lost write;
+  * ``_insert_asset_or_claim`` (``BEGIN IMMEDIATE``) from two processes on one
+    content hash: exactly one owner, one row;
+  * a SECOND process takes over an asset attempt; the stale worker's create
+    cannot be adopted into the new attempt;
+  * ``ensure_shop_emoji_schema`` from two processes on a legacy schema.
 
-Everything here uses temp databases and fake URLs. No Discord call, no
-production database, no emoji is created or deleted.
+``WalTransactionSemanticsTests`` - 2 tests, same process, deliberately NOT
+multi-process: two SQLite connections and, in one case, two threads, to pin the
+library-level facts (a deferred read-then-write fails fast with
+SQLITE_BUSY/BUSY_SNAPSHOT even with ``busy_timeout=5000``; ``BEGIN IMMEDIATE``
+waits for the holder and then observes its committed value).
+
+What this file does NOT prove:
+  * that Railway's runtime behaves the same - the deployed ``libsqlite3``
+    version is not measured here (see SHOP_EMOJI_AUTOMATION.md);
+  * anything about production data volumes, WAL file growth, or checkpoint
+    latency under real load;
+  * that the SQLite WAL-RESET corruption bug (fixed in 3.51.3) is absent: these
+    tests never reproduce that race, and a clean run says nothing about it.
+
+No Discord call, no production database, no emoji is created or deleted; every
+database is a temp file owned by the test.
 
 Run:  python3 scripts/test_shop_emoji_multiprocess.py
 """
