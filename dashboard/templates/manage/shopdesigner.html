@@ -92,6 +92,31 @@
                         </label>
                         <div id="sd-emoji-status" class="sd-muted" role="status" aria-live="polite">Select a roster product to prepare its stored icon.</div>
                         <div id="sd-emoji-results" class="sd-muted"></div>
+
+                        <div class="sd-preview-detail" aria-labelledby="sd-catalog-emoji-title"
+                             id="sd-catalog-emoji">
+                            <h3 id="sd-catalog-emoji-title">Prepare all Shop product icons</h3>
+                            <p class="sd-muted">
+                                Prepares the icons of <strong>every eligible product in this server's
+                                Shop catalog</strong> — read straight from the shop database, not from
+                                the roster above. No product selection, no design needed. This is an
+                                owner-only, one-time authorisation for <em>this</em> server; other
+                                servers are never touched. Uploads happen in the background in small
+                                batches, so this returns immediately.
+                            </p>
+                            <div class="sd-roster-actions">
+                                <button id="sd-catalog-emoji-backfill" class="btn btn-primary" type="button">Prepare all Shop product icons</button>
+                                <button id="sd-catalog-emoji-refresh" class="btn btn-secondary" type="button">Refresh progress</button>
+                            </div>
+                            <label class="sd-muted" for="sd-catalog-emoji-retry-parked">
+                                <input id="sd-catalog-emoji-retry-parked" type="checkbox">
+                                Also retry products whose preparation was given up on (parked).
+                            </label>
+                            <div id="sd-catalog-emoji-status" class="sd-muted" role="status" aria-live="polite">
+                                Choose “Refresh progress” to check this server’s icon preparation.
+                            </div>
+                            <div id="sd-catalog-emoji-report" class="sd-muted"></div>
+                        </div>
                     </div>
                 </section>
             </div>

@@ -13,6 +13,8 @@ window.NERO = window.NERO || {};
     var EMOJI_PREPARE_URL = '/api/shop-publisher/emojis/prepare';
     var EMOJI_RECONCILE_URL = '/api/shop-publisher/emojis/reconcile';
     var EMOJI_DELETE_URL = '/api/shop-publisher/emojis/delete-duplicate';
+    var EMOJI_BACKFILL_URL = '/api/shop-publisher/emojis/backfill';
+    var EMOJI_REPORT_URL = '/api/shop-publisher/emojis/report';
 
     function make(doc, tag, className, text) {
         var node = doc.createElement(tag);
@@ -59,6 +61,12 @@ window.NERO = window.NERO || {};
             var emojiRetryUncertain = root.querySelector('#sd-emoji-retry-uncertain');
             var emojiStatus = root.querySelector('#sd-emoji-status');
             var emojiResults = root.querySelector('#sd-emoji-results');
+            var catalogEmojiBackfill = root.querySelector('#sd-catalog-emoji-backfill');
+            var catalogEmojiRefresh = root.querySelector('#sd-catalog-emoji-refresh');
+            var catalogEmojiRetryParked = root.querySelector('#sd-catalog-emoji-retry-parked');
+            var catalogEmojiStatus = root.querySelector('#sd-catalog-emoji-status');
+            var catalogEmojiReport = root.querySelector('#sd-catalog-emoji-report');
+            var catalogEmojiInFlight = false;
             var catalogStatus = root.querySelector('#sd-catalog-status');
             var statusLine = root.querySelector('#sd-status');
             var templateSelect = root.querySelector('#sd-template');
@@ -302,6 +310,138 @@ window.NERO = window.NERO || {};
                 if (emojiPrepareAll) emojiPrepareAll.disabled = emojiInFlight || noRoster;
                 if (emojiReconcile) emojiReconcile.disabled = emojiInFlight || noRoster;
                 if (emojiRetryUncertain) emojiRetryUncertain.disabled = emojiInFlight;
+                // The catalog-wide action is deliberately available with an EMPTY
+                // roster: it works from shop_items, never from the roster.
+                if (catalogEmojiBackfill) catalogEmojiBackfill.disabled = catalogEmojiInFlight;
+                if (catalogEmojiRefresh) catalogEmojiRefresh.disabled = catalogEmojiInFlight;
+                if (catalogEmojiRetryParked) catalogEmojiRetryParked.disabled = catalogEmojiInFlight;
+            }
+
+            function setCatalogEmojiStatus(message, isError) {
+                if (!catalogEmojiStatus) return;
+                catalogEmojiStatus.textContent = message || '';
+                catalogEmojiStatus.className = isError ? 'sd-status sd-error' : 'sd-muted';
+            }
+
+            function renderCatalogEmojiReport(report) {
+                if (!catalogEmojiReport) return;
+                clear(catalogEmojiReport);
+                if (!report || report.success !== true) return;
+                var queue = report.queue || {};
+                var lines = [
+                    ['Eligible products (whole catalog)', report.eligible_products],
+                    ['Already prepared', report.already_ready],
+                    ['Still unprepared', report.unprepared_products],
+                    ['Unusable image URL (needs fixing first)', report.invalid_source_count],
+                    ['Waiting in the queue', queue.total],
+                    // Deferred ≠ uncertain: this counts EVERY row in a future
+                    // backoff, including plain source failures.
+                    ['Retrying after a delay (not necessarily uncertain)', queue.deferred],
+                    ['Uncertain creations awaiting a read-only recheck', queue.uncertain],
+                    ['Given up (parked)', queue.parked],
+                    ['Application emojis in use here', (report.quota || {}).used]
+                ];
+                lines.forEach(function (pair) {
+                    catalogEmojiReport.appendChild(
+                        make(doc, 'div', 'sd-muted', pair[0] + ': ' + (pair[1] === undefined || pair[1] === null ? 0 : pair[1])));
+                });
+                var invalid = report.invalid_source_products || [];
+                if (invalid.length) {
+                    catalogEmojiReport.appendChild(make(doc, 'div', 'sd-product-name',
+                        'Products that cannot be prepared until their image URL is fixed'));
+                    invalid.slice(0, 25).forEach(function (row) {
+                        catalogEmojiReport.appendChild(make(doc, 'div', 'sd-muted',
+                            (row.name || ('Product #' + row.product_id)) + ' — ' +
+                            (row.reason || 'unsupported image URL')));
+                    });
+                }
+                if (report.quota_limited) {
+                    catalogEmojiReport.appendChild(make(doc, 'div', 'sd-status sd-error',
+                        'This server has reached its 100-emoji limit. New images stay queued and are reported below; nothing is deleted automatically.'));
+                }
+                var parked = report.parked || [];
+                if (parked.length) {
+                    var heading = make(doc, 'div', 'sd-product-name', 'Products that need attention');
+                    catalogEmojiReport.appendChild(heading);
+                    parked.slice(0, 25).forEach(function (row) {
+                        catalogEmojiReport.appendChild(make(doc, 'div', 'sd-muted',
+                            (row.item_name || ('Product #' + row.product_id)) + ' — ' +
+                            (row.last_error || 'no reason recorded') + ' (' + (row.attempts || 0) + ' attempts)'));
+                    });
+                }
+            }
+
+            function refreshCatalogEmojiReport(options) {
+                if (catalogEmojiInFlight) return Promise.resolve(null);
+                var keepStatus = !!(options && options.keepStatus);
+                return requestJSON(EMOJI_REPORT_URL, { method: 'GET' }).then(function (data) {
+                    if (destroyed || ctx.isDestroyed()) return null;
+                    if (!data || data.success !== true) {
+                        setCatalogEmojiStatus(data && data.error ? data.error : 'Could not read the icon report.', true);
+                        return null;
+                    }
+                    renderCatalogEmojiReport(data);
+                    // After a backfill the caller has a more specific message
+                    // ("Queued N product(s)…") that must survive this refresh.
+                    if (!keepStatus) {
+                        if (data.unprepared_products) {
+                            setCatalogEmojiStatus(data.unprepared_products +
+                                ' product(s) still need an icon.');
+                        } else if ((data.invalid_source_products || []).length) {
+                            setCatalogEmojiStatus((data.invalid_source_products || []).length +
+                                ' product(s) have an image URL that cannot be used, so they ' +
+                                'cannot be prepared yet.', true);
+                        } else if (data.fully_prepared) {
+                            setCatalogEmojiStatus(
+                                'Every eligible product in this server has a prepared icon.');
+                        } else {
+                            setCatalogEmojiStatus('Some products still need attention.');
+                        }
+                    }
+                    return data;
+                }, function (error) {
+                    if (!destroyed && !ctx.isDestroyed()) {
+                        setCatalogEmojiStatus(error && error.message ? error.message : 'Could not read the icon report.', true);
+                    }
+                    return null;
+                });
+            }
+
+            function runCatalogBackfill() {
+                if (catalogEmojiInFlight) return Promise.resolve(null);
+                var retryParked = !!(catalogEmojiRetryParked && catalogEmojiRetryParked.checked);
+                if (retryParked && !confirmAction('Also retry the products whose preparation was given up on? Their images are downloaded again, and a retry cannot guarantee that a previously ambiguous upload did not already succeed.')) {
+                    return Promise.resolve(null);
+                }
+                catalogEmojiInFlight = true;
+                updateEmojiControls();
+                setCatalogEmojiStatus('Authorising this server and queueing every eligible product in its catalog…');
+                return requestJSON(EMOJI_BACKFILL_URL, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: 'backfill', retry_parked: retryParked })
+                }).then(function (data) {
+                    catalogEmojiInFlight = false;
+                    updateEmojiControls();
+                    if (destroyed || ctx.isDestroyed()) return null;
+                    if (!data || data.success !== true) {
+                        setCatalogEmojiStatus(data && data.error ? data.error : 'The backfill request failed.', true);
+                        return null;
+                    }
+                    var queued = data.queued || 0;
+                    var reactivated = data.reactivated || 0;
+                    setCatalogEmojiStatus(
+                        'Queued ' + queued + ' product(s) for this server' +
+                        (reactivated ? ' and re-activated ' + reactivated + ' parked product(s)' : '') +
+                        '. Uploads run in the background in small batches; refresh to follow progress.');
+                    return refreshCatalogEmojiReport({ keepStatus: true });
+                }, function (error) {
+                    catalogEmojiInFlight = false;
+                    updateEmojiControls();
+                    if (!destroyed && !ctx.isDestroyed()) {
+                        setCatalogEmojiStatus(error && error.message ? error.message : 'The backfill request failed.', true);
+                    }
+                    return null;
+                });
             }
 
             function finishEmojiOperation() {
@@ -429,6 +569,14 @@ window.NERO = window.NERO || {};
             if (emojiReconcile) ctx.on(emojiReconcile, 'click', function () {
                 runEmojiOperation('reconcile', draft.products.slice());
             });
+            if (catalogEmojiBackfill) ctx.on(catalogEmojiBackfill, 'click', runCatalogBackfill);
+            if (catalogEmojiRefresh) ctx.on(catalogEmojiRefresh, 'click', refreshCatalogEmojiReport);
+            // Deliberately NOT fetched on mount. The Shop Designer's read-route
+            // contract (asserted by the existing designer harnesses) allows only
+            // its own catalog/design/category GETs on load, and progress is not
+            // needed until the owner acts. The panel shows a prompt and fetches
+            // on first use instead.
+            setCatalogEmojiStatus('Open this panel\'s controls to check progress, or use "Refresh progress".');
 
             // Setting select.value in code fires no event, so dependents (the Publications panel)
             // would keep showing the previous Design's records. Announce a real selection change,
