@@ -2046,6 +2046,52 @@ def test_duplicate_delete_still_requires_this_guilds_alias(shop):
     assert shop.fake.delete_calls == []
 
 
+# ── List omission is not absence (publication preflight) ────────────────────
+
+def _preflight_reference(content_hash, emoji_id="5001"):
+    return [{"id": emoji_id, "name": SE.deterministic_emoji_name(content_hash),
+             "animated": False}]
+
+
+def test_preflight_list_omission_with_present_get_is_not_absence(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="5001", attempt=None)
+    shop.fake.remote = []
+    remote = remote_emoji(content_hash, 5001)
+    shop.fake.get_behavior = lambda emoji_id: SE.EmojiLookup("present", dict(remote))
+
+    assert run(SE.preflight_prepared_emoji_ids(GUILD, _preflight_reference(content_hash))) == {"checked": 1}
+    assert shop.fake.get_calls == ["5001"]
+    assert asset_row(shop, content_hash)["status"] == "ready"
+
+
+def test_preflight_unknown_presence_blocks_without_claiming_absence(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="5001", attempt=None)
+    shop.fake.remote = []
+    shop.fake.get_behavior = lambda emoji_id: SE.EmojiLookup("unknown", None, "timeout")
+    before = asset_row(shop, content_hash)
+
+    with pytest.raises(SE.ShopEmojiError) as error:
+        run(SE.preflight_prepared_emoji_ids(GUILD, _preflight_reference(content_hash)))
+    assert error.value.code == "product_emoji_presence_unknown"
+    assert error.value.status == 409
+    assert error.value.details == {"emoji_ids": ["5001"]}
+    assert asset_row(shop, content_hash) == before
+
+
+def test_preflight_rate_limit_during_get_propagates_and_writes_nothing(shop):
+    content_hash = put_asset(shop, status="ready", emoji_id="5001", attempt=None)
+    shop.fake.remote = []
+    before = asset_row(shop, content_hash)
+
+    def limited(emoji_id):
+        raise SE.DiscordRateLimited("slow down", retry_after=7.0, method="GET")
+
+    shop.fake.get_behavior = limited
+    with pytest.raises(SE.DiscordRateLimited):
+        run(SE.preflight_prepared_emoji_ids(GUILD, _preflight_reference(content_hash)))
+    assert asset_row(shop, content_hash) == before
+
+
 def test_duplicate_delete_refuses_an_id_the_asset_row_still_records(shop):
     # A `missing` row keeps its emoji_id as evidence of what was created. The
     # fresh list now shows that ID again: it must not be deleted as a "duplicate".

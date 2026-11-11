@@ -1545,7 +1545,29 @@ async def preflight_prepared_emoji_ids(guild_id, references):
                 + ",".join(unprepared), code="product_emoji_not_prepared", status=409)
         remote = await discord.list_emojis()
         remote_by_id = {str(emoji["id"]): emoji for emoji in remote}
-        missing = sorted(emoji_id for emoji_id in wanted if emoji_id not in remote_by_id)
+        # A missing entry in ONE list response is not proof that the emoji is
+        # gone: lists can be truncated, cached, or read from a replica that has
+        # not caught up with a create that already succeeded. Every absent ID is
+        # therefore resolved with Get Application Emoji, exactly like
+        # ``_refresh_ready_asset`` does, and only a 404/Unknown Emoji is absence.
+        # ``unknown`` (timeout, 5xx, malformed body) blocks the publication with
+        # its own code instead of being reported as a deletion - the caller must
+        # be able to tell "Discord says it is gone" from "Discord did not answer".
+        missing, unknown = [], []
+        for emoji_id in sorted(set(wanted) - set(remote_by_id)):
+            lookup = await discord.get_emoji(emoji_id)
+            if lookup.state == "present":
+                remote_by_id[emoji_id] = lookup.emoji
+            elif lookup.state == "absent":
+                missing.append(emoji_id)
+            else:
+                unknown.append(emoji_id)
+        if unknown:
+            raise ShopEmojiError(
+                "Discord did not confirm whether these prepared emoji IDs still exist; "
+                "publishing is blocked until it answers: " + ",".join(unknown),
+                code="product_emoji_presence_unknown", status=409,
+                details={"emoji_ids": unknown})
         if missing:
             raise ShopEmojiError(
                 "Discord confirmed these prepared emoji IDs are absent; recover them before publishing: "
