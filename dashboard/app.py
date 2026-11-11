@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -287,19 +288,77 @@ def inject_currency():
 
 
 # ── Error handlers ─────────────────────────────────────────────────────────────
+#
+# ONE contract, decided by URL prefix:
+#   * ``/api/*``  -> a JSON error object (``{"success": false, "code", "error"}``)
+#   * everything else -> the existing rendered error pages.
+#
+# These are APP-level handlers on purpose. A Flask Blueprint handler only sees
+# errors raised *inside* a view of that blueprint, so it cannot cover the two
+# cases an API client hits constantly: an unknown ``/api/...`` path (routing
+# fails before any blueprint is resolved) and an unhandled exception
+# (Flask turns it into a 500 for the app, not for the blueprint). Doing it here
+# also means no route needs its own duplicated try/except, and the HTML pages
+# keep byte-identical responses.
+#
+# The 500 body is deliberately generic: exception text and tracebacks are
+# logged server-side only, never serialized to a client.
+
+def _api_request() -> bool:
+    """Is this request for the JSON API (``/api`` and below)?"""
+    return request.path == "/api" or request.path.startswith("/api/")
+
+
+def _json_error(status, code, message):
+    return jsonify({"success": False, "code": code, "error": message}), status
+
+
+@app.errorhandler(400)
+def bad_request(e):
+    if _api_request():
+        return _json_error(400, "bad_request", "The request could not be understood.")
+    return e.get_response()
+
 
 @app.errorhandler(403)
 def forbidden(e):
+    if _api_request():
+        return _json_error(403, "forbidden",
+                           "You do not have permission to perform this action.")
     return render_template("errors/403.html"), 403
 
 
 @app.errorhandler(404)
 def not_found(e):
+    if _api_request():
+        return _json_error(404, "not_found", "No such API endpoint.")
     return render_template("errors/404.html"), 404
+
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    # RFC 9110 requires a 405 response to carry `Allow` listing the methods the
+    # target resource does support, and Werkzeug builds that header from the
+    # route's own method set. A hand-built JSON body would silently drop it, so
+    # the header is taken from the original response and carried over verbatim.
+    original = e.get_response()
+    if _api_request():
+        response, status = _json_error(405, "method_not_allowed",
+                                       "That HTTP method is not allowed for this endpoint.")
+        allow = original.headers.get("Allow")
+        if allow:
+            response.headers["Allow"] = allow
+        return response, status
+    return original
 
 
 @app.errorhandler(500)
 def server_error(e):
+    if _api_request():
+        # Never leak the exception text to an API client; keep it in the log.
+        app.logger.exception("unhandled API error: %s %s", request.method, request.path)
+        return _json_error(500, "internal_error",
+                           "The server could not complete the request.")
     return render_template("errors/500.html"), 500
 
 
@@ -950,6 +1009,12 @@ def health():
         db_path=DB_PATH,
         db_exists=db_exists,
         db_size_bytes=db_size_bytes,
+        # The RUNTIME SQLite version of the process serving this page. Python's
+        # sqlite3 links against the system libsqlite3, so this is the version
+        # every query on this deployment actually uses - the fact needed to
+        # judge whether a deployment is exposed to a known SQLite defect (e.g.
+        # the WAL-reset bug fixed in 3.51.3). Read-only: no schema, no write.
+        sqlite_version=sqlite3.sqlite_version,
         **ctx)
 
 

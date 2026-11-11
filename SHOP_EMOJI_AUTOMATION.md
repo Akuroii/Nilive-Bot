@@ -1,17 +1,155 @@
-# PR #122 — Acceptance Report (audit round 3)
+# PR #122 — Acceptance Report (audit rounds 3–6)
 
 Same PR, same branch. **OPEN / NOT MERGED / NOT DEPLOYED.**
 
 | | |
 |---|---|
-| Branch | `arena/5e11d3cf-nilive-bot` |
-| Audited HEAD | `1f73000293a4c527c39e5ee2bc1fd0f7bffbc503` |
+| PR head branch | `arena/5e11d3cf-nilive-bot` |
+| PR head (round 5 started here) | `bb15cd88d89e6a960959bf23a5b70f50892839a1` |
+| Round-5/6 commits live on | `arena/d6852d6a-nilive-bot`, branched from `bb15cd88…` — opening a PR back into the PR head branch keeps PR #122 reviewable without rewriting its history. Round 6 is stacked on top of round 5; the exact head is the tip of that branch |
+| HEAD audited in round 3 (now stale) | `1f73000293a4c527c39e5ee2bc1fd0f7bffbc503` |
 | Base | `e0ca73853be97c5ebbf1e3dd66e70c76595ecd52` |
+| Round 3 report written against | `1f73000` — statements below that depend on a line number or a count were re-checked in round 5 where they matter |
+
+Everything below is history plus the current contract. **Round 5 adds a status
+table that distinguishes what is proven from what is not, and it is the section
+to trust first. Round 6 corrects four claims in that table and adds the runtime
+SQLite analysis, the C3 design and the references section.**
 
 No replacement implementation, no new branch, no rewrite of the queue/worker/
 preparation/reconciliation core. Inventory (`cogs/wallet.py`), Rank
 (`utils/rank_card_data.py`) and `utils/rank_card_renderer.py` remain
 **byte-identical to base**.
+
+---
+
+## Round 5 — verification status (audited `bb15cd8`)
+
+Status vocabulary, used strictly: **FIXED AND PROVEN** (code change + a test that
+fails without it), **PARTIALLY FIXED** (a proven part, a proven-open remainder),
+**CONFIRMED OPEN** (reproduced, not fixed), **DESIGN REQUIRED** (needs a product
+decision, not a patch), **UNVERIFIED** (no honest way to test it here),
+**NOT APPLICABLE**.
+
+| Area | Status | Evidence |
+|---|---|---|
+| Shared-resource deletion safety (an emoji ID bound to *another* guild's asset) | **FIXED AND PROVEN** (cross-tenant part) — the *residual* window is **PARTIALLY FIXED** | `emoji_name_conflict` check immediately before `DELETE`; `test_duplicate_delete_refuses_an_id_bound_to_another_guilds_asset` fails with `DID NOT RAISE` when the check is removed. Round 6 adds a row-unchanged re-check immediately before `DELETE` (see the Round-6 section) and still does **not** claim the race is closed |
+| Publication preflight: a list omission is not absence | **FIXED AND PROVEN** | `get_emoji` decides `present`/`absent`/`unknown` per missing ID; new code `product_emoji_presence_unknown`; 2 new tests, both red without the fix |
+| `/api/*` JSON error contract (400/403/404/405/500, no HTML, no internals, **and the `Allow` header on 405**) | **FIXED AND PROVEN** | `dashboard/app.py` handlers switch on the `/api` prefix; the 405 handler copies `Allow` from `e.get_response()`. `scripts/test_api_error_contract.py` — 11 tests, 5 failures + 1 error without the contract change and 1 failure without the `Allow` copy; the HTML 405 page is asserted unchanged |
+| Multi-process SQLite/WAL behaviour (queue CAS, `BEGIN IMMEDIATE`, busy timeout) on **this** SQLite build | **TESTED, NO CODE CHANGE — scope limited** | `scripts/test_shop_emoji_multiprocess.py` — **6** tests that spawn real `subprocess` children (stale generation cannot complete newer intent; one winner per generation and per content hash; no lost writes; cross-process takeover) + **2** same-process two-connection/thread tests that pin `SQLITE_BUSY_SNAPSHOT` and `BEGIN IMMEDIATE` behaviour. Run on SQLite **3.40.1**; this is **not** evidence about Railway's build, production volumes or checkpoint behaviour |
+| Application capacity (`len(remote)`) and internal guild quota | **VERIFIED, no change** | Discord documents 2000 app-owned emoji and an unpaginated `items` list; boundary tests already existed at `LIMIT` and `LIMIT-1` |
+| Worker takeover / stale-worker writes (B1: `attempt_id` fencing) | **PROVEN CROSS-PROCESS — no code change needed** | The fence already existed in `_adopt_asset`/`_mark_*`. `scripts/test_shop_emoji_multiprocess.py::test_a_second_process_takes_over_and_the_stale_worker_cannot_write` runs the takeover in a **child process** (`_mark_uncertain` + `_claim_existing`), then lets the stale worker finish its create in the parent: it reports `late_completion` and the row still belongs to the child's attempt with no bound ID. Dropping the `attempt_id` condition gives `'created' != 'late_completion'`. The in-process test is renamed `…_same_process` and says so |
+| 429 during create (ambiguity, budget, scheduling) | **VERIFIED, already covered** | `PrASafetyWorkerTests` asserts `uncertain` asset + `retry` row + `attempts == 0` + schedule ≥ `retry_after` + no further request in the pass |
+| Cross-guild name/privacy (a shared emoji's name carries one guild's product label) | **CONFIRMED OPEN / DESIGN REQUIRED** | Reproduced by reading `product_names_for_asset` (all guilds) + `canonical_label_for_asset`; the trade-offs are listed under "Round-5 open items" — the fix changes visible names, so it needs your decision |
+| Delivery-overlay file `__PR-A_MANIFEST__.txt` in the repository | **FIXED** | Removed; the file itself said "not part of the project: do not commit it" and named the older base `64e4871` / PR-A commit `4d00a95` |
+| `utils/level_claims.py` concurrent `init_db` | **CONFIRMED OPEN (pre-existing, out of scope)** | Reproduced from two real processes: `duplicate column name: operation_id`. Byte-identical to base; not touched here |
+| Live Discord API / Railway runtime | **UNVERIFIED** | No real emoji is created or deleted from this environment, by instruction. Every Discord statement above is a mocked-API statement |
+
+### Round-5 code changes
+
+| File | Change |
+|---|---|
+| `utils/shop_emoji.py` | `delete_confirmed_duplicate()` now asks whether the target emoji ID is bound to **any** asset row of the application (any content hash, any creator guild) immediately before `DELETE`, and refuses with `emoji_in_use`. `preflight_prepared_emoji_ids()` now resolves every list-omitted ID with Get Application Emoji: `present` continues, `absent` is `product_emoji_missing`, `unknown` is the new `product_emoji_presence_unknown`. Comment at the create boundary records *why* `len(remote)` is the authoritative capacity measure. |
+| `dashboard/app.py` | One central error-contract switch: `/api/*` gets `{"success": false, "code", "error"}` for 400/403/404/405/500 (500 is generic and logged); HTML pages keep their rendered pages byte-for-byte. |
+| `scripts/test_shop_emoji.py` | +8 tests: application-wide binding guard (refused / allowed / still guild-gated / recorded ID in a non-ready row) and publication preflight presence semantics (present-by-get, unknown, 429). |
+| `scripts/test_api_error_contract.py` | New file, 9 tests (round 5; 11 after round 6). |
+| `scripts/test_shop_emoji_multiprocess.py` | New file, 7 tests (round 5; 8 after round 6) — 5 of the 7 spawned subprocesses, 2 were two-connection/thread tests. The round-5 wording "over real subprocesses" applied to the file as a whole and was corrected in round 6. |
+| `__PR-A_MANIFEST__.txt` | Deleted. |
+
+### Round-5 open items (not fixed here, and why)
+
+1. **Shared-emoji names can carry another guild's product label** (C3). The alias
+   table is content-keyed and shared, and `product_names_for_asset()` returns the
+   names of *every* guild bound to that content, so `canonical_product_label()`
+   can pick another tenant's listing name. Severity is low (an emoji *name* is
+   visible only where the emoji itself is already used, and the name is
+   cosmetic — identity is the content hash), but it is a real cross-tenant
+   detail. Options, all of which change visible names: (a) hash-only names for
+   content bound to more than one guild; (b) names from the creator guild's
+   labels only (rejected by instruction as an automatic default); (c) leave as
+   is and document. Needs your decision.
+2. **Residual race on the deletion guard** — narrowed in round 6. The binding
+   check, the fresh list and the ownership check run before the `DELETE`, so
+   another process could bind this row in between. Round 6 adds a row-unchanged
+   re-check immediately before `DELETE` and pins the invariant that makes the
+   dangerous interleaving unreachable through this code; the single-`SELECT`
+   window that remains is described in "The residual adopt→`DELETE` race,
+   precisely". No application-wide lease was added. **PARTIALLY FIXED**, not
+   resolved.
+3. **`utils/level_claims.py`** concurrent-init race (see the table).
+4. **Everything Discord-facing is mocked.** Nothing here proves live Discord
+   behaviour; the round-5 tests prove *our* handling of documented responses.
+5. **Cross-process capacity.** `len(remote)` is read from one list snapshot;
+   two processes can each believe there is one slot left. Discord's own 400 is
+   the authority, and it is classified as a definite rejection, so the outcome is
+   a reported failure, not a duplicate.
+
+---
+
+## Round 6 — your eight corrections, and what changed
+
+Everything here is still **OPEN / NOT MERGED / NOT DEPLOYED**. No commit was
+rewritten or replaced; round 6 is additive on the round-5 branch.
+
+| # | Correction you asked for | What was actually wrong | What changed now | Status |
+|---|---|---|---|---|
+| 1 | Preserve `Allow` on the JSON 405, test it on a real API route, verify the HTML pages | The JSON handler built a fresh response and **dropped `Allow`**, so an API client could not learn the permitted methods (RFC 9110 requires that header on 405) | The 405 handler copies `Allow` from `e.get_response()` into the JSON response; `test_json_405_preserves_the_allow_header` asserts it on `POST /api/shop-publisher/catalog`; `test_html_405_keeps_werkzeugs_default_response_and_allow` asserts the page 405 keeps Werkzeug's HTML and `Allow` | **FIXED AND PROVEN** |
+| 2 | B1 must be honest: real cross-process takeover, or a relabelled same-process CAS test | The round-5 "takeover" test flipped `attempt_id` with a direct `UPDATE` **in the same process**, so it proved the CAS while the report called it cross-process | Both: a real child-process takeover was added to the multiprocess file, and the in-process test is renamed `…_same_process` with a comment pointing at it | **FIXED AND PROVEN** |
+| 3 | Stop inflating the P1 evidence | The file was described as "7 tests over independent processes"; of those **5** spawned subprocesses and 2 are two-connection/thread tests | Module docstring and this report separate the two scopes (now 6 subprocess / 2 same-process), name what each starts, and state what the suite does **not** prove: Railway's build, production volume/checkpoint behaviour, and the WAL-reset race | **DOCUMENTED CORRECTLY** |
+| 4 | Reassess the adopt→`DELETE` race, smallest safe fix, do not call C1 resolved | Round 5 checked "is this ID bound *elsewhere*" before `DELETE`, but the list call in between suspends the coroutine, so this row could be bound in that gap | A **row-unchanged re-check** now re-reads `status`/`emoji_id`/`attempt_id` directly before `DELETE` (`asset_changed_during_delete`, 409), next to the existing application-wide binding check. The invariant that keeps the dangerous interleaving unreachable through our code — *binding always requires a unique name match* — is pinned by `test_two_same_named_emojis_can_never_be_adopted_together` | **PARTIALLY FIXED** — residual window below |
+| 5 | Determine the deployed SQLite version read-only; propose a minimal runtime fix if affected; state that the WAL tests do not reproduce WAL-reset | The report never checked which `libsqlite3` the deployment links against, and the WAL tests could be read as evidence about the WAL-reset bug | `Dockerfile` inspection plus a read-only exposure of `sqlite3.sqlite_version` on `/health`; analysis and options in "Runtime SQLite version" below. **No image, dependency or deployment change was made** | **ANALYSED / DECISION REQUIRED** |
+| 6 | Compact, auditable references | None existed; sourcing lived only in the session | New "References" section: exact documents, the claim each supports, access date, community sources labelled as such, and two claims marked *no stable link recorded* rather than given a fake citation | **DOCUMENTED** |
+| 7 | C3: explain option A's behaviour before implementing | Round 5 listed options but not the rename/migration behaviour | New "C3 design — option A" section | **DESIGN FOR APPROVAL — not implemented** |
+| 8 | `utils/level_claims.py` stays a separate follow-up | — | Untouched, still byte-identical to base | **OUT OF SCOPE** |
+
+### Round-6 code changes
+
+| File | Change |
+|---|---|
+| `dashboard/app.py` | 405 JSON response keeps `Allow`; `/health` exposes `sqlite3.sqlite_version` (read-only, no schema change) |
+| `dashboard/templates/general/health.html` | One row: `SQLite (dashboard)` |
+| `utils/shop_emoji.py` | `delete_confirmed_duplicate()` re-reads the asset row immediately before `DELETE` and refuses with `asset_changed_during_delete` when `status`/`emoji_id`/`attempt_id` moved |
+| `scripts/test_api_error_contract.py` | +2 tests (11 total) |
+| `scripts/test_shop_emoji.py` | +4 tests (214 total); the CAS test renamed to `…_same_process` |
+| `scripts/test_shop_emoji_multiprocess.py` | +1 real cross-process takeover test (8 total) and a corrected module docstring |
+| `scripts/test_health_runtime_info.py` | New file, 2 tests |
+
+### The residual adopt→`DELETE` race, precisely
+
+Excluded now, by code and by test:
+
+1. **A different content hash holding the target ID** — refused by the
+   application-wide binding check (`emoji_in_use`).
+2. **This row being bound while the delete request is in flight**, by any path in
+   this codebase — refused by the row-unchanged re-check
+   (`asset_changed_during_delete`); two tests mutate the row inside the list call
+   and both would otherwise delete the emoji.
+3. **This row being bound while the duplicate twin still exists** — impossible by
+   construction: every binding path (`_reconcile_asset`, `_insert_asset_or_claim`)
+   requires exactly one name match, and two same-named emojis leave the asset
+   `uncertain` with `duplicates` reported.
+
+What remains: the single indexed `SELECT` between the re-check and the `DELETE`
+dispatch. To lose a live binding inside it, the **surviving** emoji would have to
+be deleted outside this codebase (for example by hand in the Discord portal) at
+that exact moment. A durable application-wide reservation/lease would need a new
+table, a new crash-recovery path and a new failure mode (a leaked lease blocks
+every deletion) to close a window our own paths cannot enter. That trade-off is
+yours; the code is unchanged in that respect and the status stays **PARTIALLY
+FIXED**.
+
+**If you want the lease instead**, the smallest version that would actually close
+it is: one additive table
+`shop_emoji_reservations(application_id, emoji_id, content_hash, expires_at,
+PRIMARY KEY (application_id, emoji_id))`; the delete path inserts the reservation
+inside its `BEGIN IMMEDIATE` transaction *before* the binding check, and every
+adopt path (`_adopt_asset`, `_insert_asset_or_claim`) refuses an `emoji_id` whose
+reservation is still live. Expiry replaces cleanup, so a crashed delete cannot
+block an ID forever, and a refused adopt just reports `uncertain` as it does
+today. That is roughly a table, one writer and two readers — but it is a new
+durable coordination primitive on the same SQLite file, so it needs its own
+crash/expiry tests and is not something to slip into this round. Say the word and
+it becomes its own commit; otherwise this stays as written.
 
 ---
 
@@ -644,6 +782,93 @@ not run. With acorn present those checks pass (177 passed, 0 failed) — verifie
 throwaway copy, not added as a dependency here to avoid touching the dashboard's runtime
 surface.
 
+### Round-5 test evidence (commands, real exit codes)
+
+Run from the repository root on 2026-11-11 at `bb15cd8` + the round-5 commits,
+Python 3.11.2, SQLite 3.40.1. Exit codes are the test process's own. **These are
+the round-5 numbers — the executable counts changed in round 6 (see the next
+table); they are kept here to show what round 5 actually observed.**
+
+| Command | Result | Exit |
+|---|---|---|
+| `PYTHONPATH=. python -m pytest scripts/test_shop_emoji.py -q` | **210 passed** (was 202) | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_automation.py` | **Ran 173 — OK** | 0 |
+| `PYTHONPATH=. python scripts/test_api_error_contract.py` | **Ran 9 — OK** (new) | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_multiprocess.py` | **Ran 7 — OK** (new) | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_migration.py` | Ran 6 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_emoji_api.py` | Ran 8 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_json_body_api.py` | Ran 1 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_publisher_api.py` | Ran 19 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_publication_reconcile.py` | Ran 30 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_categories_api.py` | Ran 16 — OK | 0 |
+| `PYTHONPATH=. python scripts/test_shop_designs_api.py` | Ran 22 — OK | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_publications.py -q` | 23 passed | 0 |
+| `PYTHONPATH=. python -m pytest test_db_migration_concurrency.py -q` | 9 passed, 2 subtests | 0 |
+| `PYTHONPATH=. python scripts/test_shop_publisher.py` | 115/115 passed | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_options.py -q` | 5 passed | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_product_management.py -q` | 50 passed, 8 subtests | 0 |
+| `PYTHONPATH=. python -m pytest scripts/test_shop_icon_resolution.py -q` | 13 passed | 0 |
+
+Not run in this round: the jsdom/`npm test` harnesses (no frontend file was
+touched by round 5; they were green in round 4), and anything that would touch
+live Discord or Railway.
+
+**Removal proofs** (the fix is reverted, the suite is re-run, the fix is
+restored — the commands are in the commit messages):
+
+| Fix reverted | Observed failure |
+|---|---|
+| application-wide binding check | `test_duplicate_delete_refuses_an_id_bound_to_another_guilds_asset`: `DID NOT RAISE ShopEmojiError` — the DELETE proceeded |
+| binding protection for non-ready rows | `test_duplicate_delete_refuses_an_id_the_asset_row_still_records` fails |
+| Get-based presence confirmation | the two presence tests report `product_emoji_missing` instead of `product_emoji_presence_unknown` / success |
+| `attempt_id` CAS in `_adopt_asset` | `test_a_stale_worker_cannot_adopt_into_a_newer_attempt` reports `created` and binds the stale emoji into the newer attempt |
+| `/api` JSON error contract | 5 failures + 1 error in `scripts/test_api_error_contract.py` |
+
+### Round-6 test evidence (commands, real outputs, real exit codes)
+
+Run from the repository root on 2026-11-11 at the round-6 tip, Python 3.11.2,
+SQLite 3.40.1. Each command was run on its own and `$?` read immediately; the
+result column is copied from its output. `(env)` marks the pytest files that need
+the standard test environment block
+(`OWNER_ID`, `DATABASE_PATH`, `NERO_ENVIRONMENT`, `SECRET_KEY`, `DISCORD_CLIENT_ID`,
+`DISCORD_TOKEN`, `PYTHONPATH=.`); without it they exit 3, which is a harness
+requirement, not a failure.
+
+| Command | Result | Exit |
+|---|---|---|
+| `pytest scripts/test_shop_emoji.py -q (env)` | **214 passed** | 0 |
+| `python scripts/test_shop_emoji_automation.py` | **Ran 173 — OK** | 0 |
+| `python scripts/test_api_error_contract.py` | **Ran 11 — OK** | 0 |
+| `python scripts/test_shop_emoji_multiprocess.py` | **Ran 8 — OK** (6 subprocess + 2 two-connection/thread) | 0 |
+| `python scripts/test_health_runtime_info.py` | **Ran 2 — OK** (new) | 0 |
+| `python scripts/test_shop_emoji_migration.py` | Ran 6 — OK | 0 |
+| `python scripts/test_shop_emoji_api.py` | Ran 8 — OK | 0 |
+| `python scripts/test_shop_json_body_api.py` | OK | 0 |
+| `python scripts/test_shop_publisher_api.py` | Ran 19 — OK | 0 |
+| `python scripts/test_shop_publication_reconcile.py` | Ran 30 — OK | 0 |
+| `python scripts/test_shop_categories_api.py` | Ran 16 — OK | 0 |
+| `python scripts/test_shop_designs_api.py` | Ran 22 — OK | 0 |
+| `pytest scripts/test_shop_publications.py -q (env)` | 23 passed | 0 |
+| `pytest test_db_migration_concurrency.py -q` | 9 passed, 2 subtests | 0 |
+| `python scripts/test_shop_publisher.py` | passed (custom summary, no pytest count) | 0 |
+| `pytest scripts/test_shop_options.py -q` | 5 passed | 0 |
+| `pytest scripts/test_shop_product_management.py -q` | 50 passed, 8 subtests | 0 |
+| `pytest scripts/test_icon_resolution.py -q` | 13 passed | 0 |
+| `python scripts/test_heartbeat.py` | passed (custom summary) | 0 |
+
+Not run in round 6: the jsdom/`npm test` harnesses (no frontend file changed in
+round 6; they were green in round 4) and anything touching live Discord or
+Railway.
+
+**Round-6 removal proofs** (fix reverted, suite re-run, fix restored):
+
+| Fix reverted | Observed failure |
+|---|---|
+| `Allow` copy in the 405 handler | `test_json_405_preserves_the_allow_header`: `the JSON 405 dropped the Allow header` |
+| row-unchanged re-check before `DELETE` | both new delete tests fail — the emoji is deleted (`delete_calls == ["3002"]`) |
+| `attempt_id` CAS in `_adopt_asset` | cross-process takeover test: `AssertionError: 'created' != 'late_completion'` — the stale worker adopted its emoji into the other process's attempt |
+| `sqlite_version` in the `/health` context | `test_health_page_reports_the_running_sqlite_version` fails (page renders `—`, not the version) |
+
 ### Round-4 test → fix map (each was RED before its fix, GREEN after)
 
 | Test | Failed before with | Fix it proves |
@@ -724,6 +949,157 @@ suite re-run: removing the worker fence → `StaleCreationTests` + `FenceCoverag
 unfenced deletions → `StaleQueueDeletionTests` **2 failures**. Code was restored
 and byte-compared against a backup afterwards.
 
+## Runtime SQLite version, and the WAL-reset bug
+
+**What can and cannot be established from the repository (read-only):**
+
+- `Dockerfile` is `FROM python:3.11-slim`, `WORKDIR /app`, `pip install -r
+  requirements.txt`, `CMD bash start.sh`. Nothing pins a SQLite version: no
+  `pysqlite3`/`pysqlite3-binary` in `requirements.txt`, no amalgamation build, no
+  `LD_PRELOAD`/`LD_LIBRARY_PATH`, no `sqlite_version` assertion at boot.
+- The tag is **floating**. `python:3.11-slim` records nothing about which Debian
+  release it resolved to when the image was built, so the repository cannot
+  answer the question by inspection.
+- CPython's `sqlite3` is built against the system SQLite library (the docs call
+  it "the third-party SQLite library"), so the deployed version is the Debian
+  package's, not Python's.
+- This sandbox (Python 3.11.2 on Debian 12/bookworm) reports **SQLite 3.40.1**,
+  which is bookworm's `libsqlite3-0`. That is *consistent* with the same image
+  family and is **not** evidence about the deployed digest.
+
+**Read it from the deployment instead of guessing:** the dashboard `/health` page
+now prints `SQLite (dashboard)` from `sqlite3.sqlite_version` (read-only; no
+schema change; the dashboard runs the same image as the bot), or run
+`python -c "import sqlite3; print(sqlite3.sqlite_version)"` in the service shell
+— or add that one line to the start-up log. That value is what decides the
+question below; nothing in this PR changes it.
+
+**The WAL-reset bug** (sqlite.org, section "The WAL-Reset Bug", verified
+2026-11-11):
+
+- present in every SQLite from **3.7.0 (2010-07-21) through 3.51.2 (2026-01-09)**;
+- fixed in **3.51.3 (2026-03-13)**; backports exist for **3.44.6** and **3.50.7
+  only** — so an unpatched 3.40.x has no backported fix;
+- requires WAL mode, **two or more connections on the same file in separate
+  threads or processes**, and a checkpoint racing a commit that resets the WAL;
+- SQLite's developers could not reproduce it organically, and report that the
+  rate seen in the wild is at or below the expected rate of SSD malfunction /
+  cosmic-ray hits.
+
+**Does this deployment meet the precondition?** Yes — the bot and the dashboard
+are two processes writing and checkpointing one WAL file. **Does the suite above
+therefore cover it?** No. Those tests exercise queue fencing, `BEGIN IMMEDIATE`
+and busy-timeout semantics; **none of them reproduces a WAL reset racing a
+checkpoint**, and a green run is not evidence that the bug is absent.
+
+**If the deployed value is inside `[3.7.0, 3.51.2]` and is not 3.44.6/3.50.7, the
+deployment is exposed.** Options — all of them deployment changes, so **none is
+implemented here**:
+
+| Option | What it means | Cost / risk |
+|---|---|---|
+| **A. Build a patched SQLite into the image** | Multi-stage `Dockerfile`: compile the 3.51.3+ amalgamation (or the 3.50.7/3.44.6 backport) and put its `libsqlite3.so.0` on the loader path so `_sqlite3` resolves it | Small diff; adds a build stage and compile time; must be confirmed by reading `/health` after deploy; the `sqlite3` C API/ABI is stable across these versions |
+| **B. Move to a base image that ships ≥ 3.51.3** | Change `FROM` to a newer Debian/Ubuntu-based Python image | Changes OS, libc, OpenSSL and every dependency at once — largest blast radius |
+| **C. `pysqlite3-binary` + a `sitecustomize` shim** mapping `sqlite3` → `pysqlite3` | Wheel bundling a recent SQLite | A global monkeypatch, and `aiosqlite` imports the stdlib `sqlite3`, so the shim has to cover it too; the wheel's SQLite version must be checked, not assumed |
+| **D. Accept and monitor** | Keep the current build; add periodic `PRAGMA integrity_check` and verified backups | No code change; leaves a known, very rare corruption path |
+
+Recommendation: read `/health` on the deployment first (one page view). If the
+value is unpatched, **A** is the smallest change that actually removes the risk;
+**D** is only defensible together with verified, restorable backups. Your call —
+this PR does not touch the image.
+
+---
+
+## C3 design — option A (for your approval, **not implemented**)
+
+**The problem.** An application emoji is application-owned and shared. The alias
+table is keyed by `(application_id, content_hash)` and several guilds can bind the
+same content hash. `readable_emoji_name()` builds the visible name from
+`canonical_product_label(product_names_for_asset(...))`, i.e. from the product
+names of **every** guild bound to that content — so a shared emoji can carry one
+tenant's listing wording. The name is cosmetic (identity is the content hash and
+`_name_matches_content()` verifies the hash-derived suffix), but it is a real
+cross-tenant leak of a product label.
+
+**Option A, precisely:** *one guild* ⇒ readable `<slug>_<hash8>` (today's
+behaviour); *more than one guild* ⇒ the neutral, hash-only name
+`shop_<hash24>` that `deterministic_emoji_name()` already produces.
+
+Why `shop_<hash24>` and not a new format: it is the pre-existing deterministic
+form, it is 30 characters (inside Discord's 32), and `_name_matches_content()`
+already accepts it — so adoption, reconciliation and the create path need **no new
+rules**, and an asset keeps working even if a rename never happens.
+
+**Behaviour, end to end:**
+
+| Moment | Behaviour under option A |
+|---|---|
+| Scope calculation | New read-only helper: `COUNT(DISTINCT guild_id)` over `shop_emoji_url_aliases` for `(application_id, content_hash)`. No schema change, no migration, no data rewrite |
+| Creating a new emoji | The name is chosen from the scope known at create time: 1 guild ⇒ readable, ≥2 ⇒ `shop_<hash24>` |
+| A second guild binds an existing asset | The stored name does not change by itself (nothing triggers a PATCH on binding). The asset keeps its readable name until the next rename pass — visible lag, never a broken asset |
+| Rename pass (owner-triggered, existing control) | `rename_target_name()` returns the scope-aware target, so multi-guild assets get one `PATCH` each and become `shop_<hash24>`; single-guild assets keep or regain their readable name. Already-correct assets issue zero PATCHes (unchanged no-op rule) |
+| A guild un-binds, scope falls back to 1 | The next rename pass may rename the asset back to that guild's readable name — cosmetic, one PATCH, and only ever on `ready` assets |
+| Adoption / reconcile | Unaffected in both directions: `_name_matches_content()` accepts `shop_<hash24>` and `<slug>_<hash8>`; a lagging rename cannot break an asset |
+| Failure handling | Unchanged: a rejected PATCH keeps the working name and records `last_error`; the pass is resumable and idempotent |
+
+**Affected assets (read-only enumeration you can run before deciding):**
+
+```sql
+SELECT a.content_hash, a.emoji_name, COUNT(DISTINCT al.guild_id) AS guilds
+FROM shop_emoji_assets a
+JOIN shop_emoji_url_aliases al
+  ON al.application_id = a.application_id AND al.content_hash = a.content_hash
+GROUP BY a.application_id, a.content_hash
+HAVING COUNT(DISTINCT al.guild_id) > 1
+ORDER BY guilds DESC, a.content_hash;
+```
+
+In this repository's test fixtures that set is small; on a live deployment the
+count is whatever that query returns — **I have not run it against production
+data**, by instruction.
+
+**Side effects to accept:**
+
+1. Multi-guild emojis lose legible names in the Discord portal (they become
+   `shop_<hash24>`). Single-guild names are untouched.
+2. One `PATCH /applications/{id}/emojis/{emoji_id}` per affected asset, paced by
+   the existing rename pass; the emoji ID never changes, so messages that already
+   reference the emoji keep working.
+3. If guilds join and leave repeatedly, an asset can flip readable → neutral →
+   readable across passes. Each flip is one PATCH and harmless, but it is visible.
+4. `managed_name` semantics stay as they are (a rejected rename clears it); no new
+   column, so nothing else that reads it changes behaviour.
+5. Tests this needs before it ships: scope counting, create-name choice, rename
+   target for 1 vs ≥2 guilds, no-op when already neutral, un-bind falls back to
+   readable, and adoption still accepts both forms.
+
+**Not implemented.** Say go and it lands as its own commit with those tests, or
+pick a different option.
+
+---
+
+## References
+
+Accessed **2026-11-11**. Each row states the claim this report relies on; nothing
+here is cited for anything else. Community sources are labelled and are never the
+sole basis for a code decision.
+
+| Source | Claim used | Nature |
+|---|---|---|
+| [Discord — Emoji resource](https://discord.com/developers/docs/resources/emoji#emoji-resource) | An application may own at most 2000 emoji; `GET /applications/{application_id}/emojis` returns them in a single `items` array (no pagination), which is what makes `len(remote)` the capacity measure; emoji "control" routes do not follow normal rate-limit conventions; max size 256 KiB | Official |
+| [Discord — Rate limits](https://discord.com/developers/docs/topics/rate-limits#rate-limits) | 429 responses carry `retry_after` and `X-RateLimit-Scope`; sustained invalid requests (10 000 per 10 minutes) risk a ban — the reason creation is serialised and paced | Official |
+| [SQLite — Write-Ahead Logging, "The WAL-Reset Bug"](https://www.sqlite.org/wal.html#the_wal_reset_bug) | Bug present 3.7.0–3.51.2, fixed in 3.51.3 (2026-03-13), backports 3.44.6 and 3.50.7 only; needs WAL + two connections in separate threads/processes + a checkpoint racing a WAL reset; very low observed rate (page last updated 2026-08-25) | Official |
+| [SQLite — WAL, "Sometimes queries return SQLITE_BUSY in WAL mode"](https://www.sqlite.org/wal.html#sometimes_queries_return_sqlite_busy_in_wal_mode) | Even in WAL mode a query can return `SQLITE_BUSY`, so callers must handle it | Official |
+| [SQLite — `BEGIN` / "initially deferred"](https://www.sqlite.org/lang_transaction.html#initially_deferred) | A deferred transaction takes no lock until its first read/write; `BEGIN IMMEDIATE` takes the write lock up front | Official |
+| [SQLite — `PRAGMA busy_timeout`](https://www.sqlite.org/pragma.html#pragma_busy_timeout) | The connection retries a locked operation for N milliseconds instead of failing at once | Official |
+| [SQLite — Result codes, `SQLITE_BUSY_SNAPSHOT`](https://www.sqlite.org/rescode.html#busy_snapshot) | This code means the connection's read snapshot is stale, which is why a deferred read-then-write fails even with a busy timeout | Official |
+| [SQLite — `PRAGMA journal_mode`](https://www.sqlite.org/pragma.html#pragma_journal_mode) | WAL mode is persistent in the database file, so every process opening the file inherits it | Official |
+| [Python — `sqlite3` transaction control](https://docs.python.org/3/library/sqlite3.html#sqlite3-controlling-transactions) | The module implicitly opens a transaction before DML (a deferred `BEGIN`) — the behaviour that makes the explicit `BEGIN IMMEDIATE` claim path necessary | Official |
+| [Python — `sqlite3` module overview](https://docs.python.org/3/library/sqlite3.html#module-sqlite3) | `sqlite3` "requires the third-party SQLite library", i.e. the version is the platform's, not Python's | Official |
+| [SQLite fix commit for 3.44.6](https://sqlite.org/src/info/863c171b76cd36e0) / [for 3.50.7](https://sqlite.org/src/info/c7facf7ac58d2cda) | The exact backported WAL-reset fixes, linked from the WAL page above | Official source tree |
+| [Phil Eaton — "Another look at SQLite's WAL-Reset bug"](https://theconsensus.dev/p/2026/08/23/another-look-at-sqlite-wal-reset.html) | A reproducer that does not need SQLite's test hooks — linked from the SQLite WAL page itself. Supports "the race is real, not purely theoretical" | Community analysis (linked by SQLite) |
+| Community: an r/Python "SQLite in production" thread, a Stack Overflow answer about multi-hour emoji-create bans in JDA, and the `userdoccers` documentation mirror | Field reports that deferred read-then-write upgrades fail under concurrency and that emoji creation can be banned for a long time. **No stable link was recorded for these during this work**, so they are treated as anecdote and no code decision rests on them alone — the code behaviour is pinned by the two-connection tests instead | Community anecdotes (no link) |
+
 ## Safety confirmations
 
 - **No emoji was deleted.** `deletes == 0` is asserted throughout; the delete path remains
@@ -754,6 +1130,16 @@ and byte-compared against a backup afterwards.
   creation site, plus a structural test that the ordering cannot silently regress.
 
 ## Changed files
+
+Round-6 files first; the table below is the round-1..5 change list.
+
+| File | Change |
+|---|---|
+| `dashboard/app.py` (round 6) | 405 JSON response keeps `Allow`; `/health` context adds `sqlite3.sqlite_version` |
+| `dashboard/templates/general/health.html` (round 6) | One runtime row: `SQLite (dashboard)` |
+| `utils/shop_emoji.py` (round 6) | `delete_confirmed_duplicate()` row-unchanged re-check (`asset_changed_during_delete`) |
+| `scripts/test_api_error_contract.py`, `scripts/test_shop_emoji.py`, `scripts/test_shop_emoji_multiprocess.py` (round 6) | +2, +4, +1 tests; CAS test renamed `…_same_process` |
+| `scripts/test_health_runtime_info.py` (round 6) | New file, 2 tests |
 
 | File | Change |
 |---|---|
@@ -796,7 +1182,14 @@ and byte-compared against a backup afterwards.
    headless-browser render — and the Dashboard "control present" checks remain static
    source assertions, which is a weaker claim than the behaviour tests and is labelled as
    such.
-7. **`stats()["deferred"]` keeps its old meaning** (every row in a future backoff) for
+7. **The deployed SQLite version is not established by this PR** — the image tag
+   is floating and the value must be read from the deployment (`/health`, one
+   line). If the deployment runs an unpatched build it is exposed to the
+   WAL-reset bug (3.7.0–3.51.2, fixed in 3.51.3); the options are listed in
+   "Runtime SQLite version, and the WAL-reset bug" and **none is implemented**.
+8. **The adopt→`DELETE` window is narrowed, not closed** (one indexed `SELECT`);
+   see "The residual adopt→`DELETE` race, precisely". No lease, by design.
+9. **`stats()["deferred"]` keeps its old meaning** (every row in a future backoff) for
    backwards compatibility, but every UI label and the report now separate
    `retrying_backoff` from `uncertain`. Anything else reading `deferred` should be
    reviewed with the same distinction in mind.
