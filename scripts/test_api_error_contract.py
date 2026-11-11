@@ -94,6 +94,26 @@ class ApiJsonErrorContractTests(unittest.TestCase):
         response = self.client.post("/api/shop-publisher/catalog", headers=self.headers)
         self.assert_json_error(response, 405, "method_not_allowed")
 
+    def test_json_405_preserves_the_allow_header(self):
+        # RFC 9110: a 405 MUST list the supported methods in Allow. Converting
+        # the body to JSON must not lose it.
+        response = self.client.post("/api/shop-publisher/catalog", headers=self.headers)
+        self.assertEqual(response.status_code, 405)
+        allow = response.headers.get("Allow")
+        self.assertIsNotNone(allow, "the JSON 405 dropped the Allow header")
+        methods = {part.strip().upper() for part in allow.split(",")}
+        self.assertIn("GET", methods)
+        self.assertIn("HEAD", methods)
+        self.assertNotIn("POST", methods)
+
+    def test_html_405_keeps_werkzeugs_default_response_and_allow(self):
+        # A page route is GET-only: the HTML contract must stay untouched.
+        response = self.client.post("/login")
+        self.assertEqual(response.status_code, 405)
+        self.assertIn("text/html", response.content_type)
+        self.assertIsNotNone(response.headers.get("Allow"))
+        self.assertIn("GET", response.headers.get("Allow", "").upper())
+
     # ── 3. unhandled exception inside an API view ─────────────────────────
     def test_unhandled_api_exception_is_a_generic_json_500(self):
         # This route has no local try/except: only the central handler can

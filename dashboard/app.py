@@ -336,10 +336,19 @@ def not_found(e):
 
 @app.errorhandler(405)
 def method_not_allowed(e):
+    # RFC 9110 requires a 405 response to carry `Allow` listing the methods the
+    # target resource does support, and Werkzeug builds that header from the
+    # route's own method set. A hand-built JSON body would silently drop it, so
+    # the header is taken from the original response and carried over verbatim.
+    original = e.get_response()
     if _api_request():
-        return _json_error(405, "method_not_allowed",
-                           "That HTTP method is not allowed for this endpoint.")
-    return e.get_response()
+        response, status = _json_error(405, "method_not_allowed",
+                                       "That HTTP method is not allowed for this endpoint.")
+        allow = original.headers.get("Allow")
+        if allow:
+            response.headers["Allow"] = allow
+        return response, status
+    return original
 
 
 @app.errorhandler(500)
