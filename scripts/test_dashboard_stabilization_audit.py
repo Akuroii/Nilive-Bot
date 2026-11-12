@@ -298,24 +298,98 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             self.assertEqual(by_id[str(SNOWFLAKE_GUILD)]["category"], "active")
             self.assertNotEqual(by_id["1088248319982006999"]["category"], "invite")
 
-        # 2c. Pagination across 200-guild boundary
+        # 2c. Pagination across 200-guild boundary (continues until empty page [])
         page1 = [{"id": str(1000 + i), "name": f"G{i}"} for i in range(200)]
         page2 = [{"id": str(2000 + i), "name": f"G2_{i}"} for i in range(5)]
         seen_params = []
 
         def fake_pages(url, headers=None, params=None, timeout=None):
             seen_params.append(dict(params or {}))
-            if (params or {}).get("after") == "1199":
+            after = (params or {}).get("after")
+            if after is None:
+                return _mock_resp(200, page1)
+            if after == "1199":
                 return _mock_resp(200, page2)
-            return _mock_resp(200, page1)
+            if after == "2004":
+                return _mock_resp(200, [])
+            raise AssertionError(f"Unexpected pagination params: {params}")
 
         with patch("dashboard.auth.requests.get", side_effect=fake_pages):
             full = auth.fetch_bot_guilds_full()
             self.assertTrue(getattr(full, "ok", False))
             self.assertTrue(getattr(full, "complete", False))
             self.assertEqual(len(full), 205)
+            self.assertEqual(len(seen_params), 3)
             self.assertEqual(seen_params[0].get("limit"), 200)
             self.assertEqual(seen_params[1].get("after"), "1199")
+            self.assertEqual(seen_params[2].get("after"), "2004")
+
+    def test_issue_b_short_non_empty_page_199_then_3_then_empty(self):
+        page1 = [{"id": str(1000 + i), "name": f"G1_{i}"} for i in range(199)]
+        page2 = [{"id": str(500 + i), "name": f"G2_{i}"} for i in range(3)]
+        seen_params = []
+
+        def fake_short_page(url, headers=None, params=None, timeout=None):
+            seen_params.append(dict(params or {}))
+            after = (params or {}).get("after")
+            if after is None:
+                return _mock_resp(200, page1)
+            if after == "1198":
+                return _mock_resp(200, page2)
+            if after == "502":
+                return _mock_resp(200, [])
+            raise AssertionError(f"Unexpected pagination params: {params}")
+
+        with patch("dashboard.auth.requests.get", side_effect=fake_short_page):
+            full = auth.fetch_bot_guilds_full()
+            self.assertEqual(len(seen_params), 3)
+            self.assertEqual(seen_params[1].get("after"), "1198")
+            self.assertEqual(seen_params[2].get("after"), "502")
+            self.assertEqual(len(full), 202)
+            self.assertTrue(full.ok)
+            self.assertTrue(full.complete)
+            self.assertEqual(full.status, "ok")
+
+    def test_issue_b_repeated_cursor_stops_immediately_as_incomplete(self):
+        page1 = [{"id": str(1000 + i), "name": f"G_{i}"} for i in range(200)]
+        seen_params = []
+
+        def fake_repeated_cursor(url, headers=None, params=None, timeout=None):
+            seen_params.append(dict(params or {}))
+            return _mock_resp(200, page1)
+
+        with patch("dashboard.auth.requests.get", side_effect=fake_repeated_cursor):
+            res = auth.fetch_bot_guilds_full()
+            self.assertEqual(len(seen_params), 2)
+            self.assertEqual(seen_params[1].get("after"), "1199")
+            self.assertEqual(len(res), 200)
+            self.assertFalse(res.ok)
+            self.assertFalse(res.complete)
+            self.assertEqual(res.status, "truncated")
+            self.assertIn("1199", res.error or "")
+
+    def test_issue_b_cursor_cycle_detected_before_page_cap(self):
+        page_a = [{"id": str(1000 + i), "name": f"GA_{i}"} for i in range(200)]
+        page_b = [{"id": str(950 + i), "name": f"GB_{i}"} for i in range(201)]  # ends at "1150"
+        seen_params = []
+
+        def fake_cycling_cursor(url, headers=None, params=None, timeout=None):
+            seen_params.append(dict(params or {}))
+            after = (params or {}).get("after")
+            if after == "1199":
+                return _mock_resp(200, page_b)
+            return _mock_resp(200, page_a)
+
+        with patch("dashboard.auth.requests.get", side_effect=fake_cycling_cursor):
+            res = auth.fetch_bot_guilds_full()
+            self.assertEqual(len(seen_params), 3)
+            self.assertEqual([p.get("after") for p in seen_params], [None, "1199", "1150"])
+            self.assertEqual(len(res), len({g["id"] for g in res}))
+            self.assertEqual(len(res), 250)
+            self.assertFalse(res.ok)
+            self.assertFalse(res.complete)
+            self.assertEqual(res.status, "truncated")
+            self.assertIn("1199", res.error or "")
 
     def test_issue_b_pagination_cap_marks_truncated_not_complete(self):
         call_idx = {"n": 0}

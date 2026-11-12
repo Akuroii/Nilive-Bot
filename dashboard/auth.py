@@ -156,14 +156,20 @@ def fetch_discord_user(access_token: str) -> dict | None:
 def _fetch_paginated_guilds(auth_header: str, log_label: str) -> GuildDiscoveryList:
     """
     Bounded pagination over GET /users/@me/guilds (limit=200 + after=<last_id>).
-    Preserves whether an empty return is genuine (HTTP 200 []) vs a failed/rate-limited
-    or page-cap-truncated Discord request so callers never confuse incomplete results
-    with confirmed guild absence.
+    Continues until an empty page ([]) is received rather than stopping on a
+    non-empty page with fewer than 200 items, while respecting _MAX_GUILD_PAGES
+    and detecting repeated or cycling cursors without assuming numeric Snowflake
+    ordering. Preserves whether an empty return is genuine (HTTP 200 []) vs a
+    failed/rate-limited, cursor-cycled, or page-cap-truncated Discord request so
+    callers never confuse incomplete results with confirmed guild absence.
     """
     guilds: list[dict] = []
+    seen_guild_ids: set[str] = set()
+    seen_cursors: set[str] = set()
     headers = {"Authorization": auth_header}
     params: dict = {"limit": 200}
     reached_end = False
+    stop_error: str | None = None
     try:
         for _ in range(_MAX_GUILD_PAGES):
             r = requests.get(
@@ -192,21 +198,23 @@ def _fetch_paginated_guilds(auth_header: str, log_label: str) -> GuildDiscoveryL
             if not page:
                 reached_end = True
                 break
-            valid_page = []
+            valid_page: list[tuple[str, dict]] = []
             for g in page:
                 if not isinstance(g, dict):
                     return GuildDiscoveryList([], ok=False, complete=False, status="malformed", error="Malformed guild entry")
                 gid_raw = str(g.get("id", "")).strip()
                 if not gid_raw.isascii() or not gid_raw.isdigit():
                     return GuildDiscoveryList([], ok=False, complete=False, status="malformed", error="Invalid guild id")
-                valid_page.append(g)
-            guilds.extend(valid_page)
-            if len(valid_page) < params["limit"]:
-                reached_end = True
+                valid_page.append((gid_raw, g))
+            for gid_raw, g in valid_page:
+                if gid_raw not in seen_guild_ids:
+                    seen_guild_ids.add(gid_raw)
+                    guilds.append(g)
+            next_after = valid_page[-1][0]
+            if next_after in seen_cursors:
+                stop_error = f"Guild pagination stopped due to repeated/cycled cursor after={next_after}"
                 break
-            next_after = str(valid_page[-1]["id"])
-            if params.get("after") == next_after:
-                break
+            seen_cursors.add(next_after)
             params["after"] = next_after
 
         if not reached_end:
@@ -216,7 +224,7 @@ def _fetch_paginated_guilds(auth_header: str, log_label: str) -> GuildDiscoveryL
                 complete=False,
                 status="truncated",
                 http_status=200,
-                error=f"Guild pagination stopped at {_MAX_GUILD_PAGES} pages without reaching end of list",
+                error=stop_error or f"Guild pagination stopped at {_MAX_GUILD_PAGES} pages without reaching end of list",
             )
         return GuildDiscoveryList(guilds, ok=True, complete=True, status="ok", http_status=200)
     except Exception as exc:
