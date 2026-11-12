@@ -89,9 +89,9 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
 
         run_async(_seed())
 
-    def _login(self, guild_id=SNOWFLAKE_GUILD, level="owner"):
+    def _login(self, guild_id=SNOWFLAKE_GUILD, level="owner", user_id=None):
         with self.client.session_transaction() as sess:
-            sess["user"] = {"id": str(self.admin_id), "username": "AuditOwner", "avatar": None}
+            sess["user"] = {"id": str(user_id or self.admin_id), "username": "AuditOwner", "avatar": None}
             sess["access_token"] = "test_user_oauth_token"
             sess["expires_at"] = time.time() + 3600
             sess["csrf_token"] = "csrf_valid_token_123"
@@ -197,6 +197,47 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
                     self.assertNotIn("not found in server", (v_err or "").lower())
                     self.assertNotIn("test_secret_bot_token_do_not_leak", v_err or "")
 
+    def test_issue_a_discord_10004_unknown_guild_is_unknown_never_absent(self):
+        sample_roles = [
+            {"id": str(SNOWFLAKE_GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False, "permissions": "0"},
+            {"id": str(SNOWFLAKE_ROLE_A), "name": "AssignableCandidate", "position": 1, "color": 0, "managed": False, "permissions": "0"},
+        ]
+
+        def fake_10004(url, **kwargs):
+            if url.endswith("/users/@me"):
+                return _mock_resp(200, {"id": BOT_USER_ID})
+            if url.endswith("/roles"):
+                return _mock_resp(200, sample_roles)
+            return _mock_resp(404, {"code": 10004, "message": "Unknown Guild"})
+
+        rv.clear_bot_identity_cache()
+        self._login()
+        with patch("dashboard.utils.role_validation._req.get", side_effect=fake_10004):
+            member, status, err = rv.fetch_bot_guild_member(SNOWFLAKE_GUILD)
+            self.assertIsNone(member)
+            self.assertEqual(status, rv.BotMemberStatus.UNKNOWN)
+            self.assertNotEqual(status, rv.BotMemberStatus.ABSENT)
+            self.assertIn("10004", err or "")
+
+            roles, bot_member, roles_err = rv.fetch_guild_roles_and_bot_member(SNOWFLAKE_GUILD)
+            self.assertIsNone(roles_err)
+            info = rv.compute_role_assignability(SNOWFLAKE_GUILD, roles, bot_member)
+            self.assertEqual(info["bot_status"], "unknown")
+            role_meta = info["role_map"][str(SNOWFLAKE_ROLE_A)]
+            self.assertFalse(role_meta["assignable"])
+            self.assertEqual(role_meta["unassignable_reason"], "bot_status_unknown")
+            self.assertNotEqual(role_meta["unassignable_reason"], "bot_missing")
+            self.assertNotIn("nero not found in server", (role_meta.get("unassignable_label") or "").lower())
+
+            api_res = self.client.get("/api/guild/roles", headers={"X-Guild-ID": str(SNOWFLAKE_GUILD)})
+            self.assertEqual(api_res.status_code, 200)
+            api_text = api_res.get_data(as_text=True)
+            api_json = api_res.get_json()
+            self.assertEqual(api_json.get("bot_status"), "unknown")
+            self.assertNotIn("Nero not found in server", api_text)
+            for r_out in api_json.get("results", []):
+                self.assertNotEqual(r_out.get("reason"), "bot_missing")
+
     def test_issue_a_bot_profile_live_member_uses_bot_id_not_at_me(self):
         called = []
 
@@ -271,9 +312,60 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
         with patch("dashboard.auth.requests.get", side_effect=fake_pages):
             full = auth.fetch_bot_guilds_full()
             self.assertTrue(getattr(full, "ok", False))
+            self.assertTrue(getattr(full, "complete", False))
             self.assertEqual(len(full), 205)
             self.assertEqual(seen_params[0].get("limit"), 200)
             self.assertEqual(seen_params[1].get("after"), "1199")
+
+    def test_issue_b_pagination_cap_marks_truncated_not_complete(self):
+        call_idx = {"n": 0}
+
+        def fake_infinite_pages(url, headers=None, params=None, timeout=None):
+            base = call_idx["n"] * 200 + 10000
+            call_idx["n"] += 1
+            return _mock_resp(200, [{"id": str(base + i), "name": f"Guild_{base + i}"} for i in range(200)])
+
+        with patch("dashboard.auth.requests.get", side_effect=fake_infinite_pages):
+            capped = auth.fetch_bot_guilds_full()
+            self.assertEqual(call_idx["n"], auth._MAX_GUILD_PAGES)
+            self.assertEqual(len(capped), auth._MAX_GUILD_PAGES * 200)
+            self.assertFalse(capped.complete, "Truncated 25-page list must set complete=False")
+            self.assertFalse(capped.ok, "Truncated 25-page list must NOT report ok=True")
+            self.assertEqual(capped.status, "truncated")
+
+            bot_set = auth.fetch_discord_bot_guilds()
+            self.assertFalse(bot_set.complete)
+            self.assertFalse(bot_set.ok)
+            self.assertEqual(bot_set.status, "truncated")
+
+        # Verify /api/user/servers treats truncated bot list as degraded:
+        # - Guilds inside the returned 5,000 ARE recognized as installed ("active" when granted)
+        # - Guilds outside the returned 5,000 are "indeterminate", NEVER "dangling" or "invite"
+        self._login(guild_id=None)
+        in_window_guild = "10005"
+        beyond_window_guild = "999999999999999999"
+        user_guilds = auth.GuildDiscoveryList(
+            [
+                {"id": in_window_guild, "name": "Seen In First 5000", "permissions": "8", "icon": None},
+                {"id": beyond_window_guild, "name": "Beyond Page 25", "permissions": "32", "icon": None},
+            ],
+            ok=True,
+            complete=True,
+            status="ok",
+        )
+        call_idx["n"] = 0
+        with patch("dashboard.auth.requests.get", side_effect=fake_infinite_pages), \
+             patch("dashboard.app.fetch_discord_guilds", return_value=user_guilds):
+            resp = self.client.get("/api/user/servers")
+            self.assertEqual(resp.status_code, 200)
+            body = resp.get_json()
+            self.assertTrue(body["degraded"])
+            self.assertFalse(body["bot_discovery_complete"])
+            self.assertEqual(body["bot_discovery_status"], "truncated")
+            by_id = {s["id_str"]: s for s in body["servers"]}
+            self.assertEqual(by_id[in_window_guild]["bot_membership_status"], "installed")
+            self.assertEqual(by_id[beyond_window_guild]["bot_membership_status"], "indeterminate")
+            self.assertEqual(by_id[beyond_window_guild]["category"], "indeterminate")
 
     # ── 3. ISSUE C: Select / Option Dark & Light CSS + Stylesheet Order ────
 
@@ -329,13 +421,165 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             "http://169.254.169.254/latest/meta-data/",
             "https://10.0.0.5/internal.png",
             "https://[::1]/loopback.png",
+            "https://[64:ff9b::7f00:1]/nat64-loopback.png",
+            "https://[::ffff:127.0.0.1]/v4mapped-loopback.png",
         ]
-        with patch("utils.bot_profile.requests.get") as mock_get:
+        with patch("utils.bot_profile.socket.socket") as mock_sock:
             for u in unsafe_urls:
                 data_uri, err = bot_profile._download_image_as_data_uri(u)
                 self.assertIsNone(data_uri, f"Unsafe URL {u} must be rejected")
                 self.assertIsNotNone(err)
-            mock_get.assert_not_called()
+            mock_sock.assert_not_called()
+
+    def test_security_ssrf_dns_rebinding_mixed_rrset_redirects_tls_and_cleanup(self):
+        import http.server
+        import ipaddress
+        import socket
+        import ssl
+        import subprocess
+        import threading
+
+        # 1. Mixed public + private DNS RRset MUST be rejected before dialing any socket
+        mixed_infos = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443)),
+        ]
+        with patch("utils.bot_profile.socket.getaddrinfo", return_value=mixed_infos), \
+             patch("utils.bot_profile.socket.socket") as mock_sock:
+            uri, err = bot_profile._download_image_as_data_uri("https://mixed.example/avatar.png")
+            self.assertIsNone(uri)
+            self.assertIn("private or non-public", err or "")
+            mock_sock.assert_not_called()
+
+        # 2. Redirect to localhost / private IP MUST close hop-1 response and block hop-2 without dialing
+        closed_flags = {"redirect": False, "bad_ctype": False, "big_cl": False, "big_stream": False}
+
+        def _make_tracked_resp(flag_key, status=200, headers=None, chunks=None):
+            r = MagicMock()
+            r.status_code = status
+            r.headers = headers or {}
+            r.iter_content = lambda chunk_size=65536: iter(chunks or [])
+            r.close.side_effect = lambda: closed_flags.__setitem__(flag_key, True)
+            return r
+
+        public_only = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        with patch("utils.bot_profile.socket.getaddrinfo", return_value=public_only), \
+             patch("requests.Session.get", return_value=_make_tracked_resp(
+                 "redirect", status=302, headers={"Location": "http://127.0.0.1:8080/admin.png"}
+             )) as mock_sess_get:
+            uri, err = bot_profile._download_image_as_data_uri("https://cdn.example/start.png")
+            self.assertIsNone(uri)
+            self.assertTrue(closed_flags["redirect"], "Redirect response must be closed")
+            self.assertEqual(mock_sess_get.call_count, 1, "Private redirect target must be blocked before second GET")
+
+        # 3. Response cleanup on non-image Content-Type, oversized Content-Length, and mid-stream overflow
+        with patch("utils.bot_profile.socket.getaddrinfo", return_value=public_only):
+            with patch("requests.Session.get", return_value=_make_tracked_resp(
+                "bad_ctype", status=200, headers={"Content-Type": "text/html"}
+            )):
+                uri, err = bot_profile._download_image_as_data_uri("https://cdn.example/page.html")
+                self.assertIsNone(uri)
+                self.assertTrue(closed_flags["bad_ctype"])
+
+            with patch("requests.Session.get", return_value=_make_tracked_resp(
+                "big_cl", status=200, headers={"Content-Type": "image/png", "Content-Length": "99999999"}
+            )):
+                uri, err = bot_profile._download_image_as_data_uri("https://cdn.example/huge.png", max_bytes=1024)
+                self.assertIsNone(uri)
+                self.assertTrue(closed_flags["big_cl"])
+
+            with patch("requests.Session.get", return_value=_make_tracked_resp(
+                "big_stream", status=200, headers={"Content-Type": "image/png"}, chunks=[b"x" * 700, b"y" * 700]
+            )):
+                uri, err = bot_profile._download_image_as_data_uri("https://cdn.example/stream.png", max_bytes=1024)
+                self.assertIsNone(uri)
+                self.assertTrue(closed_flags["big_stream"])
+
+        # 4. End-to-end DNS rebinding / TOCTOU + TLS SNI + SAN hostname verification + Host header test
+        with tempfile.TemporaryDirectory() as cert_dir:
+            key_path = os.path.join(cert_dir, "key.pem")
+            cert_path = os.path.join(cert_dir, "cert.pem")
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", key_path, "-out", cert_path, "-days", "1",
+                    "-subj", "/CN=cdn-rebind.example",
+                    "-addext", "subjectAltName=DNS:cdn-rebind.example",
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            seen_requests = []
+
+            class TLSHandler(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    seen_requests.append({"host": self.headers.get("Host"), "path": self.path})
+                    payload = b"\x89PNG\r\n\x1a\npinned-ok"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, *args):
+                    return None
+
+            class QuietTLSServer(http.server.ThreadingHTTPServer):
+                def handle_error(self, request, client_address):
+                    return None
+
+            srv = QuietTLSServer(("127.0.0.1", 0), TLSHandler)
+            tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            srv.socket = tls_ctx.wrap_socket(srv.socket, server_side=True)
+            t = threading.Thread(target=srv.serve_forever, daemon=True)
+            t.start()
+            port = srv.server_address[1]
+
+            real_is_unsafe = bot_profile._is_unsafe_ip
+
+            def allow_loopback_fixture_only(ip_obj):
+                if ip_obj == ipaddress.ip_address("127.0.0.1"):
+                    return False
+                return real_is_unsafe(ip_obj)
+
+            dns_calls = {"count": 0}
+
+            def rebinding_getaddrinfo(host, port_arg, *args, **kwargs):
+                dns_calls["count"] += 1
+                if dns_calls["count"] > 1:
+                    # Simulate attacker DNS rebinding to an internal IP on any second resolution
+                    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", port_arg))]
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port_arg))]
+
+            try:
+                with patch("utils.bot_profile._is_unsafe_ip", side_effect=allow_loopback_fixture_only), \
+                     patch("utils.bot_profile.socket.getaddrinfo", side_effect=rebinding_getaddrinfo):
+                    uri, err = bot_profile._download_image_as_data_uri(
+                        f"https://cdn-rebind.example:{port}/avatar.png",
+                        verify_tls=cert_path,
+                    )
+                    self.assertIsNone(err)
+                    self.assertTrue((uri or "").startswith("data:image/png;base64,"))
+                    self.assertEqual(dns_calls["count"], 1, "Must resolve DNS once and dial pinned IP without re-resolving")
+                    self.assertEqual(seen_requests[0]["host"], f"cdn-rebind.example:{port}")
+
+                # Certificate hostname mismatch MUST still fail TLS verification even when pinned IP is identical
+                dns_calls["count"] = 0
+                with patch("utils.bot_profile._is_unsafe_ip", side_effect=allow_loopback_fixture_only), \
+                     patch("utils.bot_profile.socket.getaddrinfo", side_effect=rebinding_getaddrinfo):
+                    bad_uri, bad_err = bot_profile._download_image_as_data_uri(
+                        f"https://wrong-hostname.example:{port}/avatar.png",
+                        verify_tls=cert_path,
+                    )
+                    self.assertIsNone(bad_uri)
+                    self.assertIsNotNone(bad_err)
+                    self.assertEqual(len(seen_requests), 1, "Mismatched TLS hostname must abort before sending HTTP request")
+            finally:
+                srv.shutdown()
+                srv.server_close()
+                t.join(timeout=5)
 
     def test_security_html_config_forms_require_csrf_and_validate_access_input(self):
         self._login()
@@ -633,6 +877,122 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
         items_b = self.client.get("/api/shop/items", headers=headers_b).get_json()
         items_b_list = items_b if isinstance(items_b, list) else items_b.get("items", [])
         self.assertEqual(len(items_b_list), 0)
+
+    def test_issue_e_two_process_isolated_sqlite_wal_sync(self):
+        """
+        Spawns an independent OS child Python process against the isolated temporary
+        SQLite WAL database (`DB_PATH`) to verify cross-process WAL visibility between
+        the Flask Dashboard process and a separate Bot-side SQLite/utility process.
+        (Note: verifies local two-OS-process SQLite WAL synchronization; live Railway
+        volume + Discord gateway deployment remains a staging smoke check.)
+        """
+        import subprocess
+
+        self._login()
+        headers_a = {"X-CSRF-Token": "csrf_valid_token_123", "X-Guild-ID": str(SNOWFLAKE_GUILD)}
+
+        # Dashboard process writes currency + leveling config to WAL DB
+        r_cur = self.client.post(
+            "/api/economy/currency",
+            headers=headers_a,
+            json={"currency_name": "TwoProcCoins", "coin_emoji_id": "🪙", "diamond_name": "TwoProcGems", "diamond_emoji_id": "💠"},
+        )
+        self.assertEqual(r_cur.status_code, 200)
+
+        child_code = """
+import asyncio, json, os, sys
+import aiosqlite
+from database import DB_PATH
+from utils.currency import get_currency_config
+
+async def main():
+    guild_id = int(sys.argv[1])
+    user_id = int(sys.argv[2])
+    cur = await get_currency_config(guild_id)
+    assert cur["coins"]["name"] == "TwoProcCoins", f"Unexpected coins: {cur}"
+    assert cur["diamonds"]["name"] == "TwoProcGems", f"Unexpected diamonds: {cur}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
+        await db.execute(
+            "INSERT OR REPLACE INTO economy (user_id, guild_id, balance) VALUES (?, ?, 42424)",
+            (user_id, guild_id),
+        )
+        await db.commit()
+    print(json.dumps({"ok": True, "db": DB_PATH}))
+
+asyncio.run(main())
+"""
+        child_env = dict(os.environ)
+        child_env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        proc = subprocess.run(
+            [sys.executable, "-c", child_code, str(SNOWFLAKE_GUILD), str(SNOWFLAKE_USER_A)],
+            env=child_env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(proc.returncode, 0, f"Child process failed:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
+
+        # Still-running Dashboard process immediately reads child process's committed WAL balance
+        lb_html = self.client.get("/api/economy/leaderboard", headers=headers_a).get_data(as_text=True)
+        self.assertTrue("42,424" in lb_html or "42424" in lb_html, f"Expected 42,424 in {lb_html}")
+
+    def test_all_dashboard_page_routes_render_without_500(self):
+        """Render every major Dashboard HTML page route via Flask/Jinja2 and verify zero 500s."""
+        self._login()
+        page_routes = [
+            "/login",
+            "/server-select",
+            "/",
+            "/members",
+            f"/members/{SNOWFLAKE_USER_A}",
+            "/audit-log",
+            "/reports",
+            "/health",
+            "/moderation",
+            "/tickets",
+            "/embed-builder",
+            "/embed-builder/v2",
+            "/reaction-roles",
+            "/triggers",
+            "/custom-commands",
+            "/mvp",
+            "/leveling",
+            "/economy",
+            "/shop",
+            "/shop-publisher",
+            "/shop-designer",
+            "/events",
+            "/minigames",
+            "/minigames/builder",
+            "/missions",
+            "/ledger",
+            "/inventory",
+            f"/inventory/{SNOWFLAKE_USER_A}",
+            "/trade",
+            "/tag-missions",
+            "/tag-partners",
+            "/creator",
+            "/config/general",
+            "/config/welcome",
+            "/config/boost",
+            "/config/botprofile",
+            "/config/announcements",
+            "/commands",
+            "/config/access",
+        ]
+        with patch("dashboard.auth.requests.get", return_value=_mock_resp(200, [])), \
+             patch("dashboard.utils.role_validation._req.get", return_value=_mock_resp(200, [])):
+            for route in page_routes:
+                with self.subTest(route=route):
+                    resp = self.client.get(route)
+                    self.assertIn(resp.status_code, (200, 302), f"{route} returned unexpected HTTP {resp.status_code}")
+
+            # /backups is restricted to developer (OWNER_ID=999999999): 403 for non-developer owner, 200 for developer
+            self.assertEqual(self.client.get("/backups").status_code, 403)
+            self._login(user_id="999999999")
+            self.assertEqual(self.client.get("/backups").status_code, 200)
 
 
 if __name__ == "__main__":

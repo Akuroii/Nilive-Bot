@@ -13,8 +13,8 @@ _BOT_IDENTITY_CACHE: dict[str, tuple[str, float]] = {}
 
 class BotMemberStatus:
     PRESENT = "present"  # Confirmed guild member (HTTP 200 valid member payload)
-    ABSENT = "absent"    # Explicitly confirmed absent (404 Discord code 10007 or 10004)
-    UNKNOWN = "unknown"  # Indeterminate (missing/invalid token, 401/403/429/5xx/network/malformed)
+    ABSENT = "absent"    # Explicitly confirmed absent (404 Discord code 10007 Unknown Member)
+    UNKNOWN = "unknown"  # Indeterminate (10004 Unknown Guild, missing/invalid token, 401/403/429/5xx/network/malformed)
 
 
 def _token_cache_key(bot_token: str) -> str:
@@ -121,8 +121,10 @@ def fetch_bot_guild_member(
             code = err_body.get("code") if isinstance(err_body, dict) else None
         except Exception:
             code = None
-        if code in (10007, 10004):
+        if code == 10007:
             return None, BotMemberStatus.ABSENT, "Nero is not a member of this server"
+        if code == 10004:
+            return None, BotMemberStatus.UNKNOWN, "Discord 404 Unknown Guild (10004) fetching bot member"
         return None, BotMemberStatus.UNKNOWN, "Ambiguous 404 fetching bot member"
 
     if member_resp.status_code == 401:

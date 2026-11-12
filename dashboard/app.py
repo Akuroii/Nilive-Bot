@@ -546,8 +546,10 @@ def api_user_servers():
     access_token = session.get("access_token", "")
     user_guilds = fetch_discord_guilds(access_token) if access_token else []
     bot_guilds_list = fetch_bot_guilds_full()
-    bot_ok = getattr(bot_guilds_list, "ok", True)
-    user_ok = getattr(user_guilds, "ok", True) if access_token else False
+    bot_complete = bool(getattr(bot_guilds_list, "complete", True))
+    bot_ok = bool(getattr(bot_guilds_list, "ok", True) and bot_complete)
+    user_complete = bool(getattr(user_guilds, "complete", True)) if access_token else False
+    user_ok = bool(getattr(user_guilds, "ok", True) and user_complete) if access_token else False
     bot_guilds = {int(g["id"]): g for g in bot_guilds_list}
 
     # Fetch explicit user grants from database
@@ -569,7 +571,15 @@ def api_user_servers():
         gid = int(g["id"])
         can_manage = guild_permissions_can_manage_server(g.get("permissions"))
         is_bot = gid in bot_guilds
-        bot_status = ("installed" if is_bot else "absent") if bot_ok else "indeterminate"
+        if is_bot:
+            bot_status = "installed"
+            is_bot_field = True
+        elif bot_ok:
+            bot_status = "absent"
+            is_bot_field = False
+        else:
+            bot_status = "indeterminate"
+            is_bot_field = None
         grant = db_grants.get(gid) or (LEVEL_OWNER if super_admin and is_bot else None)
 
         if grant or can_manage:
@@ -579,7 +589,7 @@ def api_user_servers():
                 "id_str": str(gid),
                 "name": (bdata or g).get("name", "Unknown Server"),
                 "icon": (bdata or g).get("icon"),
-                "is_bot_member": is_bot if bot_ok else None,
+                "is_bot_member": is_bot_field,
                 "bot_membership_status": bot_status,
                 "can_manage": can_manage,
                 "has_dashboard_access": grant is not None,
@@ -623,16 +633,13 @@ def api_user_servers():
             }
 
     # 4. Categorize — never downgrade granted servers to "dangling" or
-    # manageable servers to "invite" when bot discovery itself failed.
+    # manageable servers to "invite" when bot discovery failed or was truncated.
     servers = []
     for gid, s in guild_dict.items():
-        if not bot_ok:
-            if s["has_dashboard_access"]:
-                s["category"] = "active"
-            else:
-                s["category"] = "indeterminate"
-        elif s["has_dashboard_access"] and s["is_bot_member"]:
-            s["category"] = "active"
+        if s["is_bot_member"] is True:
+            s["category"] = "active" if s["has_dashboard_access"] else "access_required"
+        elif not bot_ok:
+            s["category"] = "active" if s["has_dashboard_access"] else "indeterminate"
         elif s["has_dashboard_access"] and not s["is_bot_member"]:
             s["category"] = "dangling"
         elif s["can_manage"] and not s["is_bot_member"]:
@@ -653,7 +660,9 @@ def api_user_servers():
         "servers": servers,
         "degraded": not (bot_ok and user_ok),
         "bot_discovery_status": getattr(bot_guilds_list, "status", "ok"),
+        "bot_discovery_complete": bot_complete,
         "user_discovery_status": getattr(user_guilds, "status", "ok") if access_token else "missing_token",
+        "user_discovery_complete": user_complete,
     })
 
 
@@ -1803,8 +1812,10 @@ def config_general():
             await db.commit()
 
     if request.method == "POST":
+        import secrets
         submitted_token = request.form.get("csrf_token", "")
-        if not submitted_token or submitted_token != session.get("csrf_token"):
+        expected_token = session.get("csrf_token") or ""
+        if not submitted_token or not expected_token or not secrets.compare_digest(submitted_token.encode(), expected_token.encode()):
             abort(403)
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
@@ -1886,8 +1897,10 @@ def config_welcome():
             await db.commit()
 
     if request.method == "POST":
+        import secrets
         submitted_token = request.form.get("csrf_token", "")
-        if not submitted_token or submitted_token != session.get("csrf_token"):
+        expected_token = session.get("csrf_token") or ""
+        if not submitted_token or not expected_token or not secrets.compare_digest(submitted_token.encode(), expected_token.encode()):
             abort(403)
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
@@ -1975,8 +1988,10 @@ def config_boost():
             await db.commit()
 
     if request.method == "POST":
+        import secrets
         submitted_token = request.form.get("csrf_token", "")
-        if not submitted_token or submitted_token != session.get("csrf_token"):
+        expected_token = session.get("csrf_token") or ""
+        if not submitted_token or not expected_token or not secrets.compare_digest(submitted_token.encode(), expected_token.encode()):
             abort(403)
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()

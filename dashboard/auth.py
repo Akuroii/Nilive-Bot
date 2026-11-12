@@ -29,10 +29,11 @@ class BotMembershipStatus:
 class GuildDiscoveryList(list):
     """List of Discord guild objects annotated with discovery health metadata."""
 
-    def __init__(self, iterable=(), *, ok: bool = True, status: str = "ok",
-                 http_status: int | None = None, error: str | None = None):
+    def __init__(self, iterable=(), *, ok: bool = True, complete: bool = True,
+                 status: str = "ok", http_status: int | None = None, error: str | None = None):
         super().__init__(iterable)
         self.ok = ok
+        self.complete = complete
         self.status = status
         self.http_status = http_status
         self.error = error
@@ -41,10 +42,11 @@ class GuildDiscoveryList(list):
 class GuildDiscoverySet(set):
     """Set of Discord guild IDs annotated with discovery health metadata."""
 
-    def __init__(self, iterable=(), *, ok: bool = True, status: str = "ok",
-                 http_status: int | None = None, error: str | None = None):
+    def __init__(self, iterable=(), *, ok: bool = True, complete: bool = True,
+                 status: str = "ok", http_status: int | None = None, error: str | None = None):
         super().__init__(iterable)
         self.ok = ok
+        self.complete = complete
         self.status = status
         self.http_status = http_status
         self.error = error
@@ -155,11 +157,13 @@ def _fetch_paginated_guilds(auth_header: str, log_label: str) -> GuildDiscoveryL
     """
     Bounded pagination over GET /users/@me/guilds (limit=200 + after=<last_id>).
     Preserves whether an empty return is genuine (HTTP 200 []) vs a failed/rate-limited
-    Discord request so callers never confuse transient failures with absent membership.
+    or page-cap-truncated Discord request so callers never confuse incomplete results
+    with confirmed guild absence.
     """
     guilds: list[dict] = []
     headers = {"Authorization": auth_header}
     params: dict = {"limit": 200}
+    reached_end = False
     try:
         for _ in range(_MAX_GUILD_PAGES):
             r = requests.get(
@@ -177,40 +181,53 @@ def _fetch_paginated_guilds(auth_header: str, log_label: str) -> GuildDiscoveryL
                 return GuildDiscoveryList(
                     [],
                     ok=False,
+                    complete=False,
                     status=status,
                     http_status=r.status_code,
                     error=f"Discord HTTP {r.status_code}",
                 )
             page = r.json()
             if not isinstance(page, list):
-                return GuildDiscoveryList([], ok=False, status="malformed", error="Malformed guilds list")
+                return GuildDiscoveryList([], ok=False, complete=False, status="malformed", error="Malformed guilds list")
             if not page:
+                reached_end = True
                 break
             valid_page = []
             for g in page:
                 if not isinstance(g, dict):
-                    return GuildDiscoveryList([], ok=False, status="malformed", error="Malformed guild entry")
+                    return GuildDiscoveryList([], ok=False, complete=False, status="malformed", error="Malformed guild entry")
                 gid_raw = str(g.get("id", "")).strip()
                 if not gid_raw.isascii() or not gid_raw.isdigit():
-                    return GuildDiscoveryList([], ok=False, status="malformed", error="Invalid guild id")
+                    return GuildDiscoveryList([], ok=False, complete=False, status="malformed", error="Invalid guild id")
                 valid_page.append(g)
             guilds.extend(valid_page)
             if len(valid_page) < params["limit"]:
+                reached_end = True
                 break
             next_after = str(valid_page[-1]["id"])
             if params.get("after") == next_after:
                 break
             params["after"] = next_after
-        return GuildDiscoveryList(guilds, ok=True, status="ok", http_status=200)
+
+        if not reached_end:
+            return GuildDiscoveryList(
+                guilds,
+                ok=False,
+                complete=False,
+                status="truncated",
+                http_status=200,
+                error=f"Guild pagination stopped at {_MAX_GUILD_PAGES} pages without reaching end of list",
+            )
+        return GuildDiscoveryList(guilds, ok=True, complete=True, status="ok", http_status=200)
     except Exception as exc:
         print(f"[AUTH] {log_label} error: {type(exc).__name__}")
-        return GuildDiscoveryList([], ok=False, status="network_error", error=type(exc).__name__)
+        return GuildDiscoveryList([], ok=False, complete=False, status="network_error", error=type(exc).__name__)
 
 
 def fetch_discord_guilds(access_token: str) -> GuildDiscoveryList:
     token = (access_token or "").strip()
     if not token:
-        return GuildDiscoveryList([], ok=False, status="missing_token", error="OAuth access token missing")
+        return GuildDiscoveryList([], ok=False, complete=False, status="missing_token", error="OAuth access token missing")
     return _fetch_paginated_guilds(f"Bearer {token}", "fetch_discord_guilds")
 
 
@@ -243,13 +260,14 @@ def fetch_discord_bot_guilds() -> GuildDiscoverySet:
     """
     Phase 0 Extension. Returns the set of guild IDs the bot is
     currently a member of, read via the BOT token, annotated with
-    .ok / .status / .error so callers can distinguish a genuine empty
-    result from a missing token or failed Discord API request.
+    .ok / .complete / .status / .error so callers can distinguish a genuine
+    complete result from a missing token, failed request, or truncated list.
     """
     full = fetch_bot_guilds_full()
     return GuildDiscoverySet(
         (int(g["id"]) for g in full),
         ok=getattr(full, "ok", True),
+        complete=getattr(full, "complete", True),
         status=getattr(full, "status", "ok"),
         http_status=getattr(full, "http_status", None),
         error=getattr(full, "error", None),
@@ -260,13 +278,13 @@ def fetch_bot_guilds_full() -> GuildDiscoveryList:
     """
     Full guild objects (id, name, icon, ...) the bot is currently a
     member of, read via the BOT token with bounded pagination.
-    Returns a GuildDiscoveryList (a list subclass with .ok, .status,
-    .http_status, .error) so callers can distinguish genuine empty
-    membership from missing DISCORD_TOKEN or Discord API failures.
+    Returns a GuildDiscoveryList (a list subclass with .ok, .complete,
+    .status, .http_status, .error) so callers can distinguish genuine empty
+    membership from missing DISCORD_TOKEN, API failures, or truncated lists.
     """
     bot_token = os.getenv("DISCORD_TOKEN", "").strip()
     if not bot_token:
-        return GuildDiscoveryList([], ok=False, status="missing_token", error="BOT_TOKEN not configured")
+        return GuildDiscoveryList([], ok=False, complete=False, status="missing_token", error="BOT_TOKEN not configured")
     return _fetch_paginated_guilds(f"Bot {bot_token}", "fetch_bot_guilds_full")
 
 

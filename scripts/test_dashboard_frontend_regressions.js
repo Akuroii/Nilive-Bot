@@ -210,65 +210,346 @@ async function testTicketsCategoryRenderAndEdit() {
     assert(!titleHtml.includes('<img src=x onerror=alert(2)>'), 'editCategory must escape category name');
 }
 
-// ── 3. Stored/DOM XSS Checks Across Client Templates + Minigame Snowflake ──
-function testTemplateEscapingAndMinigameSnowflake() {
-    // 3a. trade.html summarizeOffer
-    const tradeScript = extractInlineScripts(readFile('dashboard/templates/systems/trade.html'))[0];
-    const tradeBox = {
-        URLSearchParams,
-        console,
-        _escapeHtml: escapeHtmlHelper,
-        currencyAmount: (k, v) => `${v} ${k}`,
-        fetch: async () => ({ ok: true, json: async () => ({ trades: [] }) }),
-        document: { getElementById: () => ({ value: '', innerHTML: '', textContent: '', addEventListener() {} }) },
-        window: null,
-    };
-    tradeBox.window = tradeBox;
-    vm.createContext(tradeBox);
-    vm.runInContext(tradeScript, tradeBox);
-    const offerHtml = tradeBox.summarizeOffer({ items: { '<img src=x onerror=alert(1)>': 2 } });
-    assert(!offerHtml.includes('<img src=x'), 'trade.html summarizeOffer must escape item names');
+// ── 3. Behavioral Stored/DOM XSS Execution Checks + Minigame Snowflake ─────
+async function testTemplateEscapingAndMinigameSnowflake() {
+    function makeElMap() {
+        const els = new Map();
+        return (id) => {
+            if (!els.has(id)) {
+                els.set(id, {
+                    id,
+                    value: '',
+                    checked: false,
+                    innerHTML: '',
+                    textContent: '',
+                    style: {},
+                    dataset: {},
+                    children: [],
+                    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+                    addEventListener() {},
+                    querySelector: () => ({ checked: false, value: '' }),
+                    querySelectorAll: () => [],
+                });
+            }
+            return els.get(id);
+        };
+    }
 
-    // 3b. tagmissions.html, tagpartners.html, general.html, ledger.html, reactionroles.html, customcommands.html, commands.html
-    assert(
-        readFile('dashboard/templates/systems/tagmissions.html').includes('${_tmEsc(r.title)}'),
-        'tagmissions.html must escape r.title'
-    );
-    assert(
-        readFile('dashboard/templates/systems/tagpartners.html').includes('${_tpEsc(r.partner_label'),
-        'tagpartners.html must escape r.partner_label'
-    );
-    assert(
-        readFile('dashboard/templates/config/general.html').includes('${_genEsc(m.text)}'),
-        'config/general.html must escape status message text'
-    );
-    assert(
-        readFile('dashboard/templates/systems/ledger.html').includes('${_ledgerEsc(e.source)}'),
-        'systems/ledger.html must escape ledger source/reason'
-    );
-    assert(
-        readFile('dashboard/templates/manage/reactionroles.html').includes('${_rrEsc(b.label)}'),
-        'manage/reactionroles.html must escape button emoji and label'
-    );
-    assert(
-        readFile('dashboard/templates/manage/customcommands.html').includes('${_ccEsc(getLabel(a))}'),
-        'manage/customcommands.html must escape action label'
-    );
-    assert(
-        readFile('dashboard/templates/manage/commands.html').includes('${_cmdEsc(firstAlias)}'),
-        'manage/commands.html must escape alias hint'
-    );
-    assert(
-        !readFile('dashboard/templates/manage/commands.html').includes('<code>!${firstAlias}</code>'),
-        'manage/commands.html must escape firstAlias in innerHTML'
-    );
+    // 3a. trade.html summarizeOffer (behavioral execution)
+    {
+        const tradeScript = extractInlineScripts(readFile('dashboard/templates/systems/trade.html'))[0];
+        const getEl = makeElMap();
+        const box = {
+            URLSearchParams,
+            console,
+            _escapeHtml: escapeHtmlHelper,
+            currencyAmount: (k, v) => `${v} ${k}`,
+            fetch: async () => ({ ok: true, json: async () => ({ trades: [] }) }),
+            document: { getElementById: getEl },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(tradeScript, box);
+        const offerHtml = box.summarizeOffer({ items: { '<img src=x onerror=alert(1)>': '<svg onload=alert(2)>' } });
+        assert(!offerHtml.includes('<img'), 'trade.html summarizeOffer must escape item names');
+        assert(!offerHtml.includes('<svg'), 'trade.html summarizeOffer must escape item quantities');
+        assert(offerHtml.includes('&lt;img'), 'trade.html summarizeOffer must emit escaped HTML entities');
+    }
 
-    // 3c. minigame_builder.html must never run parseInt on mbState.channel_id
-    const mbHtml = readFile('dashboard/templates/systems/minigame_builder.html');
-    assert(
-        !mbHtml.includes('parseInt(mbState.channel_id)'),
-        'minigame_builder.html must not corrupt 64-bit channel_id via parseInt'
-    );
+    // 3b. tagmissions.html tmLoad (behavioral execution)
+    {
+        const tmScript = extractInlineScripts(readFile('dashboard/templates/systems/tagmissions.html'))[0];
+        const getEl = makeElMap();
+        const box = {
+            console,
+            currencyNameFor: (t) => t === 'coins' ? 'Coins <script>alert(9)</script>' : t,
+            NeroSelect: { initAll() {} },
+            $: () => ({ val: () => '' }),
+            showToast: () => {},
+            showConfirm: () => {},
+            fetch: async () => ({
+                ok: true,
+                json: async () => ([{
+                    id: 11,
+                    title: '<img src=x onerror=alert("tm")>',
+                    reward_type: 'coins',
+                    reward_amount: '100"><svg onload=alert(1)>',
+                    status: '<svg onload=alert("status")>',
+                    starts_at: '<script>1</script>',
+                    ends_at: '"><img src=y>',
+                    participant_count: 3,
+                }]),
+            }),
+            document: { getElementById: getEl, addEventListener() {} },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(tmScript, box);
+        await box.tmLoad();
+        const html = getEl('tm-list-body').innerHTML;
+        assert(!html.includes('<img'), 'tagmissions.html tmLoad must escape title and timestamps');
+        assert(!html.includes('<svg'), 'tagmissions.html tmLoad must escape status and reward_amount');
+        assert(!html.includes('<script>'), 'tagmissions.html tmLoad must escape currency label & timestamps');
+        assert(html.includes('&lt;img src=x onerror=alert(&quot;tm&quot;)&gt;'), 'tagmissions.html must render escaped title');
+    }
+
+    // 3c. tagpartners.html tpLoad (behavioral execution)
+    {
+        const tpScript = extractInlineScripts(readFile('dashboard/templates/systems/tagpartners.html'))[0];
+        const getEl = makeElMap();
+        const box = {
+            console,
+            currencyNameFor: () => 'Coins',
+            checkIconHtml: () => '<span>OK</span>',
+            NeroSelect: { initAll() {} },
+            $: () => ({ val: () => '' }),
+            showToast: () => {},
+            showConfirm: () => {},
+            fetch: async () => ({
+                ok: true,
+                json: async () => ([{
+                    id: 5,
+                    partner_label: '<svg onload=alert("tp")>',
+                    partner_guild_id: '123"><img src=x onerror=alert(1)>',
+                    reward_type: 'coins',
+                    reward_amount: 500,
+                    enabled: 1,
+                }]),
+            }),
+            document: { getElementById: getEl, addEventListener() {} },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(tpScript, box);
+        await box.tpLoad();
+        const html = getEl('tp-list-body').innerHTML;
+        assert(!html.includes('<svg'), 'tagpartners.html tpLoad must escape partner_label');
+        assert(!html.includes('<img'), 'tagpartners.html tpLoad must escape partner_guild_id');
+        assert(html.includes('&lt;svg onload=alert(&quot;tp&quot;)&gt;'), 'tagpartners.html must render escaped label');
+    }
+
+    // 3d. config/general.html loadStatusMessages (behavioral execution)
+    {
+        const genScript = extractInlineScripts(readFile('dashboard/templates/config/general.html'))[0];
+        const getEl = makeElMap();
+        const box = {
+            console,
+            $: () => ({ val: () => '' }),
+            showToast: () => {},
+            fetch: async () => ({
+                ok: true,
+                json: async () => ([{
+                    id: 9,
+                    type: '<svg onload=alert(1)>',
+                    text: 'Playing <img src=x onerror=alert("status")>',
+                }]),
+            }),
+            document: { getElementById: getEl, addEventListener() {} },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(genScript, box);
+        await box.loadStatusMessages();
+        const html = getEl('status-list').innerHTML;
+        assert(!html.includes('<svg'), 'config/general.html must escape status type');
+        assert(!html.includes('<img'), 'config/general.html must escape status text');
+        assert(html.includes('&lt;img src=x onerror=alert(&quot;status&quot;)&gt;'), 'config/general.html must render escaped status text');
+    }
+
+    // 3e. systems/ledger.html loadLedger (behavioral execution, stripping Jinja blocks)
+    {
+        const rawLedger = extractInlineScripts(readFile('dashboard/templates/systems/ledger.html'))[0]
+            .replace(/\{%[\s\S]*?%\}/g, '');
+        const getEl = makeElMap();
+        const box = {
+            URLSearchParams,
+            console,
+            userIdentityHtml: (uid) => `<span>${escapeHtmlHelper(uid)}</span>`,
+            currencyNameFor: () => 'Coins',
+            showConfirm: () => {},
+            showToast: () => {},
+            fetch: async () => ({
+                ok: true,
+                json: async () => ({
+                    user_map: {},
+                    entries: [{
+                        id: 42,
+                        user_id: '1088248319982006339',
+                        currency: 'balance',
+                        amount: 100,
+                        balance_after: 500,
+                        type: '<script>alert("t")</script>',
+                        source: '<img src=x onerror=alert("s")>',
+                        reason: '<svg onload=alert("r")>',
+                        created_at: '2026-11-12T00:00:00',
+                        reversed: 0,
+                    }],
+                }),
+            }),
+            document: { getElementById: getEl, addEventListener() {} },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(rawLedger, box);
+        await box.loadLedger();
+        const html = getEl('ledger-tbody').innerHTML;
+        assert(!html.includes('<script>'), 'ledger.html must escape entry type');
+        assert(!html.includes('<img'), 'ledger.html must escape entry source');
+        assert(!html.includes('<svg'), 'ledger.html must escape entry reason');
+        assert(html.includes('&lt;svg onload=alert(&quot;r&quot;)&gt;'), 'ledger.html must render escaped reason');
+    }
+
+    // 3f. manage/reactionroles.html addButton/renderButtons & loadPanels (behavioral execution)
+    {
+        const rrScript = extractInlineScripts(readFile('dashboard/templates/manage/reactionroles.html'))[0];
+        const getEl = makeElMap();
+        const box = {
+            console,
+            showToast: () => {},
+            navigator: { clipboard: { writeText() {} } },
+            fetch: async () => ({
+                ok: true,
+                json: async () => ({ panels: [{ title: '<img src=x onerror=alert("panel")>', buttons: 2 }] }),
+            }),
+            document: { getElementById: getEl, addEventListener() {} },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(rrScript, box);
+        await box.loadPanels();
+        assert(!getEl('panels-list').innerHTML.includes('<img'), 'reactionroles.html loadPanels must escape panel title');
+        assert(getEl('panels-list').innerHTML.includes('&lt;img'), 'reactionroles.html loadPanels must render escaped title');
+
+        getEl('btn-label').value = '<svg onload=alert("lbl")>';
+        getEl('btn-role').value = '123"><img src=x onerror=alert("role")>';
+        getEl('btn-emoji').value = '<script>e</script>';
+        getEl('btn-color').value = 'blurple';
+        getEl('btn-required').value = '<img src=y onerror=alert("req")>';
+        box.addButton();
+        const btnListHtml = getEl('buttons-list').innerHTML;
+        const prevBtnHtml = getEl('prev-buttons').innerHTML;
+        assert(!btnListHtml.includes('<svg') && !btnListHtml.includes('<img') && !btnListHtml.includes('<script>'),
+            'reactionroles.html renderButtons must escape label, emoji, role, and required role');
+        assert(!prevBtnHtml.includes('<svg') && !prevBtnHtml.includes('<script>'),
+            'reactionroles.html preview buttons must escape label and emoji');
+    }
+
+    // 3g. manage/customcommands.html addAction/renderActions (behavioral execution)
+    {
+        const ccScript = extractInlineScripts(readFile('dashboard/templates/manage/customcommands.html'))[0];
+        const getEl = makeElMap();
+        const box = {
+            console,
+            showToast: () => {},
+            fetch: async () => ({ ok: true, json: async () => ({}) }),
+            document: { getElementById: getEl, addEventListener() {} },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(ccScript, box);
+        getEl('action-select').value = 'add_role:custom';
+        getEl('custom-action-value').value = '<img src=x onerror=alert("cc")>';
+        box.addAction();
+        const actionsHtml = getEl('actions-list').innerHTML;
+        assert(!actionsHtml.includes('<img'), 'customcommands.html renderActions must escape custom action value');
+        assert(actionsHtml.includes('&lt;img src=x onerror=alert(&quot;cc&quot;)&gt;'), 'customcommands.html must render escaped action');
+    }
+
+    // 3h. manage/commands.html loadCommandSettings aliasHint (behavioral execution)
+    {
+        const cmdScripts = extractInlineScripts(readFile('dashboard/templates/manage/commands.html'));
+        const mainCmdScript = cmdScripts.find(s => s.includes('async function loadCommandSettings'))
+            .replace(/\{%[\s\S]*?%\}/g, '')
+            .replace(/\{\{[\s\S]*?\}\}/g, '""');
+        const getEl = makeElMap();
+        getEl('usage-ping').dataset.params = 'target"><img src=x onerror=alert(2)>';
+        const box = {
+            console,
+            setTimeout: () => 1,
+            clearTimeout: () => {},
+            NeroSelect: { initMulti: async () => {} },
+            showToast: () => {},
+            fetch: async () => ({
+                ok: true,
+                json: async () => ({
+                    aliases: JSON.stringify(['<svg onload=alert("alias")>']),
+                }),
+            }),
+            document: {
+                getElementById: getEl,
+                querySelector: () => null,
+                querySelectorAll: () => [],
+                addEventListener() {},
+            },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(mainCmdScript, box);
+        await box.loadCommandSettings('ping');
+        const hintHtml = getEl('usage-alias-ping').innerHTML;
+        assert(!hintHtml.includes('<svg'), 'commands.html must escape firstAlias in usage hint');
+        assert(!hintHtml.includes('<img'), 'commands.html must escape params in usage hint');
+        assert(hintHtml.includes('&lt;svg onload=alert(&quot;alias&quot;)&gt;'), 'commands.html must render escaped alias');
+    }
+
+    // 3i. minigame_builder.html onSpawnInput + buildPayload preserves 64-bit snowflake channel_id as exact string
+    {
+        const mbScripts = extractInlineScripts(readFile('dashboard/templates/systems/minigame_builder.html'));
+        const mbScript = mbScripts.find(s => s.includes('function buildPayload()'))
+            .replace(/\{\{\s*template_id\s*\|\s*tojson\s*\}\}/g, 'null');
+        const getEl = makeElMap();
+        getEl('mb-name').value = 'Snowflake Trivia';
+        getEl('mb-category').value = '3';
+        getEl('mb-enabled').checked = true;
+        getEl('mb-autospawn').checked = true;
+        const box = {
+            AbortController,
+            console,
+            setTimeout: () => 1,
+            clearTimeout: () => {},
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            currencyLabelText: (k) => k,
+            NeroSelect: { initAll: async () => {} },
+            EmbedComposer: {
+                blankEmbed: () => ({}),
+                emptyEmbed: () => ({}),
+                mountEditor: () => ({ render() {} }),
+                cleanEmbedForPayload: (e) => e,
+                renderEmbedCardHtml: () => '',
+                renderDiscordEmbedHtml: () => '',
+                renderPreview: () => {},
+            },
+            $: (sel) => ({
+                val: () => (sel === '#mb-channel' ? '1088248319982006331' : ''),
+                trigger: () => {},
+            }),
+            fetch: async () => ({ ok: true, json: async () => ({ config: {}, tree: [], roles: [] }) }),
+            document: {
+                body: { addEventListener() {} },
+                getElementById: getEl,
+                querySelector: () => null,
+                querySelectorAll: () => [],
+                addEventListener() {},
+            },
+            window: null,
+        };
+        box.window = box;
+        vm.createContext(box);
+        vm.runInContext(mbScript, box);
+        box.pickType('math');
+        box.onSpawnInput();
+        const payload = box.buildPayload();
+        assert.strictEqual(payload.channel_id, '1088248319982006331', 'buildPayload() must preserve exact 64-bit channel_id string');
+    }
 }
 
 // ── 4. NeroSelect Error Cache & Native <select> Fallback (No jQuery) ───────
@@ -342,7 +623,7 @@ function testServerSelectDegradedTemplate() {
 (async function main() {
     await testEmbedBuilderSelectMenuRender();
     await testTicketsCategoryRenderAndEdit();
-    testTemplateEscapingAndMinigameSnowflake();
+    await testTemplateEscapingAndMinigameSnowflake();
     await testNeroSelectResilience();
     testServerSelectDegradedTemplate();
     console.log('All Dashboard frontend regression checks passed.');

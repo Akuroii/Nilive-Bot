@@ -133,6 +133,15 @@ function tmUpdateRewardFields() {
     if (isRole) window.NeroSelect.initAll(document.getElementById('tm-role-group'));
 }
 
+function _tmEsc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function tmStatusBadge(status) {
     const map = {
         scheduled: ['badge-info', 'Scheduled'],
@@ -140,7 +149,7 @@ function tmStatusBadge(status) {
         completed: ['badge', 'Completed'],
         cancelled: ['badge-danger', 'Cancelled'],
     };
-    const [cls, label] = map[status] || ['badge', status];
+    const [cls, label] = map[status] || ['badge', _tmEsc(status)];
     return `<span class="badge ${cls}">${label}</span>`;
 }
 
@@ -152,12 +161,6 @@ async function tmLoad() {
         body.innerHTML = '<tr><td colspan="5" class="empty">No missions yet.</td></tr>';
         return;
     }
-    const _tmEsc = (s) => String(s == null ? '' : s)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
     body.innerHTML = rows.map(r => {
         const actions = [];
         if (r.status === 'scheduled' || r.status === 'active') {
