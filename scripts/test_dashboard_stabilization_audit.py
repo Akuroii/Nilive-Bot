@@ -1,0 +1,639 @@
+#!/usr/bin/env python3
+"""
+Regression and audit reproduction suite for Nilive-Bot Dashboard stabilization:
+- Issue A: Discord Bot identity + guild member lookup (/users/@me -> /guilds/{id}/members/{bot_id}),
+  tri-state bot_status (present / absent / unknown), permission & role hierarchy checks,
+  no false bot_missing on 401/403/404(ambiguous)/429/5xx/timeout/network/malformed responses,
+  and live bot profile lookup in utils/bot_profile.py.
+- Issue B: Server discovery pagination + failure preservation (GuildDiscoveryList / degraded state),
+  distinguishing genuine empty results from missing token or Discord API failures.
+- Issue C: Dark/light native <select>/<option>/<optgroup> CSS & Select2 stylesheet ordering.
+- Issue D & E: load_dotenv() import order in dashboard/app.py, SQLite WAL cross-connection visibility,
+  and end-to-end Dashboard -> DB -> Bot synchronization (settings, leveling, shop + prepared icon,
+  shop-designer preview/save, server context switching).
+- Security & Data Integrity: SSRF block in utils/bot_profile.py, HTML form CSRF enforcement,
+  /config/access input validation, role-assignability validation on live AJAX routes + pickers,
+  and 64-bit Discord snowflake (> 2^53) string serialization across Dashboard JSON APIs.
+"""
+
+import ast
+import asyncio
+import json
+import os
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import MagicMock, patch
+
+_TMP_DIR = tempfile.mkdtemp(prefix="nero_audit_")
+os.environ["NERO_ENVIRONMENT"] = "staging"
+os.environ["DATABASE_PATH"] = os.path.join(_TMP_DIR, "prod_guard.db")
+os.environ["STAGING_DATABASE_PATH"] = os.path.join(_TMP_DIR, "audit_staging.db")
+os.environ["OWNER_ID"] = "999999999"
+os.environ["SECRET_KEY"] = "0123456789abcdef0123456789abcdef"
+os.environ["DISCORD_TOKEN"] = "test_secret_bot_token_do_not_leak"
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import aiosqlite
+import requests
+
+from database import DB_PATH, init_db
+from dashboard.utils.async_utils import run_async
+
+run_async(init_db())
+
+from dashboard.app import app
+from dashboard import auth
+from dashboard.utils import role_validation as rv
+from utils import bot_profile
+
+SNOWFLAKE_GUILD = 1088248319982006321
+SNOWFLAKE_ROLE_A = 1088248319982006323
+SNOWFLAKE_ROLE_B = 1088248319982006327
+SNOWFLAKE_CHAN_A = 1088248319982006331
+SNOWFLAKE_USER_A = 1088248319982006339
+BOT_USER_ID = "987654321098765432"
+
+
+def _mock_resp(status_code=200, json_data=None, json_exc=None, headers=None, content=b""):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.headers = headers or {}
+    resp.content = content
+    if json_exc is not None:
+        resp.json.side_effect = json_exc
+    else:
+        resp.json.return_value = json_data
+    resp.iter_content = lambda chunk_size=8192: [content] if content else []
+    return resp
+
+
+class TestDashboardStabilizationAudit(unittest.TestCase):
+    def setUp(self):
+        if hasattr(rv, "clear_bot_identity_cache"):
+            rv.clear_bot_identity_cache()
+        self.client = app.test_client()
+        self.admin_id = 123456789012345678
+
+        async def _seed():
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM dashboard_users")
+                await db.execute(
+                    "INSERT INTO dashboard_users (guild_id, user_id, permission_level, enabled) "
+                    "VALUES (?, ?, 'owner', 1)",
+                    (SNOWFLAKE_GUILD, self.admin_id),
+                )
+                await db.commit()
+
+        run_async(_seed())
+
+    def _login(self, guild_id=SNOWFLAKE_GUILD, level="owner"):
+        with self.client.session_transaction() as sess:
+            sess["user"] = {"id": str(self.admin_id), "username": "AuditOwner", "avatar": None}
+            sess["access_token"] = "test_user_oauth_token"
+            sess["expires_at"] = time.time() + 3600
+            sess["csrf_token"] = "csrf_valid_token_123"
+            if guild_id is not None:
+                sess["guild_id"] = guild_id
+                sess["guild_name"] = "Snowflake Guild"
+                sess["user_level"] = level
+
+    # ── 1. ISSUE A: Bot Detection, Identity Lookup & Tri-State Status ──────
+
+    def test_issue_a_uses_bot_user_id_never_members_at_me_and_computes_role_perms(self):
+        called_urls = []
+        called_headers = []
+
+        sample_roles = [
+            {"id": str(SNOWFLAKE_GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False, "permissions": "0"},
+            {"id": str(SNOWFLAKE_ROLE_A), "name": "Rewardable", "position": 2, "color": 0x00FF00, "managed": False, "permissions": "0"},
+            {"id": "1088248319982006399", "name": "Nero", "position": 5, "color": 0x8B5CF6, "managed": True, "permissions": str(rv.MANAGE_ROLES_PERM)},
+        ]
+        # Real Discord GET /guilds/{id}/members/{user_id} omits top-level "permissions"
+        member_payload = {"user": {"id": BOT_USER_ID, "username": "Nero"}, "roles": ["1088248319982006399"]}
+
+        def fake_get(url, headers=None, timeout=None, **kwargs):
+            called_urls.append(url)
+            called_headers.append(headers or {})
+            if url.endswith("/users/@me"):
+                return _mock_resp(200, {"id": BOT_USER_ID, "username": "Nero"})
+            if url.endswith(f"/guilds/{SNOWFLAKE_GUILD}/roles"):
+                return _mock_resp(200, sample_roles)
+            if url.endswith(f"/guilds/{SNOWFLAKE_GUILD}/members/{BOT_USER_ID}"):
+                return _mock_resp(200, member_payload)
+            if url.endswith("/members/@me"):
+                raise AssertionError("Must NEVER call OAuth-only GET /guilds/{id}/members/@me with Bot token!")
+            return _mock_resp(404, {"code": 0})
+
+        with patch("dashboard.utils.role_validation._req.get", side_effect=fake_get):
+            roles, bot_member, err = rv.fetch_guild_roles_and_bot_member(SNOWFLAKE_GUILD)
+            self.assertIsNone(err)
+            self.assertIsNotNone(bot_member)
+            info = rv.compute_role_assignability(SNOWFLAKE_GUILD, roles, bot_member)
+            self.assertEqual(info.get("bot_status"), "present")
+            self.assertTrue(info["has_manage_roles"])
+            self.assertTrue(info["role_map"][str(SNOWFLAKE_ROLE_A)]["assignable"])
+            for h in called_headers:
+                self.assertEqual(h.get("Authorization"), "Bot test_secret_bot_token_do_not_leak")
+            self.assertFalse(any("/members/@me" in u for u in called_urls))
+
+    def test_issue_a_tri_state_absent_vs_unknown_across_all_failure_modes(self):
+        sample_roles = [
+            {"id": str(SNOWFLAKE_GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False, "permissions": "0"},
+            {"id": str(SNOWFLAKE_ROLE_A), "name": "MemberRole", "position": 1, "color": 0, "managed": False, "permissions": "0"},
+        ]
+
+        # Confirmed 404 Unknown Member (10007) -> absent -> bot_missing
+        def fake_absent(url, **kwargs):
+            if url.endswith("/users/@me"):
+                return _mock_resp(200, {"id": BOT_USER_ID})
+            if url.endswith("/roles"):
+                return _mock_resp(200, sample_roles)
+            return _mock_resp(404, {"code": 10007, "message": "Unknown Member"})
+
+        with patch("dashboard.utils.role_validation._req.get", side_effect=fake_absent):
+            roles, bot_member, err = rv.fetch_guild_roles_and_bot_member(SNOWFLAKE_GUILD)
+            info = rv.compute_role_assignability(SNOWFLAKE_GUILD, roles, bot_member)
+            self.assertEqual(info.get("bot_status"), "absent")
+            self.assertEqual(info["role_map"][str(SNOWFLAKE_ROLE_A)]["unassignable_reason"], "bot_missing")
+
+        # Indeterminate failure modes MUST NEVER become bot_missing ("Nero not found in server")
+        failure_cases = [
+            ("401_member", lambda u: _mock_resp(401, {"message": "401: Unauthorized"})),
+            ("403_member", lambda u: _mock_resp(403, {"code": 50013, "message": "Missing Permissions"})),
+            ("404_ambiguous_no_code", lambda u: _mock_resp(404, {"message": "Not Found"})),
+            ("429_rate_limit", lambda u: _mock_resp(429, {"retry_after": 1.5})),
+            ("503_upstream", lambda u: _mock_resp(503, {"message": "Service Unavailable"})),
+            ("timeout", lambda u: (_ for _ in ()).throw(requests.Timeout("timed out"))),
+            ("conn_error", lambda u: (_ for _ in ()).throw(requests.ConnectionError("reset"))),
+            ("malformed_json", lambda u: _mock_resp(200, json_exc=ValueError("bad json"))),
+            ("malformed_shape", lambda u: _mock_resp(200, {"roles": "not-a-list"})),
+        ]
+        for label, member_responder in failure_cases:
+            with self.subTest(case=label):
+                if hasattr(rv, "clear_bot_identity_cache"):
+                    rv.clear_bot_identity_cache()
+
+                def _dispatch(url, _mr=member_responder, **kwargs):
+                    if url.endswith("/users/@me"):
+                        return _mock_resp(200, {"id": BOT_USER_ID})
+                    if url.endswith("/roles"):
+                        return _mock_resp(200, sample_roles)
+                    return _mr(url)
+
+                with patch("dashboard.utils.role_validation._req.get", side_effect=_dispatch):
+                    roles, bot_member, err = rv.fetch_guild_roles_and_bot_member(SNOWFLAKE_GUILD)
+                    info = rv.compute_role_assignability(SNOWFLAKE_GUILD, roles, bot_member)
+                    self.assertEqual(info.get("bot_status"), "unknown", f"{label} should be unknown")
+                    r_meta = info["role_map"][str(SNOWFLAKE_ROLE_A)]
+                    self.assertFalse(r_meta["assignable"])
+                    self.assertNotEqual(r_meta["unassignable_reason"], "bot_missing")
+                    self.assertNotIn("not found in server", (r_meta.get("unassignable_label") or "").lower())
+
+                    valid, v_err = rv.validate_assignable_role(SNOWFLAKE_GUILD, str(SNOWFLAKE_ROLE_A))
+                    self.assertFalse(valid)
+                    self.assertNotIn("not found in server", (v_err or "").lower())
+                    self.assertNotIn("test_secret_bot_token_do_not_leak", v_err or "")
+
+    def test_issue_a_bot_profile_live_member_uses_bot_id_not_at_me(self):
+        called = []
+
+        def fake_get(url, **kwargs):
+            called.append(url)
+            if url.endswith("/users/@me"):
+                return _mock_resp(200, {"id": BOT_USER_ID, "username": "Nero"})
+            if url.endswith(f"/guilds/{SNOWFLAKE_GUILD}/members/{BOT_USER_ID}"):
+                return _mock_resp(
+                    200,
+                    {
+                        "nick": "Nero Guild Nick",
+                        "avatar": None,
+                        "banner": None,
+                        "bio": "Custom bio",
+                        "user": {"id": BOT_USER_ID, "username": "Nero", "avatar": None},
+                    },
+                )
+            if url.endswith("/members/@me"):
+                return _mock_resp(404, {"code": 10007, "message": "Unknown Member"})
+            return _mock_resp(404, {})
+
+        with patch("utils.bot_profile.requests.get", side_effect=fake_get), \
+             patch("dashboard.utils.role_validation._req.get", side_effect=fake_get):
+            live = bot_profile.get_live_bot_member(SNOWFLAKE_GUILD)
+            self.assertIsNotNone(live)
+            self.assertEqual(live["nick"], "Nero Guild Nick")
+            self.assertFalse(any("/members/@me" in u for u in called))
+
+    # ── 2. ISSUE B: Server Discovery Pagination & Indeterminate Handling ───
+
+    def test_issue_b_server_discovery_pagination_and_failure_preservation(self):
+        # 2a. Missing token must mark ok=False (not genuine empty)
+        with patch.dict(os.environ, {"DISCORD_TOKEN": ""}, clear=False):
+            missing = auth.fetch_bot_guilds_full()
+            self.assertEqual(list(missing), [])
+            self.assertFalse(getattr(missing, "ok", True))
+            self.assertEqual(getattr(missing, "status", None), "missing_token")
+
+        # 2b. Rate limit / network failure in /api/user/servers must NOT downgrade granted server to dangling
+        self._login(guild_id=None)
+        user_guilds = auth.GuildDiscoveryList(
+            [
+                {"id": str(SNOWFLAKE_GUILD), "name": "Granted Active", "permissions": "8", "icon": None},
+                {"id": "1088248319982006999", "name": "Other Manageable", "permissions": "32", "icon": None},
+            ],
+            ok=True,
+            status="ok",
+        ) if hasattr(auth, "GuildDiscoveryList") else []
+
+        with patch("dashboard.auth.requests.get", return_value=_mock_resp(429, {"retry_after": 3.0})), \
+             patch("dashboard.app.fetch_discord_guilds", return_value=user_guilds):
+            resp = self.client.get("/api/user/servers")
+            self.assertEqual(resp.status_code, 200)
+            body = resp.get_json()
+            self.assertTrue(body.get("degraded"), "Failed bot guild fetch must mark response degraded")
+            by_id = {s["id_str"]: s for s in body["servers"]}
+            self.assertEqual(by_id[str(SNOWFLAKE_GUILD)]["category"], "active")
+            self.assertNotEqual(by_id["1088248319982006999"]["category"], "invite")
+
+        # 2c. Pagination across 200-guild boundary
+        page1 = [{"id": str(1000 + i), "name": f"G{i}"} for i in range(200)]
+        page2 = [{"id": str(2000 + i), "name": f"G2_{i}"} for i in range(5)]
+        seen_params = []
+
+        def fake_pages(url, headers=None, params=None, timeout=None):
+            seen_params.append(dict(params or {}))
+            if (params or {}).get("after") == "1199":
+                return _mock_resp(200, page2)
+            return _mock_resp(200, page1)
+
+        with patch("dashboard.auth.requests.get", side_effect=fake_pages):
+            full = auth.fetch_bot_guilds_full()
+            self.assertTrue(getattr(full, "ok", False))
+            self.assertEqual(len(full), 205)
+            self.assertEqual(seen_params[0].get("limit"), 200)
+            self.assertEqual(seen_params[1].get("after"), "1199")
+
+    # ── 3. ISSUE C: Select / Option Dark & Light CSS + Stylesheet Order ────
+
+    def test_issue_c_select_css_and_stylesheet_order(self):
+        with open("dashboard/templates/base.html", encoding="utf-8") as f:
+            base_html = f.read()
+        idx_select2 = base_html.find("select2.min.css")
+        idx_main = base_html.find("css/main.css")
+        self.assertGreater(idx_select2, -1)
+        self.assertGreater(idx_main, -1)
+        self.assertLess(idx_select2, idx_main, "select2.min.css must load BEFORE main.css")
+
+        with open("dashboard/static/css/main.css", encoding="utf-8") as f:
+            css = f.read()
+        self.assertIn("color-scheme: dark", css)
+        self.assertIn("color-scheme: light", css)
+        self.assertIn("select option", css)
+        self.assertIn("select optgroup", css)
+        self.assertIn(".select2-results__option--selected", css)
+
+    # ── 4. ISSUE D & E: load_dotenv() Order & Cross-Connection DB Sync ─────
+
+    def test_issue_d_load_dotenv_precedes_database_and_auth_imports(self):
+        with open("dashboard/app.py", encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename="dashboard/app.py")
+
+        dotenv_line = None
+        db_import_line = None
+        auth_import_line = None
+        for node in tree.body:
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                fn = node.value.func
+                if isinstance(fn, ast.Name) and fn.id == "load_dotenv":
+                    dotenv_line = dotenv_line or node.lineno
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == "database":
+                    db_import_line = db_import_line or node.lineno
+                elif node.module and node.module.startswith("dashboard.auth"):
+                    auth_import_line = auth_import_line or node.lineno
+
+        self.assertIsNotNone(dotenv_line, "dashboard/app.py must call load_dotenv() at top level")
+        self.assertLess(dotenv_line, db_import_line, "load_dotenv() must execute BEFORE importing database")
+        self.assertLess(dotenv_line, auth_import_line, "load_dotenv() must execute BEFORE importing dashboard.auth")
+
+    # ── 5. SECURITY: SSRF, Form CSRF, /config/access & Role Validation ─────
+
+    def test_security_ssrf_blocked_in_bot_profile_image_fetch(self):
+        unsafe_urls = [
+            "file:///etc/passwd",
+            "ftp://example.com/a.png",
+            "http://127.0.0.1:8080/secret.png",
+            "http://localhost/secret.png",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://10.0.0.5/internal.png",
+            "https://[::1]/loopback.png",
+        ]
+        with patch("utils.bot_profile.requests.get") as mock_get:
+            for u in unsafe_urls:
+                data_uri, err = bot_profile._download_image_as_data_uri(u)
+                self.assertIsNone(data_uri, f"Unsafe URL {u} must be rejected")
+                self.assertIsNotNone(err)
+            mock_get.assert_not_called()
+
+    def test_security_html_config_forms_require_csrf_and_validate_access_input(self):
+        self._login()
+        for route in ("/config/general", "/config/welcome", "/config/boost", "/config/access"):
+            resp = self.client.post(route, data={"guild_id": str(SNOWFLAKE_GUILD)})
+            self.assertEqual(resp.status_code, 403, f"{route} must reject missing csrf_token with 403")
+
+        # Non-numeric user_id and invalid level on /config/access must NOT raise 500 ValueError
+        bad_uid = self.client.post(
+            "/config/access",
+            data={
+                "guild_id": str(SNOWFLAKE_GUILD),
+                "csrf_token": "csrf_valid_token_123",
+                "action": "add",
+                "user_id": "not_a_snowflake",
+                "level": "moderator",
+            },
+        )
+        self.assertEqual(bad_uid.status_code, 400)
+
+        bad_lvl = self.client.post(
+            "/config/access",
+            data={
+                "guild_id": str(SNOWFLAKE_GUILD),
+                "csrf_token": "csrf_valid_token_123",
+                "action": "add",
+                "user_id": "222333444555666777",
+                "level": "super_root_hacker",
+            },
+        )
+        self.assertEqual(bad_lvl.status_code, 400)
+
+    def test_role_validation_enforced_on_welcome_boost_and_tagpartners_apis(self):
+        self._login()
+        roles = [
+            {"id": str(SNOWFLAKE_GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False},
+            {"id": str(SNOWFLAKE_ROLE_A), "name": "AboveBotAdmin", "position": 10, "color": 0, "managed": False},
+            {"id": "1088248319982006350", "name": "Nero", "position": 3, "color": 0, "managed": True},
+        ]
+        bot_m = {"user": {"id": BOT_USER_ID}, "roles": ["1088248319982006350"], "permissions": str(rv.MANAGE_ROLES_PERM)}
+        headers = {"X-CSRF-Token": "csrf_valid_token_123", "X-Guild-ID": str(SNOWFLAKE_GUILD)}
+
+        with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member", return_value=(roles, bot_m, None)):
+            r1 = self.client.post("/api/settings/welcome", headers=headers, json={"auto_role_id": str(SNOWFLAKE_ROLE_A)})
+            self.assertEqual(r1.status_code, 400)
+
+            r2 = self.client.post("/api/settings/boost", headers=headers, json={"boost_role_id": str(SNOWFLAKE_ROLE_A)})
+            self.assertEqual(r2.status_code, 400)
+
+            r3 = self.client.post(
+                "/api/tagpartners/save",
+                headers=headers,
+                json={
+                    "partner_guild_id": "1088248319982006888",
+                    "partner_label": "Partner",
+                    "reward_type": "role",
+                    "reward_role_id": str(SNOWFLAKE_ROLE_A),
+                },
+            )
+            self.assertEqual(r3.status_code, 400)
+
+        for tpl_path, elem_id in (
+            ("dashboard/templates/systems/tagmissions.html", 'id="tm-role"'),
+            ("dashboard/templates/systems/tagpartners.html", 'id="tp-role"'),
+            ("dashboard/templates/manage/embedbuilder.html", 'id="eb-btn-role"'),
+        ):
+            with open(tpl_path, encoding="utf-8") as f:
+                html = f.read()
+            pos = html.find(elem_id)
+            self.assertGreater(pos, -1, f"{elem_id} missing in {tpl_path}")
+            tag_slice = html[max(0, pos - 120) : pos + 160]
+            self.assertIn('data-assignable-only="true"', tag_slice, f"{elem_id} must opt in to data-assignable-only")
+
+    # ── 6. 64-BIT SNOWFLAKES & E2E SHOP / LEVELING / SYNC WORKFLOWS ────────
+
+    def test_snowflake_precision_preserved_across_dashboard_json_apis(self):
+        # Verify test snowflakes genuinely lose precision if serialized as IEEE-754 float64
+        self.assertNotEqual(int(float(SNOWFLAKE_ROLE_A)), SNOWFLAKE_ROLE_A)
+        self.assertNotEqual(int(float(SNOWFLAKE_ROLE_B)), SNOWFLAKE_ROLE_B)
+        self.assertNotEqual(int(float(SNOWFLAKE_CHAN_A)), SNOWFLAKE_CHAN_A)
+
+        self._login()
+        headers = {"X-CSRF-Token": "csrf_valid_token_123", "X-Guild-ID": str(SNOWFLAKE_GUILD)}
+
+        roles = [
+            {"id": str(SNOWFLAKE_GUILD), "name": "@everyone", "position": 0, "color": 0, "managed": False},
+            {"id": str(SNOWFLAKE_ROLE_A), "name": "ShopVIP", "position": 1, "color": 0, "managed": False},
+            {"id": str(SNOWFLAKE_ROLE_B), "name": "ReqRole", "position": 2, "color": 0, "managed": False},
+            {"id": "1088248319982006399", "name": "Nero", "position": 9, "color": 0, "managed": True},
+        ]
+        bot_m = {"user": {"id": BOT_USER_ID}, "roles": ["1088248319982006399"], "permissions": str(rv.MANAGE_ROLES_PERM)}
+
+        with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member", return_value=(roles, bot_m, None)):
+            add_res = self.client.post(
+                "/api/shop/item",
+                headers=headers,
+                json={
+                    "name": "Snowflake VIP Role",
+                    "type": "role",
+                    "price": 250,
+                    "role_id": str(SNOWFLAKE_ROLE_A),
+                    "required_role_id": str(SNOWFLAKE_ROLE_B),
+                    "description": "Exact 64-bit role ID test",
+                },
+            )
+            self.assertEqual(add_res.status_code, 200, add_res.get_data(as_text=True))
+
+        # Fetch item via GET /api/shop/item/<id> and verify raw JSON preserves exact string digits
+        async def _get_shop_id():
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute(
+                    "SELECT id FROM shop_items WHERE guild_id=? AND name='Snowflake VIP Role'",
+                    (SNOWFLAKE_GUILD,),
+                )
+                return (await cur.fetchone())[0]
+
+        item_id = run_async(_get_shop_id())
+        item_res = self.client.get(f"/api/shop/item/{item_id}", headers={"X-Guild-ID": str(SNOWFLAKE_GUILD)})
+        self.assertEqual(item_res.status_code, 200)
+        item_json = item_res.get_json()["item"]
+        self.assertEqual(item_json["role_id"], str(SNOWFLAKE_ROLE_A))
+        self.assertEqual(item_json["required_role_id"], str(SNOWFLAKE_ROLE_B))
+
+        # Seed and verify Leveling, MVP, Tickets, TagMissions, TagPartners, Moderation, Commands, Minigames snowflakes
+        async def _seed_snowflakes():
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT OR REPLACE INTO leveling_config (guild_id, levelup_channel_id) VALUES (?, ?)",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_CHAN_A),
+                )
+                await db.execute(
+                    "INSERT INTO leveling_bonus_roles (guild_id, role_id, multiplier) VALUES (?, ?, 1.5)",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_ROLE_A),
+                )
+                await db.execute(
+                    "INSERT INTO leveling_blacklist_roles (guild_id, role_id) VALUES (?, ?)",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_ROLE_B),
+                )
+                await db.execute(
+                    "INSERT OR REPLACE INTO mvp_config (guild_id, mvp_role_id, announce_channel_id) VALUES (?, ?, ?)",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_ROLE_A, SNOWFLAKE_CHAN_A),
+                )
+                await db.execute(
+                    "INSERT OR REPLACE INTO ticket_settings (guild_id, transcript_channel_id, support_role_id) VALUES (?, ?, ?)",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_CHAN_A, SNOWFLAKE_ROLE_A),
+                )
+                await db.execute(
+                    "INSERT INTO tag_missions (guild_id, title, channel_id, starts_at, ends_at, reward_type, reward_role_id, status) "
+                    "VALUES (?, 'Snowflake Mission', ?, '2026-11-12 00:00:00', '2026-11-19 00:00:00', 'role', ?, 'scheduled')",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_CHAN_A, SNOWFLAKE_ROLE_A),
+                )
+                await db.execute(
+                    "INSERT INTO tag_partner_rewards (guild_id, partner_guild_id, partner_label, reward_type, reward_role_id) "
+                    "VALUES (?, ?, 'PartnerSnowflake', 'role', ?)",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_USER_A, SNOWFLAKE_ROLE_A),
+                )
+                await db.execute(
+                    "INSERT INTO warning_thresholds (guild_id, warn_count, action, role_id) VALUES (?, 3, 'add_role', ?)",
+                    (SNOWFLAKE_GUILD, SNOWFLAKE_ROLE_A),
+                )
+                await db.execute(
+                    "INSERT OR REPLACE INTO command_toggles (guild_id, command_name, enabled, enabled_roles, disabled_channels) "
+                    "VALUES (?, 'ping', 1, ?, ?)",
+                    (SNOWFLAKE_GUILD, json.dumps([SNOWFLAKE_ROLE_A]), json.dumps([SNOWFLAKE_CHAN_A])),
+                )
+                await db.commit()
+
+        run_async(_seed_snowflakes())
+
+        lvl_cfg = self.client.get("/api/leveling/config", headers=headers).get_json()["config"]
+        self.assertEqual(lvl_cfg["levelup_channel_id"], str(SNOWFLAKE_CHAN_A))
+
+        bonus = self.client.get("/api/leveling/bonus-roles", headers=headers).get_json()["roles"]
+        self.assertEqual(bonus[0]["role_id"], str(SNOWFLAKE_ROLE_A))
+
+        bl = self.client.get("/api/leveling/blacklist", headers=headers).get_json()["roles"]
+        self.assertEqual(bl[0]["role_id"], str(SNOWFLAKE_ROLE_B))
+
+        mvp = self.client.get("/api/mvp/config", headers=headers).get_json()["config"]
+        self.assertEqual(mvp["mvp_role_id"], str(SNOWFLAKE_ROLE_A))
+        self.assertEqual(mvp["announce_channel_id"], str(SNOWFLAKE_CHAN_A))
+
+        tkt = self.client.get("/api/tickets/settings", headers=headers).get_json()
+        self.assertEqual(tkt["transcript_channel_id"], str(SNOWFLAKE_CHAN_A))
+        self.assertEqual(tkt["support_role_id"], str(SNOWFLAKE_ROLE_A))
+
+        tm = self.client.get("/api/tagmissions/list", headers=headers).get_json()
+        self.assertEqual(tm[0]["channel_id"], str(SNOWFLAKE_CHAN_A))
+        self.assertEqual(tm[0]["reward_role_id"], str(SNOWFLAKE_ROLE_A))
+
+        tp = self.client.get("/api/tagpartners/list", headers=headers).get_json()
+        self.assertEqual(tp[0]["partner_guild_id"], str(SNOWFLAKE_USER_A))
+        self.assertEqual(tp[0]["reward_role_id"], str(SNOWFLAKE_ROLE_A))
+
+        wt = self.client.get("/api/moderation/warning-thresholds", headers=headers).get_json()
+        self.assertEqual(wt[0]["role_id"], str(SNOWFLAKE_ROLE_A))
+
+        cmd_cfg = self.client.get("/api/commands/settings/ping", headers=headers).get_json()
+        self.assertEqual(json.loads(cmd_cfg["enabled_roles"]), [str(SNOWFLAKE_ROLE_A)])
+        self.assertEqual(json.loads(cmd_cfg["disabled_channels"]), [str(SNOWFLAKE_CHAN_A)])
+
+        mg_save = self.client.post(
+            "/api/minigames/config",
+            headers=headers,
+            json={"enabled": True, "channel_id": str(SNOWFLAKE_CHAN_A)},
+        )
+        self.assertEqual(mg_save.status_code, 200)
+        mg_cfg = self.client.get("/api/minigames/config", headers=headers).get_json()["config"]
+        self.assertEqual(mg_cfg["channel_id"], SNOWFLAKE_CHAN_A)
+        self.assertEqual(mg_cfg["channel_id_str"], str(SNOWFLAKE_CHAN_A))
+
+    # ── 7. ISSUE E: DASHBOARD <-> BOT WAL SYNC, ICON UPLOAD & SERVER SWITCH ─
+
+    def test_issue_e_dashboard_bot_wal_sync_upload_and_server_switch(self):
+        import base64
+        import io
+        from utils.xp_calculator import get_leveling_config
+
+        guild_b = 1088248319982006999
+        self._login()
+        headers_a = {"X-CSRF-Token": "csrf_valid_token_123", "X-Guild-ID": str(SNOWFLAKE_GUILD)}
+        headers_b = {"X-CSRF-Token": "csrf_valid_token_123", "X-Guild-ID": str(guild_b)}
+
+        # 1. Dashboard -> Bot sync: save Leveling & Economy settings on Guild A and read via Bot helper / fresh connection
+        lvl_post = self.client.post(
+            "/api/leveling/config",
+            headers=headers_a,
+            json={
+                "message_xp_enabled": 1,
+                "xp_min_per_message": 22,
+                "xp_max_per_message": 44,
+                "xp_cooldown_seconds": 45,
+                "levelup_channel_id": str(SNOWFLAKE_CHAN_A),
+            },
+        )
+        self.assertEqual(lvl_post.status_code, 200)
+        bot_seen_cfg = run_async(get_leveling_config(SNOWFLAKE_GUILD))
+        self.assertEqual(bot_seen_cfg["xp_min_per_message"], 22)
+        self.assertEqual(bot_seen_cfg["xp_max_per_message"], 44)
+        self.assertEqual(int(bot_seen_cfg["levelup_channel_id"]), SNOWFLAKE_CHAN_A)
+
+        cur_post = self.client.post(
+            "/api/economy/currency",
+            headers=headers_a,
+            json={"currency_name": "StarBits", "coin_emoji_id": "⭐", "diamond_name": "Shards", "diamond_emoji_id": "💎"},
+        )
+        self.assertEqual(cur_post.status_code, 200)
+
+        from utils.currency import get_currency_config
+
+        async def _bot_check_currency_and_write_user():
+            bot_cur = await get_currency_config(SNOWFLAKE_GUILD)
+            async with aiosqlite.connect(DB_PATH) as bot_db:
+                # Simulate Bot cog writing member economy balance in WAL mode
+                await bot_db.execute(
+                    "INSERT OR REPLACE INTO economy (user_id, guild_id, balance) VALUES (?, ?, 7777)",
+                    (SNOWFLAKE_USER_A, SNOWFLAKE_GUILD),
+                )
+                await bot_db.commit()
+            return (bot_cur["coins"]["name"], bot_cur["diamonds"]["name"])
+
+        bot_currency_row = run_async(_bot_check_currency_and_write_user())
+        self.assertEqual(bot_currency_row, ("StarBits", "Shards"))
+
+        # 2. Bot -> Dashboard sync: Dashboard immediately sees Bot-written leaderboard entry
+        lb_html = self.client.get("/api/economy/leaderboard", headers=headers_a).get_data(as_text=True)
+        self.assertTrue("7,777" in lb_html or "7777" in lb_html, f"Expected 7777 in {lb_html}")
+
+        # 3. Multipart upload workflow: Embed Builder attachment send via multipart/form-data
+        png_1x1 = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        mock_discord_post = MagicMock(status_code=200)
+        mock_discord_post.json.return_value = {"id": "1088248319982006777", "channel_id": str(SNOWFLAKE_CHAN_A)}
+        with patch.dict(os.environ, {"DISCORD_TOKEN": "test_bot_token"}, clear=False):
+            with patch("requests.post", return_value=mock_discord_post) as posted:
+                up_res = self.client.post(
+                    "/api/embedbuilder/send",
+                    headers=headers_a,
+                    data={
+                        "channel_id": str(SNOWFLAKE_CHAN_A),
+                        "payload_json": json.dumps({"content": "Hello with PNG", "embeds": []}),
+                        "files": (io.BytesIO(png_1x1), "banner.png"),
+                    },
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(up_res.status_code, 200, up_res.get_data(as_text=True))
+                self.assertTrue(up_res.get_json().get("success"))
+                self.assertTrue(posted.called)
+
+        # 4. Multi-guild server-context switch isolation: Guild B does NOT see Guild A's custom currency or shop items
+        cur_b = self.client.get("/api/economy/currency", headers=headers_b).get_json()
+        coins_b = (cur_b.get("coins") or {}).get("name") or cur_b.get("coins_name")
+        self.assertNotEqual(coins_b, "StarBits")
+        items_b = self.client.get("/api/shop/items", headers=headers_b).get_json()
+        items_b_list = items_b if isinstance(items_b, list) else items_b.get("items", [])
+        self.assertEqual(len(items_b_list), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

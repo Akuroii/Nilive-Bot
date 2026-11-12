@@ -35,7 +35,7 @@
         </div>
         <div class="form-group" id="tp-role-group" style="display:none;">
             <label class="form-label">Role</label>
-            <select class="nero-role-picker form-input" id="tp-role" data-value=""></select>
+            <select class="nero-role-picker form-input" id="tp-role" data-value="" data-assignable-only="true"></select>
         </div>
     </div>
     <div class="form-row">
@@ -83,13 +83,19 @@ async function tpLoad() {
         body.innerHTML = '<tr><td colspan="4" class="empty">No partner servers configured yet.</td></tr>';
         return;
     }
+    const _tpEsc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     body.innerHTML = rows.map(r => `
         <tr>
-            <td><strong>${r.partner_label || 'Unlabeled'}</strong><br>
-                <span class="text-muted text-sm"><code>${r.partner_guild_id}</code></span></td>
-            <td>${currencyNameFor(r.reward_type)}${r.reward_amount ? ' × ' + r.reward_amount : ''}</td>
+            <td><strong>${_tpEsc(r.partner_label || 'Unlabeled')}</strong><br>
+                <span class="text-muted text-sm"><code>${_tpEsc(r.partner_guild_id)}</code></span></td>
+            <td>${_tpEsc(currencyNameFor(r.reward_type))}${r.reward_amount ? ' × ' + _tpEsc(r.reward_amount) : ''}</td>
             <td>${r.enabled ? checkIconHtml() : '<span class="badge badge-danger">Disabled</span>'}</td>
-            <td><button class="btn btn-sm btn-danger" onclick="tpDelete(${r.id})">Delete</button></td>
+            <td><button class="btn btn-sm btn-danger" onclick="tpDelete(${Number(r.id)})">Delete</button></td>
         </tr>
     `).join('');
 }

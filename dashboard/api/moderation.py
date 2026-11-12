@@ -331,7 +331,7 @@ def get_warning_thresholds():
     rows = run_async(fetch())
     return jsonify([{
         "id": r[0], "warn_count": r[1], "action": r[2],
-        "duration_minutes": r[3], "role_id": r[4], "enabled": r[5],
+        "duration_minutes": r[3], "role_id": str(r[4]) if r[4] is not None else None, "enabled": r[5],
     } for r in rows])
 
 

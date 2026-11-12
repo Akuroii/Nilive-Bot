@@ -117,6 +117,30 @@ def save_settings_welcome():
     guild_id = get_session_guild_id()
     data     = request.get_json() or {}
 
+    async def get_existing():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT auto_role_id, rules_role_id FROM welcome_config WHERE guild_id = ?",
+                (guild_id,),
+            )
+            row = await cur.fetchone()
+            return (row[0], row[1]) if row else (None, None)
+
+    curr_auto, curr_rules = run_async(get_existing())
+    from dashboard.utils.role_validation import validate_assignable_role
+
+    new_auto = data.get("auto_role_id")
+    if new_auto:
+        valid, err = validate_assignable_role(guild_id, new_auto, curr_auto)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid Auto-Role: {err}"}), 400
+
+    new_rules = data.get("rules_role_id")
+    if new_rules:
+        valid, err = validate_assignable_role(guild_id, new_rules, curr_rules)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid Rules Gate Role: {err}"}), 400
+
     async def save():
         # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo
         from utils.timezone import normalize_timezone
@@ -166,6 +190,29 @@ def save_settings_welcome():
 def save_settings_boost():
     guild_id = get_session_guild_id()
     data     = request.get_json() or {}
+
+    async def get_existing():
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT boost1_role_id, boost2_role_id FROM boost_config WHERE guild_id = ?",
+                (guild_id,),
+            )
+            row = await cur.fetchone()
+            return (row[0], row[1]) if row else (None, None)
+
+    curr_b1, curr_b2 = run_async(get_existing())
+    from dashboard.utils.role_validation import validate_assignable_role
+
+    b1 = data.get("boost1_role_id") or data.get("boost_role_id")
+    b2 = data.get("boost2_role_id") or data.get("double_boost_role_id")
+    if b1:
+        valid, err = validate_assignable_role(guild_id, b1, curr_b1)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid 1st Boost Role: {err}"}), 400
+    if b2:
+        valid, err = validate_assignable_role(guild_id, b2, curr_b2)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid 2nd Boost Role: {err}"}), 400
 
     async def save():
         # Normalize legacy UTC / Asia/Cairo to canonical Africa/Cairo

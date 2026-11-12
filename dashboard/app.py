@@ -2,12 +2,18 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dotenv import load_dotenv
+
+# Must execute BEFORE importing database or dashboard.auth so DB_PATH,
+# NERO_ENVIRONMENT, OWNER_ID, and OAuth/Bot env vars read the same .env
+# configuration as main.py regardless of how the process is launched.
+load_dotenv()
+
 import json
 import math
 import time
 from functools import wraps
 import aiosqlite
-from dotenv import load_dotenv
 from flask import (
     Flask, redirect, url_for, session,
     request, render_template, jsonify, abort,
@@ -30,14 +36,6 @@ from dashboard.api import api_bp
 from utils.xp_calculator import calculate_level_from_xp
 from utils.formatters import format_relative, format_timestamp
 from utils.discord_limits import limits_payload
-
-# staging-db delta: dashboard/app.py never called load_dotenv() itself —
-# it worked anyway in production because Railway injects real env vars
-# directly (no .env file involved), but any local/dev run relying on a
-# .env file for DATABASE_PATH / NERO_ENVIRONMENT / SECRET_KEY etc. would
-# silently not see them, since database.py (imported two lines up) reads
-# those at MODULE IMPORT time.
-load_dotenv()
 
 app = Flask(__name__,
             template_folder="templates",
@@ -548,6 +546,8 @@ def api_user_servers():
     access_token = session.get("access_token", "")
     user_guilds = fetch_discord_guilds(access_token) if access_token else []
     bot_guilds_list = fetch_bot_guilds_full()
+    bot_ok = getattr(bot_guilds_list, "ok", True)
+    user_ok = getattr(user_guilds, "ok", True) if access_token else False
     bot_guilds = {int(g["id"]): g for g in bot_guilds_list}
 
     # Fetch explicit user grants from database
@@ -569,6 +569,7 @@ def api_user_servers():
         gid = int(g["id"])
         can_manage = guild_permissions_can_manage_server(g.get("permissions"))
         is_bot = gid in bot_guilds
+        bot_status = ("installed" if is_bot else "absent") if bot_ok else "indeterminate"
         grant = db_grants.get(gid) or (LEVEL_OWNER if super_admin and is_bot else None)
 
         if grant or can_manage:
@@ -578,7 +579,8 @@ def api_user_servers():
                 "id_str": str(gid),
                 "name": (bdata or g).get("name", "Unknown Server"),
                 "icon": (bdata or g).get("icon"),
-                "is_bot_member": is_bot,
+                "is_bot_member": is_bot if bot_ok else None,
+                "bot_membership_status": bot_status,
                 "can_manage": can_manage,
                 "has_dashboard_access": grant is not None,
                 "permission_level": grant,
@@ -596,6 +598,7 @@ def api_user_servers():
                     "name": bdata.get("name", "Unknown Server"),
                     "icon": bdata.get("icon"),
                     "is_bot_member": True,
+                    "bot_membership_status": "installed",
                     "can_manage": False,
                     "has_dashboard_access": True,
                     "permission_level": grant,
@@ -603,24 +606,32 @@ def api_user_servers():
                 }
 
     # 3. Include any lingering DB grants for servers not present in OAuth or bot lists
+    session_name_map = session.get("guild_name_map", {})
     for gid, grant in db_grants.items():
         if gid not in guild_dict:
             guild_dict[gid] = {
                 "id": gid,
                 "id_str": str(gid),
-                "name": f"Server {gid}",
+                "name": session_name_map.get(str(gid)) or f"Server {gid}",
                 "icon": None,
-                "is_bot_member": False,
+                "is_bot_member": False if bot_ok else None,
+                "bot_membership_status": "absent" if bot_ok else "indeterminate",
                 "can_manage": False,
                 "has_dashboard_access": True,
                 "permission_level": grant,
                 "is_owner": False,
             }
 
-    # 4. Categorize
+    # 4. Categorize — never downgrade granted servers to "dangling" or
+    # manageable servers to "invite" when bot discovery itself failed.
     servers = []
     for gid, s in guild_dict.items():
-        if s["has_dashboard_access"] and s["is_bot_member"]:
+        if not bot_ok:
+            if s["has_dashboard_access"]:
+                s["category"] = "active"
+            else:
+                s["category"] = "indeterminate"
+        elif s["has_dashboard_access"] and s["is_bot_member"]:
             s["category"] = "active"
         elif s["has_dashboard_access"] and not s["is_bot_member"]:
             s["category"] = "dangling"
@@ -631,14 +642,19 @@ def api_user_servers():
         servers.append(s)
 
     # Cache name map in session for fast lookup
-    guild_map = session.get("guild_name_map", {})
+    guild_map = dict(session_name_map)
     for s in servers:
         guild_map[str(s["id"])] = s["name"]
     session["guild_name_map"] = guild_map
 
-    category_order = {"active": 0, "invite": 1, "dangling": 2, "access_required": 3}
+    category_order = {"active": 0, "invite": 1, "dangling": 2, "access_required": 3, "indeterminate": 4}
     servers.sort(key=lambda s: (category_order.get(s["category"], 99), s["name"].lower()))
-    return jsonify({"servers": servers})
+    return jsonify({
+        "servers": servers,
+        "degraded": not (bot_ok and user_ok),
+        "bot_discovery_status": getattr(bot_guilds_list, "status", "ok"),
+        "user_discovery_status": getattr(user_guilds, "status", "ok") if access_token else "missing_token",
+    })
 
 
 @app.route("/api/invite-bot/<int:guild_id>")
@@ -1787,6 +1803,9 @@ def config_general():
             await db.commit()
 
     if request.method == "POST":
+        submitted_token = request.form.get("csrf_token", "")
+        if not submitted_token or submitted_token != session.get("csrf_token"):
+            abort(403)
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
         if not raw_gid:
@@ -1867,6 +1886,9 @@ def config_welcome():
             await db.commit()
 
     if request.method == "POST":
+        submitted_token = request.form.get("csrf_token", "")
+        if not submitted_token or submitted_token != session.get("csrf_token"):
+            abort(403)
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
         if not raw_gid:
@@ -1953,6 +1975,9 @@ def config_boost():
             await db.commit()
 
     if request.method == "POST":
+        submitted_token = request.form.get("csrf_token", "")
+        if not submitted_token or submitted_token != session.get("csrf_token"):
+            abort(403)
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
         if not raw_gid:
@@ -2365,6 +2390,20 @@ def api_command_settings_get(command: str):
             if not row:
                 return {"command_name": cmd_clean, "enabled": 1}
             res = dict(zip([d[0] for d in cur.description], row))
+            for id_col in (
+                "allowed_roles", "allowed_channels",
+                "enabled_roles", "disabled_roles",
+                "enabled_channels", "disabled_channels",
+                "bypass_cooldown_roles",
+            ):
+                raw_val = res.get(id_col)
+                if isinstance(raw_val, str) and raw_val.strip():
+                    try:
+                        parsed = json.loads(raw_val)
+                        if isinstance(parsed, list):
+                            res[id_col] = json.dumps([str(x) for x in parsed])
+                    except (TypeError, ValueError):
+                        pass
             if not res.get("enabled_roles") and res.get("allowed_roles"):
                 res["enabled_roles"] = res["allowed_roles"]
             if not res.get("enabled_channels") and res.get("allowed_channels"):
@@ -2872,13 +2911,23 @@ def config_access():
 
         action = request.form.get("action")
         if action == "add":
-            uid   = int(request.form.get("user_id", 0))
-            level = request.form.get("level", "moderator")
+            raw_uid = (request.form.get("user_id") or "").strip()
+            if not raw_uid.isascii() or not raw_uid.isdigit():
+                return render("config/access.html", users=users, user_map=user_map, error="Invalid Discord user ID.", **ctx), 400
+            uid = int(raw_uid)
+            if not 0 < uid <= 2**63 - 1:
+                return render("config/access.html", users=users, user_map=user_map, error="Discord user ID out of range.", **ctx), 400
+            level = (request.form.get("level") or "moderator").strip().lower()
+            if level not in {"moderator", "admin", "owner"}:
+                return render("config/access.html", users=users, user_map=user_map, error="Invalid permission level.", **ctx), 400
             run_async(add_user(uid, level))
             log_action(guild_id, f"Added {uid} as {level}",
                        "config_access", target_id=uid)
         elif action == "remove":
-            entry_id = int(request.form.get("entry_id", 0))
+            raw_entry = (request.form.get("entry_id") or "").strip()
+            if not raw_entry.isascii() or not raw_entry.isdigit() or int(raw_entry) <= 0:
+                return render("config/access.html", users=users, user_map=user_map, error="Invalid access entry ID.", **ctx), 400
+            entry_id = int(raw_entry)
             run_async(remove_user(entry_id))
             log_action(guild_id, f"Removed entry {entry_id}", "config_access")
         return redirect(url_for("config_access"))

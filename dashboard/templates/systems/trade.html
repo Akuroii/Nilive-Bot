@@ -43,12 +43,18 @@ __neroGlobal.summarizeOffer = summarizeOffer;
 __neroGlobal.loadTrades = loadTrades;
 
 function summarizeOffer(offer) {
+    const _tradeEsc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     const parts = [];
     if (offer.coins) parts.push(currencyAmount('coins', offer.coins));
     if (offer.diamonds) parts.push(currencyAmount('diamonds', offer.diamonds));
     if (offer.items) {
         for (const [name, qty] of Object.entries(offer.items)) {
-            parts.push(`🎁 ${name} ×${qty}`);
+            parts.push(`🎁 ${_tradeEsc(name)} ×${_tradeEsc(qty)}`);
         }
     }
     return parts.length ? parts.join(', ') : '<span class="text-muted">nothing</span>';

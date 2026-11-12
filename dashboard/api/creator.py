@@ -86,23 +86,26 @@ def get_youtube_configs():
             """, (guild_id,))
             return await cursor.fetchall()
 
+    def _s(v):
+        return str(v) if v is not None else None
+
     rows = run_async(fetch())
     return jsonify({"configs": [{
         "id": r[0], "channel_url": r[1], "channel_id": r[2],
         "enabled": bool(r[3]), "creator_group_id": r[19],
         "video": {
-            "discord_channel_id": r[4], "custom_message": r[5],
-            "mention_type": r[7] or "role", "mention_role_id": r[6],
+            "discord_channel_id": _s(r[4]), "custom_message": r[5],
+            "mention_type": r[7] or "role", "mention_role_id": _s(r[6]),
         },
         "shorts": {
-            "enabled": bool(r[8]), "discord_channel_id": r[9],
+            "enabled": bool(r[8]), "discord_channel_id": _s(r[9]),
             "custom_message": r[10], "mention_type": r[11] or "none",
-            "mention_role_id": r[12],
+            "mention_role_id": _s(r[12]),
         },
         "live": {
-            "enabled": bool(r[13]), "discord_channel_id": r[14],
+            "enabled": bool(r[13]), "discord_channel_id": _s(r[14]),
             "custom_message": r[15], "mention_type": r[16] or "none",
-            "mention_role_id": r[17], "is_live": bool(r[18]),
+            "mention_role_id": _s(r[17]), "is_live": bool(r[18]),
         },
     } for r in rows]})
 
@@ -271,9 +274,12 @@ def get_twitch_configs():
 
     rows = run_async(fetch())
     return jsonify({"configs": [{
-        "id": r[0], "username": r[1], "discord_channel_id": r[2],
-        "custom_message": r[3], "mention_role_id": r[4],
-        "mention_type": r[5] or "none", "give_role_id": r[6],
+        "id": r[0], "username": r[1],
+        "discord_channel_id": str(r[2]) if r[2] is not None else None,
+        "custom_message": r[3],
+        "mention_role_id": str(r[4]) if r[4] is not None else None,
+        "mention_type": r[5] or "none",
+        "give_role_id": str(r[6]) if r[6] is not None else None,
         "role_duration_hours": r[7],
         "is_live": bool(r[8]), "enabled": bool(r[9]),
         "creator_group_id": r[10],
@@ -481,8 +487,10 @@ def get_creator_groups():
         for g in groups:
             watches = await _linked_watches(guild_id, g[0])
             result.append({
-                "id": g[0], "display_name": g[1], "discord_channel_id": g[2],
-                "mention_type": g[3] or "none", "mention_role_id": g[4],
+                "id": g[0], "display_name": g[1],
+                "discord_channel_id": str(g[2]) if g[2] is not None else None,
+                "mention_type": g[3] or "none",
+                "mention_role_id": str(g[4]) if g[4] is not None else None,
                 "enabled": bool(g[5]), "watches": watches,
             })
         return result

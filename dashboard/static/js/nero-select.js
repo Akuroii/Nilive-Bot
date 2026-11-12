@@ -3,18 +3,21 @@ window.NeroSelect = (function () {
 
     async function fetchOptions(kind) {
         if (_optionsCache[kind]) {
-            return _optionsCache[kind];
+            return { results: _optionsCache[kind], ok: true };
         }
         const url = kind === 'role' ? '/api/guild/roles' : '/api/guild/channels';
         try {
             const res = await fetch(url);
             const data = await res.json();
-            const results = data.results || [];
+            if (!res.ok || (data && data.error)) {
+                return { results: [], ok: false };
+            }
+            const results = Array.isArray(data && data.results) ? data.results : [];
             _optionsCache[kind] = results;
-            return results;
+            return { results, ok: true };
         } catch (e) {
             console.error('NeroSelect fetch failed', e);
-            return [];
+            return { results: [], ok: false };
         }
     }
 
@@ -201,15 +204,54 @@ window.NeroSelect = (function () {
         }
     }
 
+    function buildNativeMarkup(kind, results, isSelectedFn, assignableOnly, placeholderText) {
+        let html = placeholderText != null ? `<option value="">${esc(placeholderText)}</option>` : '';
+        const renderNativeOpt = (r) => {
+            const selected = isSelectedFn(r.id);
+            const base = makeOption(r, selected, assignableOnly);
+            if (r.assignable === false && r.unassignable_label) {
+                const suffix = ` — ${esc(r.unassignable_label)}`;
+                return base.replace(/<\/option>$/, `${suffix}</option>`);
+            }
+            return base;
+        };
+        if (kind === 'channel') {
+            const groups = new Map();
+            results.forEach(r => {
+                const cat = (r.category && String(r.category).trim()) || 'Uncategorized';
+                if (!groups.has(cat)) groups.set(cat, []);
+                groups.get(cat).push(r);
+            });
+            if (groups.size <= 1 && groups.has('Uncategorized')) {
+                results.forEach(r => { html += renderNativeOpt(r); });
+            } else {
+                for (const [catName, chList] of groups.entries()) {
+                    html += `<optgroup label="${esc(catName)}">` + chList.map(renderNativeOpt).join('') + `</optgroup>`;
+                }
+            }
+        } else {
+            results.forEach(r => { html += renderNativeOpt(r); });
+        }
+        return html;
+    }
+
     async function initOne(el, kind) {
-        if (el.dataset.nsInit === '1') return; // don't double-init
+        if (!el || el.dataset.nsInit === '1') return; // don't double-init
+        const { results, ok } = await fetchOptions(kind);
+        if (!ok) return;
         el.dataset.nsInit = '1';
 
-        const $el = $(el);
-        const results = await fetchOptions(kind);
         const preselect = el.dataset.value || '';
         const assignableOnly = (el.dataset.assignableOnly === 'true' || el.classList.contains('nero-assignable-role-picker'));
+        const placeholder = kind === 'role' ? 'Select a role...' : 'Select a channel...';
 
+        if (typeof $ === 'undefined') {
+            el.innerHTML = buildNativeMarkup(kind, results, id => String(id) === String(preselect), assignableOnly, placeholder);
+            if (preselect) el.value = String(preselect);
+            return;
+        }
+
+        const $el = $(el);
         // Build <option> tags so a plain value (no JS) still works
         $el.empty();
         $el.append('<option value=""></option>');
@@ -220,16 +262,17 @@ window.NeroSelect = (function () {
                 theme: 'default',
                 width: '100%',
                 allowClear: true,
-                placeholder: kind === 'role' ? 'Select a role...' : 'Select a channel...',
+                placeholder,
                 templateResult: kind === 'role' ? formatRole : formatChannel,
                 templateSelection: kind === 'role' ? formatRole : formatChannel,
             });
             if (preselect) $el.val(preselect).trigger('change.select2');
         } catch (e) {
             // select2 itself failed (blocked CDN, version mismatch, etc) —
-            // leave it as a plain <select>. Still functional, just unstyled.
+            // populate readable native <select> with unassignable labels intact.
             console.error('NeroSelect: select2 init failed, using plain <select>', e);
-            if (preselect) $el.val(preselect);
+            el.innerHTML = buildNativeMarkup(kind, results, id => String(id) === String(preselect), assignableOnly, placeholder);
+            if (preselect) el.value = String(preselect);
         }
     }
 
@@ -242,14 +285,20 @@ window.NeroSelect = (function () {
     // ── Lazy multi-select (Commands → per-command Edit panel) ──────────
     async function initMulti(el, kind, preselect) {
         if (!el || el.dataset.nsInit === '1') return;
+        const { results, ok } = await fetchOptions(kind);
+        if (!ok) return;
         el.dataset.nsInit = '1';
         el.setAttribute('multiple', 'multiple');
 
-        const $el = $(el);
-        const results = await fetchOptions(kind);
         const preselectStr = (preselect || []).map(String);
         const assignableOnly = (el.dataset.assignableOnly === 'true' || el.classList.contains('nero-assignable-role-picker'));
 
+        if (typeof $ === 'undefined') {
+            el.innerHTML = buildNativeMarkup(kind, results, id => preselectStr.includes(String(id)), assignableOnly, null);
+            return;
+        }
+
+        const $el = $(el);
         $el.empty();
         populateOptions($el, kind, results, id => preselectStr.includes(String(id)), assignableOnly);
 
@@ -265,6 +314,7 @@ window.NeroSelect = (function () {
             if (preselectStr.length) $el.val(preselectStr).trigger('change.select2');
         } catch (e) {
             console.error('NeroSelect: multi select2 init failed, using plain <select multiple>', e);
+            el.innerHTML = buildNativeMarkup(kind, results, id => preselectStr.includes(String(id)), assignableOnly, null);
             if (preselectStr.length) $el.val(preselectStr);
         }
     }
@@ -274,6 +324,9 @@ window.NeroSelect = (function () {
     // even if the element was never initialized (returns []).
     function getMultiValues(el) {
         if (!el || el.dataset.nsInit !== '1') return [];
+        if (typeof $ === 'undefined') {
+            return Array.from(el.selectedOptions || []).map(o => String(o.value));
+        }
         const val = $(el).val();
         return val ? val.map(String) : [];
     }

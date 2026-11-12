@@ -49,11 +49,13 @@ def get_guild_roles():
             "unassignable_label":  r.get("unassignable_label"),
         } for r in enriched_roles],
         "bot_top_role": {
-            "id":       info["bot_top_role"]["id"],
+            "id":       str(info["bot_top_role"]["id"]),
             "name":     info["bot_top_role"].get("name", "Nero"),
             "position": info["bot_top_role"].get("position", 0),
         } if info.get("bot_top_role") else None,
         "has_manage_roles": info.get("has_manage_roles", False),
+        "bot_status": info.get("bot_status", "unknown"),
+        "bot_status_error": info.get("bot_status_error"),
     })
 
 
@@ -61,17 +63,29 @@ def get_guild_roles():
 @require_api_permission(LEVEL_MODERATOR)
 def get_guild_channels():
     guild_id  = get_session_guild_id()
-    bot_token = os.getenv("DISCORD_TOKEN", "")
+    bot_token = os.getenv("DISCORD_TOKEN", "").strip()
     if not bot_token:
+        if os.getenv("DASHBOARD_DEMO_LOGIN") == "1" and str(guild_id) == os.getenv("DASHBOARD_DEMO_GUILD_ID", "900000000000000001"):
+            return jsonify({
+                "results": [
+                    {"id": "980000000000000001", "name": "general", "text": "general", "type_icon": "#", "category": "Text Channels", "category_id": "980000000000000000", "category_position": 0, "type": "text", "raw_type": 0, "position": 0},
+                    {"id": "980000000000000002", "name": "announcements", "text": "announcements", "type_icon": "megaphone", "category": "Text Channels", "category_id": "980000000000000000", "category_position": 0, "type": "announcement", "raw_type": 5, "position": 1},
+                ]
+            })
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    resp = _req.get(
-        f"https://discord.com/api/v10/guilds/{guild_id}/channels",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
-    )
-    if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
-    channels = resp.json()
+    try:
+        resp = _req.get(
+            f"https://discord.com/api/v10/guilds/{guild_id}/channels",
+            headers={"Authorization": f"Bot {bot_token}"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
+        channels = resp.json()
+    except Exception as exc:
+        return jsonify({"results": [], "error": f"Network error ({type(exc).__name__})"})
+    if not isinstance(channels, list):
+        return jsonify({"results": [], "error": "Malformed channels payload"})
     TYPE_ICON = {0: "#", 2: "speaker", 4: "folder", 5: "megaphone", 10: "thread", 11: "thread", 12: "thread", 13: "mic", 15: "forum"}
     TYPE_NAME = {0: "text", 2: "voice", 4: "category", 5: "announcement", 10: "thread", 11: "thread", 12: "thread", 13: "stage", 15: "forum"}
 

@@ -4,24 +4,22 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nero Dashboard</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css', v='20261026') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): pins this CSS to the
+     exact bytes of select2@4.1.0-rc.0 (hash computed from the real
+     published npm package, not guessed). Loaded BEFORE main.css so our
+     dark/light theme overrides win the cascade cleanly. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css"
+      integrity="sha384-OXVF05DQEe311p6ohU11NwlnX08FzMCsyoXzGOaL+83dKAb3qS17yZJxESl8YrJQ"
+      crossorigin="anonymous">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css', v='20261112') }}">
 <!-- Shared embed composer styles (per-embed editor card + Discord
      preview chrome + engine component rows) — used by both
      manage/embedbuilder.html and systems/minigame_builder.html. -->
 <link rel="stylesheet" href="{{ url_for('static', filename='css/embed-composer.css') }}">
 <!-- Command Manager styles — strictly scoped to #command-manager-page and .cmd-restrict-modal -->
 <link rel="stylesheet" href="{{ url_for('static', filename='css/command-manager.css', v='20261026') }}">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): pins this CSS to the
-     exact bytes of select2@4.1.0-rc.0 (hash computed from the real
-     published npm package, not guessed). If jsDelivr's CDN is ever
-     compromised and starts serving a modified file, the browser
-     refuses to apply it instead of silently loading attacker-modified
-     CSS/JS into every dashboard session. -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css"
-      integrity="sha384-OXVF05DQEe311p6ohU11NwlnX08FzMCsyoXzGOaL+83dKAb3qS17yZJxESl8YrJQ"
-      crossorigin="anonymous">
 <style>
 .select2-container--default .select2-selection--single,
 .select2-container--default .select2-selection--multiple {

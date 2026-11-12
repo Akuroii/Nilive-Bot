@@ -1,5 +1,8 @@
 import os
 import base64
+import ipaddress
+import socket
+from urllib.parse import urljoin, urlparse
 import aiosqlite
 import requests
 from database import DB_PATH
@@ -70,19 +73,87 @@ async def save_guild_bot_profile(guild_id: int, nickname: str | None,
         await db.commit()
 
 
+def _validate_public_image_url(url: str) -> str | None:
+    """Reject non-HTTP(S), credentialed, localhost, or non-public IP targets (SSRF guard)."""
+    if not isinstance(url, str) or not url.strip() or len(url) > 2048:
+        return "invalid image URL"
+    try:
+        parsed = urlparse(url.strip())
+    except Exception:
+        return "invalid image URL"
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return "image URL must use http:// or https://"
+    if parsed.username or parsed.password:
+        return "image URL cannot contain credentials"
+    host = parsed.hostname.strip().lower().rstrip(".")
+    if host in ("localhost", "ip6-localhost") or host.endswith((".local", ".internal", ".localhost")):
+        return "private or local hosts are not allowed"
+
+    def _is_unsafe_ip(ip_obj) -> bool:
+        return (
+            not ip_obj.is_global
+            or ip_obj.is_private
+            or ip_obj.is_loopback
+            or ip_obj.is_link_local
+            or ip_obj.is_multicast
+            or ip_obj.is_reserved
+            or ip_obj.is_unspecified
+        )
+
+    try:
+        literal_ip = ipaddress.ip_address(host)
+        if _is_unsafe_ip(literal_ip):
+            return "private or non-public IP addresses are not allowed"
+        return None
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except Exception:
+        return "couldn't resolve image host"
+    if not infos:
+        return "couldn't resolve image host"
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        try:
+            resolved_ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return "invalid resolved address"
+        if _is_unsafe_ip(resolved_ip):
+            return "private or non-public IP addresses are not allowed"
+    return None
+
+
 def _download_image_as_data_uri(url: str, max_bytes: int = MAX_IMAGE_BYTES) -> tuple[str | None, str | None]:
     """
-    Downloads an image and returns (data_uri, error). Streams with a
-    hard cap so an oversized or malicious URL is abandoned mid-download
-    instead of being fully buffered into memory first.
+    Downloads an image and returns (data_uri, error). Validates public
+    HTTP(S) targets across redirects and streams with a hard byte cap.
     """
-    try:
-        resp = requests.get(url, timeout=10, stream=True)
-    except Exception as e:
-        return None, f"couldn't reach that URL ({e})"
+    current_url = (url or "").strip()
+    resp = None
+    for _ in range(4):
+        url_err = _validate_public_image_url(current_url)
+        if url_err:
+            return None, url_err
+        try:
+            resp = requests.get(current_url, timeout=10, stream=True, allow_redirects=False)
+        except Exception as e:
+            return None, f"couldn't reach that URL ({e})"
+        if resp.status_code in (301, 302, 303, 307, 308):
+            loc = resp.headers.get("Location")
+            if not loc:
+                return None, "redirect missing Location header"
+            current_url = urljoin(current_url, loc)
+            continue
+        break
+    else:
+        return None, "too many redirects"
 
-    if resp.status_code != 200:
-        return None, f"URL returned HTTP {resp.status_code}"
+    if resp is None or resp.status_code != 200:
+        return None, f"URL returned HTTP {resp.status_code if resp else 'unknown'}"
 
     content_type = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
     if not content_type.startswith("image/"):
@@ -187,20 +258,27 @@ def get_live_bot_member(guild_id: int) -> dict | None:
     dashboard template has an onerror fallback so a wrong guess here
     just hides the preview instead of showing a broken image.
     """
-    bot_token = os.getenv("DISCORD_TOKEN", "")
+    bot_token = os.getenv("DISCORD_TOKEN", "").strip()
     if not bot_token:
         return None
     try:
+        from dashboard.utils.role_validation import resolve_bot_user_id
+
+        bot_user_id, id_err = resolve_bot_user_id(bot_token)
+        if id_err or not bot_user_id:
+            return None
         resp = requests.get(
-            f"{DISCORD_API}/guilds/{guild_id}/members/@me",
+            f"{DISCORD_API}/guilds/{guild_id}/members/{bot_user_id}",
             headers={"Authorization": f"Bot {bot_token}"},
             timeout=8,
         )
         if resp.status_code != 200:
             return None
         data = resp.json()
+        if not isinstance(data, dict):
+            return None
         user = data.get("user", {}) or {}
-        bot_user_id = user.get("id")
+        bot_user_id = str(user.get("id") or bot_user_id)
 
         def _guild_asset_url(kind: str, hash_: str | None) -> str | None:
             if not hash_ or not bot_user_id:

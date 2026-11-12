@@ -358,7 +358,8 @@ async function loadMinigamesConfig() {
     renderGlobalPresets();
     setTimeout(function () {
         const cp = document.getElementById('mg-channel-picker');
-        if (cp && c.channel_id) { $(cp).val(String(c.channel_id)).trigger('change.select2'); }
+        const cfgChan = c.channel_id_str || c.channel_id;
+        if (cp && cfgChan) { $(cp).val(String(cfgChan)).trigger('change.select2'); }
     }, 800);
 }
 

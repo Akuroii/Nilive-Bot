@@ -97,7 +97,7 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">Target Role</label>
-                        <select class="nero-role-picker form-input" id="eb-btn-role">
+                        <select class="nero-role-picker form-input" id="eb-btn-role" data-assignable-only="true">
                             <option value="">Select target role…</option>
                         </select>
                     </div>
@@ -1178,11 +1178,15 @@ async function loadMentionLookups() {
 
         const btnRoleSelect = document.getElementById('eb-btn-role');
         const reqRoleSelect = document.getElementById('eb-btn-required');
-        if (btnRoleSelect) {
+        if (btnRoleSelect && btnRoleSelect.dataset.nsInit !== '1') {
+            const assignableOnly = btnRoleSelect.dataset.assignableOnly === 'true';
             btnRoleSelect.innerHTML = '<option value="">Select target role…</option>' +
-                roles.map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.text)}</option>`).join('');
+                roles.map(r => {
+                    const dis = (assignableOnly && r.assignable === false) ? ' disabled' : '';
+                    return `<option value="${_ebAttr(r.id)}"${dis}>@${_ebEsc(r.text)}</option>`;
+                }).join('');
         }
-        if (reqRoleSelect) {
+        if (reqRoleSelect && reqRoleSelect.dataset.nsInit !== '1') {
             reqRoleSelect.innerHTML = '<option value="">None (open to all)</option>' +
                 roles.map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.text)}</option>`).join('');
         }
@@ -1281,7 +1285,7 @@ function renderButtonsList() {
         if (b.booster_only) tags.push('<span class="eb-btn-item-tag">Boosters</span>');
         if (b.expiry_days > 0) tags.push(`<span class="eb-btn-item-tag">${b.expiry_days}d expiry</span>`);
         if (b.required_role_id && roleMap[b.required_role_id]) {
-            tags.push(`<span class="eb-btn-item-tag">Req: ${roleMap[b.required_role_id].name}</span>`);
+            tags.push(`<span class="eb-btn-item-tag">Req: ${_ebEsc(roleMap[b.required_role_id].name)}</span>`);
         }
 
         const roleTextHtml = isConfigured
@@ -1346,6 +1350,8 @@ function renderSelectsList() {
         return;
     }
 
+    const roleOptionsHtml = Object.values(roleMap).map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.name)}</option>`).join('');
+
     listEl.innerHTML = selectMenus.map((sm, sIdx) => {
         const optionsHtml = (sm.options || []).map((opt, oIdx) => {
             const isConfigured = Boolean(opt.role_id && String(opt.role_id).trim() !== '');
@@ -1355,7 +1361,7 @@ function renderSelectsList() {
             if (opt.booster_only) tags.push('<span class="eb-btn-item-tag">Boosters</span>');
             if (opt.expiry_days > 0) tags.push(`<span class="eb-btn-item-tag">${opt.expiry_days}d</span>`);
             if (opt.required_role_id && roleMap[opt.required_role_id]) {
-                tags.push(`<span class="eb-btn-item-tag">Req: ${roleMap[opt.required_role_id].name}</span>`);
+                tags.push(`<span class="eb-btn-item-tag">Req: ${_ebEsc(roleMap[opt.required_role_id].name)}</span>`);
             }
             const roleTextHtml = isConfigured
                 ? `<span class="eb-select-opt-role">→ @${_ebEsc(roleInfo ? roleInfo.name : opt.role_id)}</span>`
@@ -1379,8 +1385,6 @@ function renderSelectsList() {
                 </div>
             `;
         }).join('');
-
-        const roleOptionsHtml = Object.values(roleMap).map(r => `<option value="${_ebAttr(r.id)}">@${_ebEsc(r.name)}</option>`).join('');
 
         return `
             <div class="eb-select-card" data-sel-idx="${sIdx}">

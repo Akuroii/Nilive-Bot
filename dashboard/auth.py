@@ -24,6 +24,33 @@ class BotMembershipStatus:
     INSTALLED           = "INSTALLED"            # HTTP 200: Confirmed member
     CONFIRMED_NO_ACCESS = "CONFIRMED_NO_ACCESS"  # Explicit Discord 10004 or 50001
     INDETERMINATE       = "INDETERMINATE"        # Rate limits, timeouts, 401, 5xx, or network drops
+
+
+class GuildDiscoveryList(list):
+    """List of Discord guild objects annotated with discovery health metadata."""
+
+    def __init__(self, iterable=(), *, ok: bool = True, status: str = "ok",
+                 http_status: int | None = None, error: str | None = None):
+        super().__init__(iterable)
+        self.ok = ok
+        self.status = status
+        self.http_status = http_status
+        self.error = error
+
+
+class GuildDiscoverySet(set):
+    """Set of Discord guild IDs annotated with discovery health metadata."""
+
+    def __init__(self, iterable=(), *, ok: bool = True, status: str = "ok",
+                 http_status: int | None = None, error: str | None = None):
+        super().__init__(iterable)
+        self.ok = ok
+        self.status = status
+        self.http_status = http_status
+        self.error = error
+
+
+_MAX_GUILD_PAGES = 25
 # SECURITY HARDENING: default narrowed from Administrator (8) to the
 # specific permissions the bot actually uses (manage roles/channels,
 # kick/ban/timeout, manage nicknames, manage messages, send/embed/
@@ -59,10 +86,12 @@ def get_discord_oauth_url(remember: bool = False) -> str:
     state = secrets.token_urlsafe(24)
     session["oauth_state"] = state
     session["oauth_remember"] = bool(remember)
+    client_id = os.getenv("DISCORD_CLIENT_ID") or CLIENT_ID
+    redirect_uri = os.getenv("DISCORD_REDIRECT_URI") or REDIRECT_URI
     return (
         f"https://discord.com/oauth2/authorize"
-        f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
+        f"?client_id={client_id}"
+        f"&redirect_uri={redirect_uri}"
         f"&response_type=code"
         f"&scope=identify+guilds"
         f"&state={state}"
@@ -89,41 +118,100 @@ def consume_oauth_remember() -> bool:
 
 
 def exchange_code(code: str) -> dict | None:
-    r = requests.post(
-        f"{DISCORD_API}/oauth2/token",
-        data={
-            "client_id":     CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "redirect_uri":  REDIRECT_URI,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=10,
-    )
-    return r.json() if r.status_code == 200 else None
+    client_id = os.getenv("DISCORD_CLIENT_ID") or CLIENT_ID
+    client_secret = os.getenv("DISCORD_CLIENT_SECRET") or CLIENT_SECRET
+    redirect_uri = os.getenv("DISCORD_REDIRECT_URI") or REDIRECT_URI
+    try:
+        r = requests.post(
+            f"{DISCORD_API}/oauth2/token",
+            data={
+                "client_id":     client_id,
+                "client_secret": client_secret,
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  redirect_uri,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
 
 
 def fetch_discord_user(access_token: str) -> dict | None:
-    r = requests.get(
-        f"{DISCORD_API}/users/@me",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=10,
-    )
-    return r.json() if r.status_code == 200 else None
-
-
-def fetch_discord_guilds(access_token: str) -> list:
     try:
         r = requests.get(
-            f"{DISCORD_API}/users/@me/guilds",
+            f"{DISCORD_API}/users/@me",
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
         )
-        return r.json() if r.status_code == 200 else []
-    except requests.RequestException as e:
-        print(f"[AUTH] fetch_discord_guilds error: {e}")
-        return []
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
+def _fetch_paginated_guilds(auth_header: str, log_label: str) -> GuildDiscoveryList:
+    """
+    Bounded pagination over GET /users/@me/guilds (limit=200 + after=<last_id>).
+    Preserves whether an empty return is genuine (HTTP 200 []) vs a failed/rate-limited
+    Discord request so callers never confuse transient failures with absent membership.
+    """
+    guilds: list[dict] = []
+    headers = {"Authorization": auth_header}
+    params: dict = {"limit": 200}
+    try:
+        for _ in range(_MAX_GUILD_PAGES):
+            r = requests.get(
+                f"{DISCORD_API}/users/@me/guilds",
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            if r.status_code != 200:
+                status = (
+                    "unauthorized" if r.status_code in (401, 403)
+                    else "rate_limited" if r.status_code == 429
+                    else "discord_error"
+                )
+                return GuildDiscoveryList(
+                    [],
+                    ok=False,
+                    status=status,
+                    http_status=r.status_code,
+                    error=f"Discord HTTP {r.status_code}",
+                )
+            page = r.json()
+            if not isinstance(page, list):
+                return GuildDiscoveryList([], ok=False, status="malformed", error="Malformed guilds list")
+            if not page:
+                break
+            valid_page = []
+            for g in page:
+                if not isinstance(g, dict):
+                    return GuildDiscoveryList([], ok=False, status="malformed", error="Malformed guild entry")
+                gid_raw = str(g.get("id", "")).strip()
+                if not gid_raw.isascii() or not gid_raw.isdigit():
+                    return GuildDiscoveryList([], ok=False, status="malformed", error="Invalid guild id")
+                valid_page.append(g)
+            guilds.extend(valid_page)
+            if len(valid_page) < params["limit"]:
+                break
+            next_after = str(valid_page[-1]["id"])
+            if params.get("after") == next_after:
+                break
+            params["after"] = next_after
+        return GuildDiscoveryList(guilds, ok=True, status="ok", http_status=200)
+    except Exception as exc:
+        print(f"[AUTH] {log_label} error: {type(exc).__name__}")
+        return GuildDiscoveryList([], ok=False, status="network_error", error=type(exc).__name__)
+
+
+def fetch_discord_guilds(access_token: str) -> GuildDiscoveryList:
+    token = (access_token or "").strip()
+    if not token:
+        return GuildDiscoveryList([], ok=False, status="missing_token", error="OAuth access token missing")
+    return _fetch_paginated_guilds(f"Bearer {token}", "fetch_discord_guilds")
 
 
 def guild_permissions_can_manage_server(permissions) -> bool:
@@ -151,83 +239,35 @@ def guild_permissions_include_admin(permissions) -> bool:
     return perm_int >= 0 and bool(perm_int & DISCORD_PERMISSION_ADMINISTRATOR)
 
 
-def fetch_discord_bot_guilds() -> set[int]:
+def fetch_discord_bot_guilds() -> GuildDiscoverySet:
     """
     Phase 0 Extension. Returns the set of guild IDs the bot is
-    currently a member of, read via the BOT token (not the user's
-    OAuth token), so this works regardless of what scopes the user
-    granted. Used to flag which of a user's admin guilds already
-    have the bot installed vs. still need an invite.
-
-    Returns an empty set (never raises) if DISCORD_TOKEN isn't set
-    or the API call fails — callers treat that as "assume not a
-    member yet", which just shows the Invite button, the safe
-    default.
+    currently a member of, read via the BOT token, annotated with
+    .ok / .status / .error so callers can distinguish a genuine empty
+    result from a missing token or failed Discord API request.
     """
-    bot_token = os.getenv("DISCORD_TOKEN", "")
-    if not bot_token:
-        return set()
-    guild_ids: set[int] = set()
-    headers = {"Authorization": f"Bot {bot_token}"}
-    params  = {"limit": 200}
-    try:
-        while True:
-            r = requests.get(
-                f"{DISCORD_API}/users/@me/guilds",
-                headers=headers, params=params, timeout=10)
-            if r.status_code != 200:
-                break
-            page = r.json()
-            if not page:
-                break
-            guild_ids.update(int(g["id"]) for g in page)
-            if len(page) < params["limit"]:
-                break
-            params["after"] = page[-1]["id"]
-    except Exception as e:
-        print(f"[AUTH] fetch_discord_bot_guilds error: {e}")
-    return guild_ids
+    full = fetch_bot_guilds_full()
+    return GuildDiscoverySet(
+        (int(g["id"]) for g in full),
+        ok=getattr(full, "ok", True),
+        status=getattr(full, "status", "ok"),
+        http_status=getattr(full, "http_status", None),
+        error=getattr(full, "error", None),
+    )
 
 
-def fetch_bot_guilds_full() -> list[dict]:
+def fetch_bot_guilds_full() -> GuildDiscoveryList:
     """
     Full guild objects (id, name, icon, ...) the bot is currently a
-    member of, read via the BOT token — same endpoint
-    fetch_discord_bot_guilds() above reduces to a bare ID set. Used
-    by /server-select to render the developer's "every bot guild"
-    view (dashboard/permissions.py's is_trusted_super_admin), which
-    needs a name/icon per server to render, not just membership IDs.
-
-    Kept as its own function rather than having
-    fetch_discord_bot_guilds() build on top of it, so neither
-    function's existing behavior is at risk from touching the other.
-
-    Empty list (never raises) if DISCORD_TOKEN isn't set or the API
-    call fails.
+    member of, read via the BOT token with bounded pagination.
+    Returns a GuildDiscoveryList (a list subclass with .ok, .status,
+    .http_status, .error) so callers can distinguish genuine empty
+    membership from missing DISCORD_TOKEN or Discord API failures.
     """
-    bot_token = os.getenv("DISCORD_TOKEN", "")
+    bot_token = os.getenv("DISCORD_TOKEN", "").strip()
     if not bot_token:
-        return []
-    guilds: list[dict] = []
-    headers = {"Authorization": f"Bot {bot_token}"}
-    params  = {"limit": 200}
-    try:
-        while True:
-            r = requests.get(
-                f"{DISCORD_API}/users/@me/guilds",
-                headers=headers, params=params, timeout=10)
-            if r.status_code != 200:
-                break
-            page = r.json()
-            if not page:
-                break
-            guilds.extend(page)
-            if len(page) < params["limit"]:
-                break
-            params["after"] = page[-1]["id"]
-    except Exception as e:
-        print(f"[AUTH] fetch_bot_guilds_full error: {e}")
-    return guilds
+        return GuildDiscoveryList([], ok=False, status="missing_token", error="BOT_TOKEN not configured")
+    return _fetch_paginated_guilds(f"Bot {bot_token}", "fetch_bot_guilds_full")
 
 
 def check_bot_guild_membership(guild_id: int) -> str:
@@ -285,12 +325,14 @@ def get_bot_invite_url(guild_id: int) -> str:
     server. Uses the bot+applications.commands scopes DEBUG_GUIDE.md
     already documents as required.
     """
+    client_id = os.getenv("DISCORD_CLIENT_ID") or CLIENT_ID
+    perms = os.getenv("BOT_INVITE_PERMISSIONS") or BOT_INVITE_PERMISSIONS
     return (
         f"https://discord.com/api/oauth2/authorize"
-        f"?client_id={CLIENT_ID}"
+        f"?client_id={client_id}"
         f"&guild_id={guild_id}"
         f"&disable_guild_select=true"
-        f"&permissions={BOT_INVITE_PERMISSIONS}"
+        f"&permissions={perms}"
         f"&scope=bot+applications.commands"
     )
 

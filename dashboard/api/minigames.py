@@ -237,6 +237,17 @@ def _validate_colors_image(game_type: str, embed) -> str | None:
 # CONFIG
 # ═══════════════════════════════════════════════════════════════════
 
+def _with_channel_id_str(obj):
+    if isinstance(obj, dict):
+        out = dict(obj)
+        if out.get("channel_id") is not None:
+            out["channel_id_str"] = str(out["channel_id"])
+        else:
+            out["channel_id_str"] = None
+        return out
+    return obj
+
+
 @api_bp.route("/minigames/config", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_minigames_config_api():
@@ -247,7 +258,7 @@ def get_minigames_config_api():
         await store.ensure_tables()
         return await store.get_config(guild_id)
 
-    return jsonify({"config": run_async(fetch())})
+    return jsonify({"config": _with_channel_id_str(run_async(fetch()))})
 
 
 @api_bp.route("/minigames/config", methods=["POST"])
@@ -479,6 +490,7 @@ def list_minigame_templates_api():
         for row in rows:
             row["live_run"] = row["id"] in live
             row["queued"] = row["id"] in queued
+            row["channel_id_str"] = str(row["channel_id"]) if row.get("channel_id") is not None else None
         return rows
 
     return jsonify({"templates": run_async(fetch())})
@@ -535,7 +547,7 @@ def create_minigame_template_api():
         return jsonify({"success": False, "error": str(exc)})
     log_action(guild_id, f"Created minigame template '{tpl['name']}'",
                "minigames", target_id=tpl["id"], target_name=tpl["name"])
-    return jsonify({"success": True, "template": tpl})
+    return jsonify({"success": True, "template": _with_channel_id_str(tpl)})
 
 
 @api_bp.route("/minigames/templates/<int:template_id>", methods=["GET"])
@@ -548,7 +560,7 @@ def get_minigame_template_api(template_id: int):
         await store.ensure_tables()
         return await store.get_template(guild_id, template_id)
 
-    return jsonify({"template": run_async(fetch())})
+    return jsonify({"template": _with_channel_id_str(run_async(fetch()))})
 
 
 @api_bp.route("/minigames/templates/<int:template_id>", methods=["PATCH"])
