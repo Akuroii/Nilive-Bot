@@ -326,7 +326,7 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
 
     def test_issue_b_short_non_empty_page_199_then_3_then_empty(self):
         page1 = [{"id": str(1000 + i), "name": f"G1_{i}"} for i in range(199)]
-        page2 = [{"id": str(500 + i), "name": f"G2_{i}"} for i in range(3)]
+        page2 = [{"id": str(1199 + i), "name": f"G2_{i}"} for i in range(3)]
         seen_params = []
 
         def fake_short_page(url, headers=None, params=None, timeout=None):
@@ -336,7 +336,7 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
                 return _mock_resp(200, page1)
             if after == "1198":
                 return _mock_resp(200, page2)
-            if after == "502":
+            if after == "1201":
                 return _mock_resp(200, [])
             raise AssertionError(f"Unexpected pagination params: {params}")
 
@@ -344,13 +344,19 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             full = auth.fetch_bot_guilds_full()
             self.assertEqual(len(seen_params), 3)
             self.assertEqual(seen_params[1].get("after"), "1198")
-            self.assertEqual(seen_params[2].get("after"), "502")
+            self.assertEqual(seen_params[2].get("after"), "1201")
             self.assertEqual(len(full), 202)
+            self.assertEqual(
+                [full[0]["id"], full[198]["id"], full[199]["id"], full[201]["id"]],
+                ["1000", "1198", "1199", "1201"],
+            )
             self.assertTrue(full.ok)
             self.assertTrue(full.complete)
             self.assertEqual(full.status, "ok")
 
     def test_issue_b_repeated_cursor_stops_immediately_as_incomplete(self):
+        # Adversarial Mock: simulates a broken upstream API ignoring `after` and
+        # repeating the exact same page/cursor.
         page1 = [{"id": str(1000 + i), "name": f"G_{i}"} for i in range(200)]
         seen_params = []
 
@@ -369,23 +375,31 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             self.assertIn("1199", res.error or "")
 
     def test_issue_b_cursor_cycle_detected_before_page_cap(self):
+        # Adversarial Mock: simulates a broken upstream API response whose third
+        # page loops back to an earlier cursor rather than a natural Discord
+        # pagination sequence; verifies defensive multi-step cycle detection while
+        # strictly respecting limit=200 items per page.
         page_a = [{"id": str(1000 + i), "name": f"GA_{i}"} for i in range(200)]
-        page_b = [{"id": str(950 + i), "name": f"GB_{i}"} for i in range(201)]  # ends at "1150"
+        page_b = [{"id": str(1200 + i), "name": f"GB_{i}"} for i in range(200)]
         seen_params = []
 
         def fake_cycling_cursor(url, headers=None, params=None, timeout=None):
             seen_params.append(dict(params or {}))
             after = (params or {}).get("after")
+            if after is None:
+                return _mock_resp(200, page_a)
             if after == "1199":
                 return _mock_resp(200, page_b)
-            return _mock_resp(200, page_a)
+            if after == "1399":
+                return _mock_resp(200, page_a)
+            raise AssertionError(f"Unexpected pagination params: {params}")
 
         with patch("dashboard.auth.requests.get", side_effect=fake_cycling_cursor):
             res = auth.fetch_bot_guilds_full()
             self.assertEqual(len(seen_params), 3)
-            self.assertEqual([p.get("after") for p in seen_params], [None, "1199", "1150"])
+            self.assertEqual([p.get("after") for p in seen_params], [None, "1199", "1399"])
             self.assertEqual(len(res), len({g["id"] for g in res}))
-            self.assertEqual(len(res), 250)
+            self.assertEqual(len(res), 400)
             self.assertFalse(res.ok)
             self.assertFalse(res.complete)
             self.assertEqual(res.status, "truncated")
