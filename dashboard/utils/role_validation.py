@@ -281,6 +281,11 @@ def compute_role_assignability(
         rid_str = str(r["id"])
         is_everyone = rid_str == guild_id_str
         is_managed = bool(r.get("managed", False))
+        try:
+            role_perms = int(r.get("permissions") or 0)
+        except (ValueError, TypeError):
+            role_perms = 0
+        has_admin_perm = bool(role_perms & ADMINISTRATOR_PERM)
         r_key = role_hierarchy_key(r)
 
         assignable = True
@@ -315,6 +320,10 @@ def compute_role_assignability(
             else:
                 reason = "equal_to_bot"
                 label = f"Equal to {bot_top_ref}"
+        elif has_admin_perm:
+            assignable = False
+            reason = "dangerous_permissions"
+            label = "Grants Administrator permission"
 
         enriched_role = dict(r)
         enriched_role["assignable"] = assignable
@@ -385,6 +394,8 @@ def validate_assignable_role(
             return False, f"Role @{role_name} is managed by an external integration (bot/booster) and cannot be assigned."
         elif reason in ("above_bot", "equal_to_bot"):
             return False, f"Nero's highest role ({top_ref}) must be above @{role_name} in Server Settings > Roles."
+        elif reason == "dangerous_permissions":
+            return False, f"Role @{role_name} grants Discord Administrator permission and cannot be assigned automatically by Nero."
         else:
             return False, f"Role @{role_name} cannot be assigned by Nero ({label})."
 

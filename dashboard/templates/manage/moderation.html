@@ -556,21 +556,30 @@ async function addThreshold() {
                 if (!thresholds.length) {
                     tbody.innerHTML = '<tr id="thresh-empty-row"><td colspan="5" class="empty">No thresholds configured</td></tr>';
                 } else {
-                    tbody.innerHTML = thresholds.map(t => `
-                        <tr id="thresh-row-${t.id}">
-                            <td><strong>${t.warn_count}</strong></td>
-                            <td><span class="badge badge-warning">${t.action}</span></td>
-                            <td class="text-muted">${t.duration_minutes || '—'}</td>
+                    const _escTh = (s) => String(s == null ? '' : s)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                    tbody.innerHTML = thresholds.map(t => {
+                        const safeId = Number.isInteger(Number(t.id)) ? String(Number(t.id)) : '0';
+                        return `
+                        <tr id="thresh-row-${safeId}">
+                            <td><strong>${_escTh(t.warn_count)}</strong></td>
+                            <td><span class="badge badge-warning">${_escTh(t.action)}</span></td>
+                            <td class="text-muted">${t.duration_minutes != null && t.duration_minutes !== '' ? _escTh(t.duration_minutes) : '—'}</td>
                             <td>
                                 <span class="badge ${t.enabled ? 'badge-success' : 'badge-danger'}">
                                     ${t.enabled ? 'Active' : 'Off'}
                                 </span>
                             </td>
                             <td>
-                                <button class="btn btn-sm btn-danger" onclick="deleteThreshold(${t.id})">Delete</button>
+                                <button class="btn btn-sm btn-danger" onclick="deleteThreshold(${safeId})">Delete</button>
                             </td>
                         </tr>
-                    `).join('');
+                    `;
+                    }).join('');
                 }
             }
         } else {

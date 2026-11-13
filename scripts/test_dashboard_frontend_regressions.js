@@ -924,6 +924,65 @@ function testServerSelectDegradedTemplate() {
     assert(html.includes('Status temporarily unverified'), 'server_select.html must show neutral unavailable copy for indeterminate guilds');
 }
 
+async function testModerationThresholdDomXssEscaping() {
+    const html = readFile('dashboard/templates/manage/moderation.html');
+    const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
+    assert(scriptMatch, 'moderation.html must contain inline script');
+    const cleanedScript = scriptMatch[1].replace(/\{\{\s*tab\|tojson\s*\}\}/g, '"thresholds"');
+
+    const tbody = { innerHTML: '' };
+    const elements = {
+        'th-count': { value: '3' },
+        'th-action': { value: 'timeout' },
+        'th-duration': { value: '15' },
+        'th-add-btn': { disabled: false },
+        'thresholds-tbody': tbody,
+        'qa-action': null,
+        'qa-duration-wrap': null,
+        'edit-reason-modal': null,
+    };
+
+    const sandbox = {
+        console,
+        parseInt,
+        Array,
+        String,
+        Number,
+        Math,
+        showToast() {},
+        confirm: () => true,
+        document: {
+            getElementById: (id) => Object.prototype.hasOwnProperty.call(elements, id) ? elements[id] : null,
+            querySelectorAll: () => [],
+        },
+        fetch: async (url, opts) => {
+            if (opts && opts.method === 'POST') {
+                return { ok: true, status: 200, json: async () => ({ success: true }) };
+            }
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ([{
+                    id: '7"><img src=x onerror=alert(1)>',
+                    warn_count: '<b onmouseover=evil()>3</b>',
+                    action: '<img src=x onerror=alert(1)>',
+                    duration_minutes: '<svg onload=evil()>',
+                    enabled: 1,
+                }]),
+            };
+        },
+        window: {},
+    };
+    sandbox.window = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(cleanedScript, sandbox, { filename: 'moderation.html' });
+
+    await sandbox.addThreshold();
+    assert(!tbody.innerHTML.includes('<img'), `DOM XSS unescaped <img> found in thresholds-tbody: ${tbody.innerHTML}`);
+    assert(!tbody.innerHTML.includes('<svg'), `DOM XSS unescaped <svg> found in thresholds-tbody: ${tbody.innerHTML}`);
+    assert(tbody.innerHTML.includes('&lt;img'), 'Expected HTML-escaped threshold action');
+}
+
 (async function main() {
     await testEmbedBuilderSelectMenuRender();
     await testTicketsCategoryRenderAndEdit();
@@ -931,6 +990,7 @@ function testServerSelectDegradedTemplate() {
     await testNeroSelectResilience();
     await testNeroSelectBotStatusCacheAndRetry();
     testServerSelectDegradedTemplate();
+    await testModerationThresholdDomXssEscaping();
     console.log('All Dashboard frontend regression checks passed.');
 })().catch((err) => {
     console.error(err);

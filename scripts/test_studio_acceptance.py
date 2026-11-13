@@ -30,6 +30,17 @@ class TestMessageRoleStudio(unittest.IsolatedAsyncioTestCase):
         self.guild_id = GUILD
         self.user_id = USER
 
+        def _fake_channel_get(url, headers=None, timeout=None, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            ch_id = url.rstrip("/").split("/")[-1]
+            resp.json.return_value = {"id": ch_id, "guild_id": str(self.guild_id), "type": 0}
+            return resp
+
+        ch_patcher = patch("dashboard.api.embedbuilder._req.get", side_effect=_fake_channel_get)
+        ch_patcher.start()
+        self.addCleanup(ch_patcher.stop)
+
     async def test_01_template_save_and_retrieve_with_buttons(self):
         """Verify saving and retrieving studio templates with embeds and interactive buttons."""
         import dashboard.app as dash

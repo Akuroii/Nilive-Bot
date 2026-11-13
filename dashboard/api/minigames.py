@@ -307,7 +307,7 @@ def save_minigames_config_api():
 
     cfg = run_async(save())
     log_action(guild_id, "Updated minigames config", "minigames")
-    return jsonify({"success": True, "config": cfg})
+    return jsonify({"success": True, "config": _with_channel_id_str(cfg)})
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -614,7 +614,7 @@ def update_minigame_template_api(template_id: int):
         return jsonify({"success": False, "error": "template not found"})
     log_action(guild_id, f"Updated minigame template '{tpl['name']}'",
                "minigames", target_id=template_id, target_name=tpl["name"])
-    return jsonify({"success": True, "template": tpl})
+    return jsonify({"success": True, "template": _with_channel_id_str(tpl)})
 
 
 @api_bp.route("/minigames/templates/<int:template_id>/duplicate",
@@ -638,7 +638,7 @@ def duplicate_minigame_template_api(template_id: int):
         return jsonify({"success": False, "error": "template not found"})
     log_action(guild_id, f"Duplicated minigame template → '{tpl['name']}'",
                "minigames", target_id=tpl["id"], target_name=tpl["name"])
-    return jsonify({"success": True, "template": tpl})
+    return jsonify({"success": True, "template": _with_channel_id_str(tpl)})
 
 
 @api_bp.route("/minigames/templates/<int:template_id>", methods=["DELETE"])
@@ -794,6 +794,14 @@ def get_minigames_history_api():
                 r["template_name"] = names.get(r.get("template_id"))
             if not r.get("category_name"):
                 r["category_name"] = catnames.get(r.get("category_id"))
+            r["channel_id_str"] = str(r["channel_id"]) if r.get("channel_id") is not None else None
+            r["winner_id_str"] = str(r["winner_id"]) if r.get("winner_id") is not None else None
+            if isinstance(r.get("winners"), list):
+                r["winners"] = [
+                    dict(w, id_str=(str(w["id"]) if w.get("id") is not None else None))
+                    if isinstance(w, dict) else w
+                    for w in r["winners"]
+                ]
         return rows
 
     return jsonify({"history": run_async(fetch())})

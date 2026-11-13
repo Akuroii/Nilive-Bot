@@ -1046,10 +1046,13 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
         png_1x1 = base64.b64decode(
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
         )
+        mock_discord_ch_get = MagicMock(status_code=200)
+        mock_discord_ch_get.json.return_value = {"id": str(SNOWFLAKE_CHAN_A), "guild_id": str(SNOWFLAKE_GUILD), "type": 0}
         mock_discord_post = MagicMock(status_code=200)
         mock_discord_post.json.return_value = {"id": "1088248319982006777", "channel_id": str(SNOWFLAKE_CHAN_A)}
         with patch.dict(os.environ, {"DISCORD_TOKEN": "test_bot_token"}, clear=False):
-            with patch("requests.post", return_value=mock_discord_post) as posted:
+            with patch("requests.get", return_value=mock_discord_ch_get), \
+                 patch("requests.post", return_value=mock_discord_post) as posted:
                 up_res = self.client.post(
                     "/api/embedbuilder/send",
                     headers=headers_a,
@@ -1187,6 +1190,288 @@ asyncio.run(main())
             self.assertEqual(self.client.get("/backups").status_code, 403)
             self._login(user_id="999999999")
             self.assertEqual(self.client.get("/backups").status_code, 200)
+
+    # ── 8. PHASE 3 AUDIT REMEDIATIONS (F-01, F-02, F-03, F-07, D-1) ─────────
+
+    def test_f01_embedbuilder_send_blocks_cross_guild_and_non_snowflake_channels(self):
+        self._login(guild_id=SNOWFLAKE_GUILD, level="owner")
+        headers = {"X-CSRF-Token": "csrf_valid_token_123", "X-Guild-ID": str(SNOWFLAKE_GUILD)}
+        payload_json = json.dumps({"content": "Hello world", "embeds": [], "buttons": [], "select_menus": []})
+
+        other_guild_id = 1360461358486913145
+        same_guild_channel = "1088248319982006444"
+        other_guild_channel = "1360461358486999999"
+        dm_channel = "1360461358486888888"
+
+        post_calls = []
+        get_calls = []
+
+        def fake_get(url, headers=None, timeout=None, **kwargs):
+            get_calls.append(url)
+            if url.endswith(f"/channels/{same_guild_channel}"):
+                return _mock_resp(200, {"id": same_guild_channel, "guild_id": str(SNOWFLAKE_GUILD), "type": 0})
+            if url.endswith(f"/channels/{other_guild_channel}"):
+                return _mock_resp(200, {"id": other_guild_channel, "guild_id": str(other_guild_id), "type": 0})
+            if url.endswith(f"/channels/{dm_channel}"):
+                return _mock_resp(200, {"id": dm_channel, "type": 1})
+            return _mock_resp(500, {"message": "Discord outage"})
+
+        def fake_post(url, *args, **kwargs):
+            post_calls.append(url)
+            return _mock_resp(200, {"id": "1499999999999999999"})
+
+        with patch("dashboard.api.embedbuilder._req.get", side_effect=fake_get), \
+             patch("dashboard.api.embedbuilder._req.post", side_effect=fake_post), \
+             patch.dict(os.environ, {"DISCORD_TOKEN": "mock-token-audit"}):
+
+            # 1. Path traversal / non-digit channel_id -> 400 before any Discord HTTP request
+            r_path = self.client.post(
+                "/api/embedbuilder/send",
+                data={"channel_id": "123/../../users/@me", "payload_json": payload_json},
+                headers=headers,
+            )
+            self.assertEqual(r_path.status_code, 400)
+            self.assertEqual(len(get_calls), 0)
+            self.assertEqual(len(post_calls), 0)
+
+            # 2. Cross-guild channel_id -> 403 and NEVER posts to Discord
+            r_cross = self.client.post(
+                "/api/embedbuilder/send",
+                data={"channel_id": other_guild_channel, "payload_json": payload_json},
+                headers=headers,
+            )
+            self.assertEqual(r_cross.status_code, 403)
+            self.assertEqual(len(post_calls), 0)
+
+            # 3. Non-guild (DM) channel -> 403 and NEVER posts to Discord
+            r_dm = self.client.post(
+                "/api/embedbuilder/send",
+                data={"channel_id": dm_channel, "payload_json": payload_json},
+                headers=headers,
+            )
+            self.assertEqual(r_dm.status_code, 403)
+            self.assertEqual(len(post_calls), 0)
+
+            # 4. Upstream Discord verification failure -> fails closed (502) and NEVER posts
+            r_err = self.client.post(
+                "/api/embedbuilder/send",
+                data={"channel_id": "1088248319982006555", "payload_json": payload_json},
+                headers=headers,
+            )
+            self.assertEqual(r_err.status_code, 502)
+            self.assertEqual(len(post_calls), 0)
+
+            # 5. Valid channel owned by active session guild -> 200 and posts message
+            r_ok = self.client.post(
+                "/api/embedbuilder/send",
+                data={"channel_id": same_guild_channel, "payload_json": payload_json},
+                headers=headers,
+            )
+            self.assertEqual(r_ok.status_code, 200)
+            self.assertEqual(len(post_calls), 1)
+
+    def test_f02_administrator_permission_role_unassignable_even_below_bot(self):
+        bot_role_id = "1088248319982006399"
+        junior_admin_id = "1088248319982006350"
+        safe_member_id = "1088248319982006351"
+        roles = [
+            {"id": str(SNOWFLAKE_GUILD), "name": "@everyone", "position": 0, "managed": False, "permissions": "0"},
+            {"id": safe_member_id, "name": "Member", "position": 2, "managed": False, "permissions": "0"},
+            {"id": junior_admin_id, "name": "Co-Owner", "position": 3, "managed": False, "permissions": str(rv.ADMINISTRATOR_PERM)},
+            {"id": bot_role_id, "name": "Nero", "position": 10, "managed": True, "permissions": str(rv.MANAGE_ROLES_PERM)},
+        ]
+        bot_member = {"user": {"id": BOT_USER_ID}, "roles": [bot_role_id], "permissions": str(rv.MANAGE_ROLES_PERM)}
+
+        info = rv.compute_role_assignability(SNOWFLAKE_GUILD, roles, bot_member)
+        self.assertTrue(info["role_map"][safe_member_id]["assignable"])
+        self.assertFalse(info["role_map"][junior_admin_id]["assignable"])
+        self.assertEqual(info["role_map"][junior_admin_id]["unassignable_reason"], "dangerous_permissions")
+
+        with patch("dashboard.utils.role_validation.fetch_guild_roles_and_bot_member", return_value=(roles, bot_member, None)):
+            valid_new, err_new = rv.validate_assignable_role(SNOWFLAKE_GUILD, junior_admin_id)
+            self.assertFalse(valid_new)
+            self.assertIn("Administrator", err_new or "")
+
+            # Delta Rule still preserves an unchanged existing binding so unrelated settings remain editable
+            valid_delta, err_delta = rv.validate_assignable_role(
+                SNOWFLAKE_GUILD, junior_admin_id, existing_role_id=junior_admin_id
+            )
+            self.assertTrue(valid_delta)
+            self.assertIsNone(err_delta)
+
+    def test_f07_external_guild_emojis_scoped_to_authorized_guilds_and_owner_only(self):
+        authorized_other_guild = 1360461358486913145
+        private_unrelated_guild = 1280983591148584971
+        mod_uid = 222222222222222222
+        adm_uid = 333333333333333333
+
+        async def _seed_extra_grant():
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO dashboard_users (guild_id, user_id, permission_level, enabled) "
+                    "VALUES (?, ?, 'admin', 1)",
+                    (authorized_other_guild, self.admin_id),
+                )
+                await db.execute(
+                    "INSERT INTO dashboard_users (guild_id, user_id, permission_level, enabled) "
+                    "VALUES (?, ?, 'moderator', 1)",
+                    (SNOWFLAKE_GUILD, mod_uid),
+                )
+                await db.execute(
+                    "INSERT INTO dashboard_users (guild_id, user_id, permission_level, enabled) "
+                    "VALUES (?, ?, 'admin', 1)",
+                    (SNOWFLAKE_GUILD, adm_uid),
+                )
+                await db.commit()
+
+        run_async(_seed_extra_grant())
+
+        bot_guilds = auth.GuildDiscoveryList(
+            [
+                {"id": str(SNOWFLAKE_GUILD), "name": "Current Guild"},
+                {"id": str(authorized_other_guild), "name": "Authorized Sister Guild"},
+                {"id": str(private_unrelated_guild), "name": "Secret Unrelated Guild"},
+            ],
+            ok=True,
+            complete=True,
+            status="ok",
+        )
+
+        def fake_emoji_get(url, headers=None, timeout=None, **kwargs):
+            if f"/guilds/{authorized_other_guild}/emojis" in url:
+                return _mock_resp(200, [{"id": "777000000000000001", "name": "sister_ok", "animated": False}])
+            if f"/guilds/{private_unrelated_guild}/emojis" in url:
+                return _mock_resp(200, [{"id": "777000000000000002", "name": "secret_leak", "animated": False}])
+            return _mock_resp(200, [])
+
+        with patch("dashboard.auth.fetch_bot_guilds_full", return_value=bot_guilds), \
+             patch("dashboard.api.core._req.get", side_effect=fake_emoji_get), \
+             patch.dict(os.environ, {"DISCORD_TOKEN": "mock-token-audit"}):
+
+            # Moderator & Admin cannot access owner-level Embed Builder external emoji endpoint
+            self._login(guild_id=SNOWFLAKE_GUILD, level="moderator", user_id=str(mod_uid))
+            self.assertEqual(self.client.get("/api/guild/emojis/external").status_code, 403)
+            self._login(guild_id=SNOWFLAKE_GUILD, level="admin", user_id=str(adm_uid))
+            self.assertEqual(self.client.get("/api/guild/emojis/external").status_code, 403)
+
+            # Non-developer Owner of SNOWFLAKE_GUILD sees ONLY authorized_other_guild, NEVER private_unrelated_guild
+            self._login(guild_id=SNOWFLAKE_GUILD, level="owner")
+            resp = self.client.get("/api/guild/emojis/external")
+            self.assertEqual(resp.status_code, 200)
+            servers = resp.get_json()["servers"]
+            self.assertEqual(len(servers), 1)
+            self.assertEqual(servers[0]["guild_id"], str(authorized_other_guild))
+            self.assertEqual(servers[0]["guild_name"], "Authorized Sister Guild")
+
+            # Trusted super-admin (OWNER_ID=999999999) sees all external bot guilds
+            self._login(guild_id=SNOWFLAKE_GUILD, level="owner", user_id="999999999")
+            resp_dev = self.client.get("/api/guild/emojis/external")
+            self.assertEqual(resp_dev.status_code, 200)
+            dev_ids = {s["guild_id"] for s in resp_dev.get_json()["servers"]}
+            self.assertEqual(dev_ids, {str(authorized_other_guild), str(private_unrelated_guild)})
+
+    def test_f03_and_d1_warning_threshold_validation_and_minigames_mutation_snowflakes(self):
+        self._login(guild_id=SNOWFLAKE_GUILD, level="owner")
+        headers = {"X-CSRF-Token": "csrf_valid_token_123", "X-Guild-ID": str(SNOWFLAKE_GUILD)}
+
+        async def _clean_tables():
+            from utils import minigame_store as store
+            await store.ensure_tables()
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM warning_thresholds WHERE guild_id = ?", (SNOWFLAKE_GUILD,))
+                await db.execute("DELETE FROM minigame_templates WHERE guild_id = ?", (SNOWFLAKE_GUILD,))
+                await db.execute("DELETE FROM minigame_categories WHERE guild_id = ?", (SNOWFLAKE_GUILD,))
+                await db.execute("DELETE FROM minigames_log WHERE guild_id = ?", (SNOWFLAKE_GUILD,))
+                await db.commit()
+
+        run_async(_clean_tables())
+        self.addCleanup(lambda: run_async(_clean_tables()))
+
+        # 1. F-03: Invalid / XSS warning-threshold payloads are rejected with 400 (never stored or 500)
+        for bad_payload in (
+            {},
+            {"warn_count": 3, "action": "<img src=x onerror=alert(1)>"},
+            {"warn_count": 0, "action": "kick"},
+            {"warn_count": True, "action": "kick"},
+            {"warn_count": 3, "action": "timeout"},  # missing duration_minutes for timeout
+            {"warn_count": 3, "action": "timeout", "duration_minutes": -5},
+        ):
+            r_bad = self.client.post("/api/moderation/warning-thresholds", json=bad_payload, headers=headers)
+            self.assertEqual(r_bad.status_code, 400, f"Expected 400 for {bad_payload}, got {r_bad.status_code}")
+
+        r_good = self.client.post(
+            "/api/moderation/warning-thresholds",
+            json={"warn_count": 3, "action": "timeout", "duration_minutes": 15},
+            headers=headers,
+        )
+        self.assertEqual(r_good.status_code, 200)
+        self.assertTrue(r_good.get_json()["success"])
+
+        # 2. D-1: Minigames POST config, PATCH template, POST duplicate, and GET history carry exact *_str Snowflakes
+        exact_chan = "1405993421167919336"
+        exact_winner = 1360461358486913145
+
+        cfg_res = self.client.post(
+            "/api/minigames/config",
+            json={"enabled": True, "channel_id": exact_chan, "min_events_per_week": 3, "max_events_per_week": 6},
+            headers=headers,
+        )
+        self.assertEqual(cfg_res.status_code, 200)
+        self.assertEqual(cfg_res.get_json()["config"]["channel_id_str"], exact_chan)
+
+        cat_res = self.client.post("/api/minigames/categories", json={"name": "AuditCat"}, headers=headers)
+        cat_id = cat_res.get_json()["category"]["id"]
+
+        create_res = self.client.post(
+            "/api/minigames/templates",
+            json={
+                "category_id": cat_id,
+                "name": "AuditGame",
+                "game_type": "quick_click",
+                "channel_id": exact_chan,
+                "config": {"buttons": 3, "reveal_min": 2, "reveal_max": 5, "wait_after": 10},
+            },
+            headers=headers,
+        )
+        self.assertTrue(create_res.get_json().get("success"), f"Template create failed: {create_res.get_json()}")
+        tpl_id = create_res.get_json()["template"]["id"]
+
+        patch_res = self.client.patch(
+            f"/api/minigames/templates/{tpl_id}",
+            json={"name": "AuditGameRenamed"},
+            headers=headers,
+        )
+        self.assertEqual(patch_res.status_code, 200)
+        self.assertEqual(patch_res.get_json()["template"]["channel_id_str"], exact_chan)
+
+        dup_res = self.client.post(
+            f"/api/minigames/templates/{tpl_id}/duplicate",
+            json={"new_name": "AuditGameCopy"},
+            headers=headers,
+        )
+        self.assertEqual(dup_res.status_code, 200)
+        self.assertEqual(dup_res.get_json()["template"]["channel_id_str"], exact_chan)
+
+        async def _seed_history():
+            from utils import minigame_store as store
+            await store.ensure_tables()
+            run_id = await store.start_run(
+                SNOWFLAKE_GUILD, tpl_id, "AuditGameRenamed",
+                cat_id, "AuditCat", "quick_click", "manual", int(exact_chan)
+            )
+            await store.finish_run(
+                run_id,
+                "completed",
+                winners=[{"id": exact_winner, "name": "WinnerOne", "reward_type": "coins", "reward_value": "100", "status": "won"}],
+            )
+
+        run_async(_seed_history())
+        hist_res = self.client.get("/api/minigames/history")
+        self.assertEqual(hist_res.status_code, 200)
+        hist_row = hist_res.get_json()["history"][0]
+        self.assertEqual(hist_row["channel_id_str"], exact_chan)
+        self.assertEqual(hist_row["winner_id_str"], str(exact_winner))
+        self.assertEqual(hist_row["winners"][0]["id_str"], str(exact_winner))
 
 
 if __name__ == "__main__":

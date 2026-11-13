@@ -335,11 +335,61 @@ def get_warning_thresholds():
     } for r in rows])
 
 
+_VALID_THRESHOLD_ACTIONS = {"timeout", "kick", "ban", "temp_ban", "add_role"}
+
+
 @api_bp.route("/moderation/warning-thresholds", methods=["POST"])
 @require_api_permission(LEVEL_ADMIN)
 def save_warning_threshold():
     guild_id = get_session_guild_id()
-    data     = request.json or {}
+    data     = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Expected a JSON object"}), 400
+
+    raw_count = data.get("warn_count")
+    if isinstance(raw_count, bool) or raw_count is None:
+        return jsonify({"success": False, "error": "warn_count must be an integer between 1 and 1000"}), 400
+    try:
+        warn_count = int(raw_count)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "warn_count must be an integer between 1 and 1000"}), 400
+    if not (1 <= warn_count <= 1000):
+        return jsonify({"success": False, "error": "warn_count must be between 1 and 1000"}), 400
+
+    raw_action = data.get("action")
+    if not isinstance(raw_action, str) or raw_action.strip() not in _VALID_THRESHOLD_ACTIONS:
+        return jsonify({
+            "success": False,
+            "error": "action must be one of: timeout, kick, ban, temp_ban, add_role",
+        }), 400
+    action = raw_action.strip()
+
+    raw_duration = data.get("duration_minutes")
+    duration_minutes = None
+    if raw_duration not in (None, ""):
+        if isinstance(raw_duration, bool):
+            return jsonify({"success": False, "error": "duration_minutes must be a positive integer"}), 400
+        try:
+            duration_minutes = int(raw_duration)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "duration_minutes must be a positive integer"}), 400
+        max_minutes = 60 * 24 * 28 if action == "timeout" else 60 * 24 * 365
+        if not (1 <= duration_minutes <= max_minutes):
+            return jsonify({"success": False, "error": f"duration_minutes must be between 1 and {max_minutes}"}), 400
+    elif action in {"timeout", "temp_ban"}:
+        return jsonify({
+            "success": False,
+            "error": f"duration_minutes is required for {action} thresholds",
+        }), 400
+
+    raw_enabled = data.get("enabled", 1)
+    if isinstance(raw_enabled, bool):
+        enabled_val = 1 if raw_enabled else 0
+    else:
+        try:
+            enabled_val = 1 if int(raw_enabled) else 0
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "enabled must be a boolean or 0/1"}), 400
 
     role_id = data.get("role_id")
     if role_id:
@@ -363,24 +413,24 @@ def save_warning_threshold():
                     UPDATE warning_thresholds
                     SET warn_count=?, action=?, duration_minutes=?, role_id=?, enabled=?
                     WHERE id=? AND guild_id=?
-                """, (data["warn_count"], data["action"],
-                      data.get("duration_minutes"), data.get("role_id"),
-                      int(data.get("enabled", 1)),
+                """, (warn_count, action,
+                      duration_minutes, role_id or None,
+                      enabled_val,
                       data["id"], guild_id))
             else:
                 await db.execute("""
                     INSERT INTO warning_thresholds
                         (guild_id, warn_count, action, duration_minutes, role_id)
                     VALUES (?, ?, ?, ?, ?)
-                """, (guild_id, int(data.get("warn_count", 3)),
-                      data.get("action", "timeout"),
-                      data.get("duration_minutes") or None,
-                      data.get("role_id") or None))
+                """, (guild_id, warn_count,
+                      action,
+                      duration_minutes,
+                      role_id or None))
             await db.commit()
 
     run_async(save())
     log_action(guild_id,
-               f"Saved threshold: {data.get('warn_count')} warns -> {data.get('action')}",
+               f"Saved threshold: {warn_count} warns -> {action}",
                "moderation")
     return jsonify({"success": True})
 
