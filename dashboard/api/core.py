@@ -152,10 +152,10 @@ def get_guild_emojis():
         emojis = resp.json()
         if not isinstance(emojis, list):
             return jsonify({"results": [], "error": "Malformed emojis payload"})
-    except _req.RequestException as exc:
-        return jsonify({"results": [], "error": f"Network error ({type(exc).__name__})"})
     except (ValueError, TypeError):
         return jsonify({"results": [], "error": "Malformed emojis payload"})
+    except Exception as exc:
+        return jsonify({"results": [], "error": f"Network error ({type(exc).__name__})"})
 
     results = [{
         "id":       str(e["id"]),
@@ -206,7 +206,11 @@ def get_external_guild_emojis():
         async def _get_user_granted_guilds():
             async with aiosqlite.connect(DB_PATH) as db:
                 cur = await db.execute(
-                    "SELECT guild_id FROM dashboard_users WHERE user_id = ? AND enabled = 1",
+                    """
+                    SELECT guild_id FROM dashboard_users
+                    WHERE user_id = ? AND enabled = 1
+                      AND permission_level IN ('owner', 'admin', 'moderator')
+                    """,
                     (uid,),
                 )
                 return {int(row[0]) for row in await cur.fetchall()}
@@ -228,9 +232,12 @@ def get_external_guild_emojis():
                 headers=headers, timeout=8)
             if resp.status_code != 200:
                 continue
+            raw_emojis = resp.json()
+            if not isinstance(raw_emojis, list):
+                continue
             emojis = [{
                 "id": str(e["id"]), "name": e["name"], "animated": bool(e.get("animated")),
-            } for e in resp.json() if isinstance(e, dict) and e.get("id") and e.get("name")]
+            } for e in raw_emojis if isinstance(e, dict) and e.get("id") and e.get("name")]
             if not emojis:
                 continue
             emojis.sort(key=lambda e: e["name"].lower())

@@ -17,7 +17,6 @@ Regression and audit reproduction suite for Nilive-Bot Dashboard stabilization:
 """
 
 import ast
-import asyncio
 import json
 import os
 import sys
@@ -1395,6 +1394,8 @@ asyncio.run(main())
             {"warn_count": True, "action": "kick"},
             {"warn_count": 3, "action": "timeout"},  # missing duration_minutes for timeout
             {"warn_count": 3, "action": "timeout", "duration_minutes": -5},
+            {"warn_count": 3, "action": "add_role"},  # missing role_id for add_role
+            {"id": {"bad": 1}, "warn_count": 3, "action": "kick"},
         ):
             r_bad = self.client.post("/api/moderation/warning-thresholds", json=bad_payload, headers=headers)
             self.assertEqual(r_bad.status_code, 400, f"Expected 400 for {bad_payload}, got {r_bad.status_code}")
@@ -1406,6 +1407,16 @@ asyncio.run(main())
         )
         self.assertEqual(r_good.status_code, 200)
         self.assertTrue(r_good.get_json()["success"])
+
+        r_kick = self.client.post(
+            "/api/moderation/warning-thresholds",
+            json={"warn_count": 5, "action": "kick", "duration_minutes": 0},
+            headers=headers,
+        )
+        self.assertEqual(r_kick.status_code, 200)
+        th_rows = self.client.get("/api/moderation/warning-thresholds").get_json()
+        kick_row = next(r for r in th_rows if r["action"] == "kick")
+        self.assertIsNone(kick_row["duration_minutes"])
 
         # 2. D-1: Minigames POST config, PATCH template, POST duplicate, and GET history carry exact *_str Snowflakes
         exact_chan = "1405993421167919336"

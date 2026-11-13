@@ -190,12 +190,6 @@ def _resolve_public_image_target(url: str) -> tuple[dict | None, str | None]:
     }, None
 
 
-def _validate_public_image_url(url: str) -> str | None:
-    """Reject non-HTTP(S), credentialed, localhost, or non-public IP targets (SSRF guard)."""
-    _, err = _resolve_public_image_target(url)
-    return err
-
-
 def _build_pinned_adapter(expected_host: str, expected_port: int, pinned_ips: list[str]) -> HTTPAdapter:
     """
     Create a single-hop HTTPAdapter whose underlying urllib3 connection classes

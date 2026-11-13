@@ -11,6 +11,7 @@ load_dotenv()
 
 import json
 import math
+import secrets
 import time
 from functools import wraps
 import aiosqlite
@@ -100,6 +101,17 @@ print("Database ready (dashboard process).")
 
 _CSRF_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _GLOBAL_API_ENDPOINTS = {"api_user_servers", "api_invite_bot"}
+
+
+def _require_form_csrf() -> None:
+    submitted_token = request.form.get("csrf_token", "")
+    expected_token = session.get("csrf_token") or ""
+    if (
+        not submitted_token
+        or not expected_token
+        or not secrets.compare_digest(submitted_token.encode(), expected_token.encode())
+    ):
+        abort(403)
 
 
 @app.before_request
@@ -1812,11 +1824,7 @@ def config_general():
             await db.commit()
 
     if request.method == "POST":
-        import secrets
-        submitted_token = request.form.get("csrf_token", "")
-        expected_token = session.get("csrf_token") or ""
-        if not submitted_token or not expected_token or not secrets.compare_digest(submitted_token.encode(), expected_token.encode()):
-            abort(403)
+        _require_form_csrf()
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
         if not raw_gid:
@@ -1897,11 +1905,7 @@ def config_welcome():
             await db.commit()
 
     if request.method == "POST":
-        import secrets
-        submitted_token = request.form.get("csrf_token", "")
-        expected_token = session.get("csrf_token") or ""
-        if not submitted_token or not expected_token or not secrets.compare_digest(submitted_token.encode(), expected_token.encode()):
-            abort(403)
+        _require_form_csrf()
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
         if not raw_gid:
@@ -1988,11 +1992,7 @@ def config_boost():
             await db.commit()
 
     if request.method == "POST":
-        import secrets
-        submitted_token = request.form.get("csrf_token", "")
-        expected_token = session.get("csrf_token") or ""
-        if not submitted_token or not expected_token or not secrets.compare_digest(submitted_token.encode(), expected_token.encode()):
-            abort(403)
+        _require_form_csrf()
         raw_gid = request.form.get("guild_id")
         ctx     = get_current_user_context()
         if not raw_gid:

@@ -364,11 +364,26 @@ def save_warning_threshold():
         }), 400
     action = raw_action.strip()
 
+    raw_id = data.get("id")
+    threshold_id = None
+    if raw_id not in (None, ""):
+        if isinstance(raw_id, bool):
+            return jsonify({"success": False, "error": "Invalid threshold ID"}), 400
+        try:
+            threshold_id = int(raw_id)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "Invalid threshold ID"}), 400
+        if threshold_id <= 0:
+            return jsonify({"success": False, "error": "Invalid threshold ID"}), 400
+
     raw_duration = data.get("duration_minutes")
     duration_minutes = None
-    if raw_duration not in (None, ""):
-        if isinstance(raw_duration, bool):
-            return jsonify({"success": False, "error": "duration_minutes must be a positive integer"}), 400
+    if action in {"timeout", "temp_ban"}:
+        if raw_duration in (None, "") or isinstance(raw_duration, bool):
+            return jsonify({
+                "success": False,
+                "error": f"duration_minutes is required for {action} thresholds",
+            }), 400
         try:
             duration_minutes = int(raw_duration)
         except (TypeError, ValueError):
@@ -376,11 +391,15 @@ def save_warning_threshold():
         max_minutes = 60 * 24 * 28 if action == "timeout" else 60 * 24 * 365
         if not (1 <= duration_minutes <= max_minutes):
             return jsonify({"success": False, "error": f"duration_minutes must be between 1 and {max_minutes}"}), 400
-    elif action in {"timeout", "temp_ban"}:
-        return jsonify({
-            "success": False,
-            "error": f"duration_minutes is required for {action} thresholds",
-        }), 400
+    elif raw_duration not in (None, ""):
+        if isinstance(raw_duration, bool):
+            return jsonify({"success": False, "error": "duration_minutes must be an integer"}), 400
+        try:
+            parsed_dur = int(raw_duration)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "duration_minutes must be an integer"}), 400
+        if not (0 <= parsed_dur <= 60 * 24 * 365):
+            return jsonify({"success": False, "error": "duration_minutes out of range"}), 400
 
     raw_enabled = data.get("enabled", 1)
     if isinstance(raw_enabled, bool):
@@ -392,12 +411,15 @@ def save_warning_threshold():
             return jsonify({"success": False, "error": "enabled must be a boolean or 0/1"}), 400
 
     role_id = data.get("role_id")
+    role_id_db = None
+    if action == "add_role" and not role_id:
+        return jsonify({"success": False, "error": "role_id is required for add_role thresholds"}), 400
     if role_id:
         existing_role = None
-        if data.get("id"):
+        if threshold_id:
             async def get_curr_wt():
                 async with aiosqlite.connect(DB_PATH) as db:
-                    c = await db.execute("SELECT role_id FROM warning_thresholds WHERE id=? AND guild_id=?", (data["id"], guild_id))
+                    c = await db.execute("SELECT role_id FROM warning_thresholds WHERE id=? AND guild_id=?", (threshold_id, guild_id))
                     r = await c.fetchone()
                     return r[0] if r else None
             existing_role = run_async(get_curr_wt())
@@ -405,18 +427,19 @@ def save_warning_threshold():
         valid, err = validate_assignable_role(guild_id, role_id, existing_role)
         if not valid:
             return jsonify({"success": False, "error": f"Invalid Punish Role: {err}"}), 400
+        role_id_db = int(str(role_id).strip())
 
     async def save():
         async with aiosqlite.connect(DB_PATH) as db:
-            if data.get("id"):
+            if threshold_id:
                 await db.execute("""
                     UPDATE warning_thresholds
                     SET warn_count=?, action=?, duration_minutes=?, role_id=?, enabled=?
                     WHERE id=? AND guild_id=?
                 """, (warn_count, action,
-                      duration_minutes, role_id or None,
+                      duration_minutes, role_id_db,
                       enabled_val,
-                      data["id"], guild_id))
+                      threshold_id, guild_id))
             else:
                 await db.execute("""
                     INSERT INTO warning_thresholds
@@ -425,7 +448,7 @@ def save_warning_threshold():
                 """, (guild_id, warn_count,
                       action,
                       duration_minutes,
-                      role_id or None))
+                      role_id_db))
             await db.commit()
 
     run_async(save())
