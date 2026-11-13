@@ -85,17 +85,18 @@ async function loadUnifiedServers() {
         // while /api/user/servers enriches with all 4 categories using exact id_str snowflakes.
         const grantedEl = document.getElementById('accessible-server-data');
         const granted = grantedEl ? JSON.parse(grantedEl.textContent || '[]') : [];
-        let discovered = [], discoveryFailed = false;
+        let discovered = [], discoveryFailed = false, discoveryDegraded = false;
         try {
             const res = await fetch('/api/user/servers');
             if (!res.ok) throw new Error('Server discovery failed');
             const data = await res.json();
             discovered = Array.isArray(data.servers) ? data.servers : [];
+            discoveryDegraded = Boolean(data.degraded);
         } catch (e) {
             discoveryFailed = true;
         }
 
-        const validCategories = new Set(['active', 'invite', 'access_required', 'dangling']);
+        const validCategories = new Set(['active', 'invite', 'access_required', 'dangling', 'indeterminate']);
         const serversById = new Map();
         for (const g of granted) {
             const rawId = g.id_str != null ? g.id_str : (typeof g.id === 'string' || Number.isSafeInteger(g.id) ? g.id : '');
@@ -124,10 +125,13 @@ async function loadUnifiedServers() {
                 if (g.permission_level) existing.permission_level = g.permission_level;
                 if (g.is_owner !== undefined) existing.is_owner = Boolean(g.is_owner);
                 if (g.can_manage !== undefined) existing.can_manage = Boolean(g.can_manage);
-                if (explicitCat) {
+                if (explicitCat && explicitCat !== 'indeterminate') {
                     existing.category = explicitCat;
                 }
             } else {
+                const fallbackCat = g.bot_membership_status === 'indeterminate'
+                    ? 'indeterminate'
+                    : (g.is_bot_member ? 'access_required' : 'invite');
                 serversById.set(id, {
                     id,
                     name: g.name,
@@ -135,7 +139,7 @@ async function loadUnifiedServers() {
                     permission_level: g.permission_level || null,
                     is_owner: Boolean(g.is_owner),
                     can_manage: Boolean(g.can_manage),
-                    category: explicitCat || (g.is_bot_member ? 'access_required' : 'invite'),
+                    category: explicitCat || fallbackCat,
                 });
             }
         }
@@ -162,8 +166,14 @@ async function loadUnifiedServers() {
         const inviteServers = servers.filter(s => s.category === 'invite');
         const accessReqServers = servers.filter(s => s.category === 'access_required');
         const danglingServers = servers.filter(s => s.category === 'dangling');
+        const indeterminateServers = servers.filter(s => s.category === 'indeterminate');
 
-        let html = discoveryFailed ? `<div class="card" role="alert">Couldn't load server discovery. Your dashboard grants are still available. <button type="button" class="btn btn-sm btn-secondary" onclick="loadUnifiedServers()">Retry</button></div>` : '';
+        let html = '';
+        if (discoveryFailed) {
+            html += `<div class="card" role="alert" style="margin-bottom:16px;">Couldn't load live server discovery. Your saved dashboard grants remain available. <button type="button" class="btn btn-sm btn-secondary" onclick="loadUnifiedServers()">Retry</button></div>`;
+        } else if (discoveryDegraded) {
+            html += `<div class="card" role="status" style="margin-bottom:16px;font-size:12px;color:var(--text2);display:flex;align-items:center;justify-content:space-between;gap:12px;"><span>Live Discord bot membership status is temporarily unavailable — showing your saved dashboard access without assuming Nero was removed.</span><button type="button" class="btn btn-sm btn-secondary" onclick="loadUnifiedServers()">Retry</button></div>`;
+        }
 
         // 1. Active Servers
         if (activeServers.length > 0) {
@@ -296,6 +306,35 @@ async function loadUnifiedServers() {
                             ${s.can_manage ? `<button type="button" class="btn btn-sm btn-primary" onclick="inviteBot('${s.id}', this)">Re-invite <svg class="btn-icon-svg" viewBox="0 0 24 24" style="width:12px;height:12px;vertical-align:-1px;display:inline-block;" aria-hidden="true"><use href="#nero-i-external"></use></svg></button>` : ''}
                             <button type="button" class="btn btn-sm btn-secondary" onclick="selectServerPost('${s.id}')">Review Logs ›</button>
                         </div>
+                    </div>`).join('')}
+                </div>
+            </div>`;
+        }
+
+        if (indeterminateServers.length > 0) {
+            html += `
+            <div class="card" style="margin-bottom:16px;">
+                <div class="card-title" style="font-size:14px;margin-bottom:6px;color:var(--text);display:flex;align-items:center;gap:6px;">
+                    <svg class="card-title-icon" viewBox="0 0 24 24" style="color:var(--text2);" aria-hidden="true"><use href="#nero-i-info"></use></svg> Unverified Bot Status (${indeterminateServers.length})
+                </div>
+                <p style="color:var(--text3);font-size:12px;margin-bottom:14px;line-height:1.4;">
+                    Discord server status could not be verified right now. Refresh in a moment to check whether Nero is already installed.
+                </p>
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    ${indeterminateServers.map(s => `
+                    <div style="display:flex;align-items:center;gap:12px;padding:12px 14px;
+                                background:var(--bg3);border:1px solid var(--border);
+                                border-radius:10px;">
+                        ${serverIconHtml(s)}
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                ${escapeHtml(s.name)}
+                            </div>
+                            <div style="font-size:11px;color:var(--text3);margin-top:2px;">
+                                <span class="badge badge-secondary" style="font-size:10px;">Status temporarily unverified</span>
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-secondary" onclick="loadUnifiedServers()">Retry</button>
                     </div>`).join('')}
                 </div>
             </div>`;

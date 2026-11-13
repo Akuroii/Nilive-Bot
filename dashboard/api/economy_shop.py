@@ -589,6 +589,10 @@ def get_shop_item(item_id: int):
     item = run_async(fetch())
     if item is None:
         return jsonify({"success": False, "error": "Item not found."}), 404
+    if item.get("role_id") is not None:
+        item["role_id"] = str(item["role_id"])
+    if item.get("required_role_id") is not None:
+        item["required_role_id"] = str(item["required_role_id"])
     return jsonify({"success": True, "item": item})
 
 

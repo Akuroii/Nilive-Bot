@@ -31,7 +31,15 @@ def api_tagpartners_list():
             """, (guild_id,))
             rows = await cursor.fetchall()
             cols = [d[0] for d in cursor.description]
-            return [dict(zip(cols, r)) for r in rows]
+            items = []
+            for r in rows:
+                d = dict(zip(cols, r))
+                if d.get("partner_guild_id") is not None:
+                    d["partner_guild_id"] = str(d["partner_guild_id"])
+                if d.get("reward_role_id") is not None:
+                    d["reward_role_id"] = str(d["reward_role_id"])
+                items.append(d)
+            return items
 
     return jsonify(run_async(fetch()))
 
@@ -71,6 +79,24 @@ def api_tagpartners_save():
                          "error": "This reward type requires an amount."}), 400
 
     row_id = data.get("id")
+    submitted_role = data.get("reward_role_id")
+    if reward_type == "role" and submitted_role:
+        existing_role = None
+        if row_id:
+            async def _fetch_existing_role():
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur = await db.execute(
+                        "SELECT reward_role_id FROM tag_partner_rewards WHERE id=? AND guild_id=?",
+                        (row_id, guild_id),
+                    )
+                    r = await cur.fetchone()
+                    return r[0] if r else None
+            existing_role = run_async(_fetch_existing_role())
+        from dashboard.utils.role_validation import validate_assignable_role
+        valid, err = validate_assignable_role(guild_id, submitted_role, existing_role)
+        if not valid:
+            return jsonify({"success": False, "error": f"Invalid Reward Role: {err}"}), 400
+
     params = (
         data.get("partner_label") or None,
         reward_type,

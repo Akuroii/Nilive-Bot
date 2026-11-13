@@ -688,11 +688,14 @@ async function loadCommandSettings(cmd) {
         if (aliasHint) {
             const aliases = parseArr(data.aliases);
             if (aliases.length > 0) {
+                const _cmdEsc = (s) => String(s == null ? '' : s)
+                    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
                 const firstAlias = aliases[0];
                 const usageEl = document.getElementById(`usage-${cmd}`);
                 const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
                 const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
-                aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
+                aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${_cmdEsc(firstAlias)}${_cmdEsc(params)}</code>`;
                 aliasHint.style.display = 'inline';
             } else {
                 aliasHint.style.display = 'none';
@@ -887,13 +890,16 @@ function refreshRowChips(cmd, payload) {
     const aliasHint = document.getElementById(`usage-alias-${cmd}`);
     if (aliasHint) {
         if (payload.aliases && payload.aliases.length > 0) {
+            const _cmdEsc = (s) => String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
             // Show the first alias in the usage hint
             const firstAlias = payload.aliases[0];
             // Get params from the data attribute
             const usageEl = document.getElementById(`usage-${cmd}`);
             const paramsStr = usageEl ? usageEl.dataset.params || '' : '';
             const params = paramsStr ? paramsStr.split(',').map(p => ` [${p}]`).join('') : '';
-            aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${firstAlias}${params}</code>`;
+            aliasHint.innerHTML = `&nbsp;or&nbsp;<code>${_cmdEsc(firstAlias)}${_cmdEsc(params)}</code>`;
             aliasHint.style.display = 'inline';
         } else {
             aliasHint.style.display = 'none';

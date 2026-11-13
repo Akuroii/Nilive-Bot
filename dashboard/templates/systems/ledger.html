@@ -107,20 +107,26 @@ async function loadLedger() {
     // rendered client-side since this table is rebuilt from fetch() on
     // every filter/refresh. Same pattern as trade.html.
     const userMap = data.user_map || {};
+    const _ledgerEsc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     tbody.innerHTML = data.entries.map(e => {
         const u = userMap[e.user_id] || {};
         return `
-        <tr id="ledger-row-${e.id}">
+        <tr id="ledger-row-${Number(e.id)}">
             <td>${userIdentityHtml(e.user_id, u.display_name || u.username, u.avatar_url)}</td>
-            <td><span class="badge badge-accent">${currencyNameFor(e.currency)}</span></td>
+            <td><span class="badge badge-accent">${_ledgerEsc(currencyNameFor(e.currency))}</span></td>
             <td style="color:${e.amount >= 0 ? 'var(--success)' : 'var(--danger)'};font-weight:600;">
                 ${e.amount >= 0 ? '+' : ''}${e.amount.toLocaleString()}
             </td>
             <td>${e.balance_after !== null && e.balance_after !== undefined ? e.balance_after.toLocaleString() : '—'}</td>
-            <td><span class="badge">${e.type}</span></td>
-            <td><span class="badge badge-source">${e.source}</span></td>
-            <td class="text-muted">${e.reason || '—'}</td>
-            <td class="text-muted">${e.created_at ? e.created_at.slice(0,16) : '—'}</td>
+            <td><span class="badge">${_ledgerEsc(e.type)}</span></td>
+            <td><span class="badge badge-source">${_ledgerEsc(e.source)}</span></td>
+            <td class="text-muted">${e.reason ? _ledgerEsc(e.reason) : '—'}</td>
+            <td class="text-muted">${e.created_at ? _ledgerEsc(e.created_at.slice(0,16)) : '—'}</td>
             {% if is_owner %}
             <td>${e.reversed
                 ? '<span class="badge badge-danger">Reversed</span>'

@@ -60,6 +60,41 @@ def _validate_embeds(embeds) -> tuple[bool, str]:
     return True, ""
 
 
+def _verify_channel_in_guild(guild_id: int, channel_id: str, bot_token: str) -> tuple[bool, str | None, int]:
+    """
+    Verify via Discord REST that `channel_id` exists and belongs to `guild_id`.
+    Supports both guild channels and threads (both include `guild_id` in
+    GET /channels/{channel_id}), while rejecting DM channels, cross-guild
+    channels, and indeterminate upstream failures (fail-closed).
+    """
+    try:
+        ch_resp = _req.get(
+            f"https://discord.com/api/v10/channels/{channel_id}",
+            headers={"Authorization": f"Bot {bot_token}"},
+            timeout=8,
+        )
+    except Exception as exc:
+        return False, f"Unable to verify target channel with Discord ({type(exc).__name__})", 502
+
+    if ch_resp.status_code == 200:
+        try:
+            ch_data = ch_resp.json()
+        except Exception:
+            return False, "Malformed channel metadata from Discord", 502
+        if not isinstance(ch_data, dict):
+            return False, "Malformed channel metadata from Discord", 502
+        ch_guild = str(ch_data.get("guild_id") or "").strip()
+        if not ch_guild or ch_guild != str(guild_id):
+            return False, "Target channel does not belong to the selected server", 403
+        return True, None, 200
+
+    if ch_resp.status_code == 403:
+        return False, "Nero cannot access the selected channel in this server", 403
+    if ch_resp.status_code == 404:
+        return False, "Selected channel was not found in Discord", 404
+    return False, f"Unable to verify target channel ownership (Discord {ch_resp.status_code})", 502
+
+
 @api_bp.route("/embedbuilder/send", methods=["POST"])
 @require_api_permission(LEVEL_OWNER)
 def api_embedbuilder_send():
@@ -70,6 +105,9 @@ def api_embedbuilder_send():
     payload_raw = request.form.get("payload_json")
     if not channel_id:
         return jsonify({"success": False, "error": "Pick a channel to send to"})
+    channel_id = str(channel_id).strip()
+    if not channel_id.isascii() or not channel_id.isdigit() or not (0 < int(channel_id) <= 2**63 - 1):
+        return jsonify({"success": False, "error": "Invalid Discord channel ID"}), 400
     if not payload_raw:
         return jsonify({"success": False, "error": "Missing message payload"})
 
@@ -232,6 +270,10 @@ def api_embedbuilder_send():
 
     if action_rows:
         discord_payload["components"] = action_rows
+
+    ch_ok, ch_err, ch_status = _verify_channel_in_guild(guild_id, channel_id, bot_token)
+    if not ch_ok:
+        return jsonify({"success": False, "error": ch_err}), ch_status
 
     multipart_files = []
     for i, f in enumerate(files):

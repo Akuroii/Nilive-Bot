@@ -243,8 +243,30 @@ __neroGlobal.csv2list = csv2list;
 __neroGlobal.resetCategoryForm = resetCategoryForm;
 __neroGlobal.loadCategories = loadCategories;
 __neroGlobal.editCategory = editCategory;
+__neroGlobal.editCategoryById = editCategoryById;
+__neroGlobal.confirmDeleteCategoryById = confirmDeleteCategoryById;
 __neroGlobal.saveCategory = saveCategory;
 __neroGlobal.deleteCategory = deleteCategory;
+
+function _escapeHtml(val) {
+    return String(val == null ? '' : val)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+const _ticketCategoriesById = new Map();
+function editCategoryById(id) {
+    const cat = _ticketCategoriesById.get(Number(id));
+    if (cat) editCategory(cat);
+}
+function confirmDeleteCategoryById(id) {
+    const cat = _ticketCategoriesById.get(Number(id));
+    const label = cat ? cat.name : `#${id}`;
+    showConfirm(`Delete category ${label}?`, () => deleteCategory(Number(id)));
+}
 
 function switchTicketTab(name) {
     document.querySelectorAll('.ttab-content').forEach(el => el.style.display = 'none');
@@ -327,19 +349,21 @@ async function loadCategories() {
     if (!res.ok) return;
     const data = await res.json();
     const tbody = document.getElementById('cat-tbody');
+    _ticketCategoriesById.clear();
     if (!data.categories || !data.categories.length) {
         tbody.innerHTML = '<tr><td colspan="5" class="empty">No categories configured — a default "General Support" is used until you add one.</td></tr>';
         return;
     }
+    data.categories.forEach(c => _ticketCategoriesById.set(Number(c.id), c));
     tbody.innerHTML = data.categories.map(c => `
         <tr>
-            <td>${c.emoji || '🎫'} <strong>${c.name}</strong></td>
-            <td>${c.required_role_id ? `<code>${c.required_role_id}</code>` : '<span class="text-muted">Everyone</span>'}</td>
-            <td>${(c.closer_roles || []).length ? c.closer_roles.map(r => `<code>${r}</code>`).join(' ') : '<span class="text-muted">Default staff role</span>'}</td>
+            <td>${_escapeHtml(c.emoji || '🎫')} <strong>${_escapeHtml(c.name)}</strong></td>
+            <td>${c.required_role_id ? `<code>${_escapeHtml(c.required_role_id)}</code>` : '<span class="text-muted">Everyone</span>'}</td>
+            <td>${(c.closer_roles || []).length ? c.closer_roles.map(r => `<code>${_escapeHtml(r)}</code>`).join(' ') : '<span class="text-muted">Default staff role</span>'}</td>
             <td><span class="badge ${c.enabled ? 'badge-success' : 'badge-danger'}">${c.enabled ? 'Active' : 'Disabled'}</span></td>
             <td style="display:flex;gap:6px;">
-                <button class="btn btn-sm btn-secondary" onclick='editCategory(${JSON.stringify(c)})'>Edit</button>
-                <button class="btn btn-sm btn-danger" onclick="showConfirm('Delete category ${c.name}?', () => deleteCategory(${c.id}))">Delete</button>
+                <button class="btn btn-sm btn-secondary" onclick="editCategoryById(${Number(c.id)})">Edit</button>
+                <button class="btn btn-sm btn-danger" onclick="confirmDeleteCategoryById(${Number(c.id)})">Delete</button>
             </td>
         </tr>`).join('');
 }
@@ -360,7 +384,7 @@ function editCategory(c) {
     document.getElementById('cat-embed-image').value = e.image || '';
     document.getElementById('cat-embed-color').value = e.color || '#5865F2';
     document.getElementById('cat-embed-color-hex').value = e.color || '#5865F2';
-    document.getElementById('cat-form-title').innerHTML = `<svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-pencil"></use></svg> Editing "${escapeHtml(c.name)}"`;
+    document.getElementById('cat-form-title').innerHTML = `<svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-pencil"></use></svg> Editing "${_escapeHtml(c.name)}"`;
     document.getElementById('cat-cancel-edit').style.display = 'inline-flex';
     setTimeout(() => {
         const rrp = document.getElementById('cat-required-role');

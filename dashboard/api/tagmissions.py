@@ -35,6 +35,10 @@ def api_tagmissions_list():
             missions = [dict(zip(cols, r)) for r in rows]
 
             for m in missions:
+                if m.get("reward_role_id") is not None:
+                    m["reward_role_id"] = str(m["reward_role_id"])
+                if m.get("channel_id") is not None:
+                    m["channel_id"] = str(m["channel_id"])
                 p_cursor = await db.execute("""
                     SELECT
                         COUNT(*),

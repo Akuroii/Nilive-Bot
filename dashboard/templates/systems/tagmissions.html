@@ -45,7 +45,7 @@
         </div>
         <div class="form-group" id="tm-role-group" style="display:none;">
             <label class="form-label">Role</label>
-            <select class="nero-role-picker form-input" id="tm-role" data-value=""></select>
+            <select class="nero-role-picker form-input" id="tm-role" data-value="" data-assignable-only="true"></select>
         </div>
         <div class="form-group" id="tm-duration-group" style="display:none;">
             <label class="form-label">Duration (hours)</label>
@@ -133,6 +133,15 @@ function tmUpdateRewardFields() {
     if (isRole) window.NeroSelect.initAll(document.getElementById('tm-role-group'));
 }
 
+function _tmEsc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function tmStatusBadge(status) {
     const map = {
         scheduled: ['badge-info', 'Scheduled'],
@@ -140,7 +149,7 @@ function tmStatusBadge(status) {
         completed: ['badge', 'Completed'],
         cancelled: ['badge-danger', 'Cancelled'],
     };
-    const [cls, label] = map[status] || ['badge', status];
+    const [cls, label] = map[status] || ['badge', _tmEsc(status)];
     return `<span class="badge ${cls}">${label}</span>`;
 }
 
@@ -155,19 +164,19 @@ async function tmLoad() {
     body.innerHTML = rows.map(r => {
         const actions = [];
         if (r.status === 'scheduled' || r.status === 'active') {
-            actions.push(`<button class="btn btn-sm" onclick="tmCancel(${r.id})">Cancel</button>`);
+            actions.push(`<button class="btn btn-sm" onclick="tmCancel(${Number(r.id)})">Cancel</button>`);
         }
         if (r.status !== 'active') {
-            actions.push(`<button class="btn btn-sm btn-danger" onclick="tmDelete(${r.id})">Delete</button>`);
+            actions.push(`<button class="btn btn-sm btn-danger" onclick="tmDelete(${Number(r.id)})">Delete</button>`);
         }
         return `
         <tr>
-            <td><strong>${r.title}</strong><br>
-                <span class="text-muted text-sm">${currencyNameFor(r.reward_type)}${r.reward_amount ? ' × ' + r.reward_amount : ''}</span></td>
+            <td><strong>${_tmEsc(r.title)}</strong><br>
+                <span class="text-muted text-sm">${_tmEsc(currencyNameFor(r.reward_type))}${r.reward_amount ? ' × ' + _tmEsc(r.reward_amount) : ''}</span></td>
             <td>${tmStatusBadge(r.status)}</td>
-            <td class="text-sm text-muted">${(r.starts_at || '').slice(0,16)} → ${(r.ends_at || '').slice(0,16)}</td>
-            <td class="text-sm">${r.participant_count} confirmed
-                ${r.status === 'completed' ? `<br><span class="text-muted">${r.rewarded_count} rewarded · ${r.removed_tag_count} removed tag</span>` : ''}</td>
+            <td class="text-sm text-muted">${_tmEsc((r.starts_at || '').slice(0,16))} → ${_tmEsc((r.ends_at || '').slice(0,16))}</td>
+            <td class="text-sm">${Number(r.participant_count || 0)} confirmed
+                ${r.status === 'completed' ? `<br><span class="text-muted">${Number(r.rewarded_count || 0)} rewarded · ${Number(r.removed_tag_count || 0)} removed tag</span>` : ''}</td>
             <td>${actions.join(' ')}</td>
         </tr>`;
     }).join('');

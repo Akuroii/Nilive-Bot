@@ -171,10 +171,16 @@ function renderActions() {
         list.innerHTML = '<p class="text-muted text-sm">No actions added yet.</p>';
         return;
     }
+    const _ccEsc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     list.innerHTML = actions.map((a, i) => `
         <div style="display:flex;align-items:center;justify-content:space-between;
                     padding:8px 12px;background:var(--bg3);border-radius:8px;margin-bottom:6px;">
-            <span style="font-size:13px;">${getLabel(a)}</span>
+            <span style="font-size:13px;">${_ccEsc(getLabel(a))}</span>
             <button onclick="removeAction(${i})" class="btn btn-sm btn-danger">Remove</button>
         </div>`).join('');
 }

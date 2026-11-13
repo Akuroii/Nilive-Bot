@@ -131,13 +131,19 @@ async function loadStatusMessages() {
         c.innerHTML = '<span class="text-muted text-sm">No status messages yet.</span>';
         return;
     }
+    const _genEsc = (s) => String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     c.innerHTML = data.map(m => `
         <div style="display:flex;align-items:center;gap:10px;padding:8px 0;
                     border-bottom:1px solid var(--border);">
-            <span class="badge badge-accent">${m.type}</span>
-            <span style="flex:1;font-size:13px;">${m.text}</span>
+            <span class="badge badge-accent">${_genEsc(m.type)}</span>
+            <span style="flex:1;font-size:13px;">${_genEsc(m.text)}</span>
             <button type="button" class="btn btn-sm btn-danger"
-                onclick="deleteStatusMessage(${m.id})">Delete</button>
+                onclick="deleteStatusMessage(${Number(m.id)})">Delete</button>
         </div>`).join('');
 }
 

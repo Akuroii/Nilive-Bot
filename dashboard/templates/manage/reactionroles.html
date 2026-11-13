@@ -175,6 +175,14 @@ __neroGlobal.loadPanels = loadPanels;
 
 let buttons = [];
 const colorMap = { blurple:'#5865F2', gray:'#4e5058', green:'#248046', red:'#da373c' };
+function _rrEsc(val) {
+    return String(val == null ? '' : val)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
 
 function updatePreview() {
     const title   = document.getElementById('panel-title').value   || 'Pick Your Roles';
@@ -232,18 +240,18 @@ function renderButtons() {
         <div style="display:flex;align-items:center;justify-content:space-between;
                     padding:9px 0;border-bottom:1px solid var(--border);">
             <div style="display:flex;align-items:center;gap:10px;">
-                <div style="width:10px;height:10px;border-radius:50%;background:${colorMap[b.color]};"></div>
+                <div style="width:10px;height:10px;border-radius:50%;background:${colorMap[b.color] || '#5865F2'};"></div>
                 <div>
-                    <div style="font-size:13px;font-weight:500;">${b.emoji ? b.emoji+' ' : ''}${b.label}</div>
-                    <div class="text-muted text-sm">Role: ${b.role}${b.booster?' · Boosters only':''}${b.required?' · Requires: '+b.required:''}${b.expiry>0?' · Expires: '+b.expiry+'d':''}</div>
+                    <div style="font-size:13px;font-weight:500;">${b.emoji ? _rrEsc(b.emoji)+' ' : ''}${_rrEsc(b.label)}</div>
+                    <div class="text-muted text-sm">Role: ${_rrEsc(b.role)}${b.booster?' · Boosters only':''}${b.required?' · Requires: '+_rrEsc(b.required):''}${b.expiry>0?' · Expires: '+Number(b.expiry)+'d':''}</div>
                 </div>
             </div>
             <button onclick="removeButton(${i})" class="btn btn-sm btn-danger">Remove</button>
         </div>`).join('');
     prev.innerHTML = buttons.map(b => `
-        <div style="background:${colorMap[b.color]};color:#fff;padding:7px 14px;
+        <div style="background:${colorMap[b.color] || '#5865F2'};color:#fff;padding:7px 14px;
                     border-radius:4px;font-size:13px;font-weight:500;cursor:pointer;">
-            ${b.emoji ? b.emoji+' ' : ''}${b.label}
+            ${b.emoji ? _rrEsc(b.emoji)+' ' : ''}${_rrEsc(b.label)}
         </div>`).join('');
 }
 
@@ -307,8 +315,8 @@ async function loadPanels() {
     }
     c.innerHTML = data.panels.map(p => `
         <div style="padding:9px 0;border-bottom:1px solid var(--border);">
-            <div style="font-weight:500;font-size:13px;">${p.title}</div>
-            <div class="text-muted text-sm">${p.buttons} buttons</div>
+            <div style="font-weight:500;font-size:13px;">${_rrEsc(p.title)}</div>
+            <div class="text-muted text-sm">${Number(p.buttons || 0)} buttons</div>
         </div>`).join('');
 }
 

@@ -54,6 +54,17 @@ class TestSelectRoleMenus(unittest.IsolatedAsyncioTestCase):
         await reset_database()
         self.guild_id = GUILD
         self.user_id = USER
+
+        def _fake_channel_get(url, headers=None, timeout=None, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            ch_id = url.rstrip("/").split("/")[-1]
+            resp.json.return_value = {"id": ch_id, "guild_id": str(self.guild_id), "type": 0}
+            return resp
+
+        ch_patcher = patch("dashboard.api.embedbuilder._req.get", side_effect=_fake_channel_get)
+        ch_patcher.start()
+        self.addCleanup(ch_patcher.stop)
         execute("INSERT OR REPLACE INTO dashboard_users (guild_id, user_id, permission_level, enabled) VALUES (?, ?, 'owner', 1)",
                 (self.guild_id, self.user_id))
         app = dash.app

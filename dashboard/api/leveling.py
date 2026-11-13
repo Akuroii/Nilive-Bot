@@ -73,7 +73,12 @@ def get_leveling_config_api():
         from utils.xp_calculator import get_leveling_config
         return await get_leveling_config(guild_id)
 
-    return jsonify({"config": run_async(fetch())})
+    cfg = dict(run_async(fetch()) or {})
+    if cfg.get("guild_id") is not None:
+        cfg["guild_id"] = str(cfg["guild_id"])
+    if cfg.get("levelup_channel_id") is not None:
+        cfg["levelup_channel_id"] = str(cfg["levelup_channel_id"])
+    return jsonify({"config": cfg})
 
 
 # Whole-number Leveling settings the save handler writes, with the range each
@@ -531,7 +536,8 @@ def get_leveling_shop_rewards():
         } for r in rewards],
         "products": [{
             "id": p[0], "name": p[1], "type": p[2],
-            "role_id": p[3], "duration_hours": p[4], "enabled": p[5],
+            "role_id": str(p[3]) if p[3] is not None else None,
+            "duration_hours": p[4], "enabled": p[5],
         } for p in products],
     })
 
@@ -694,7 +700,7 @@ def get_bonus_roles():
 
     rows = run_async(fetch())
     return jsonify({"roles": [
-        {"id": r[0], "role_id": r[1], "multiplier": r[2]} for r in rows]})
+        {"id": r[0], "role_id": str(r[1]) if r[1] is not None else None, "multiplier": r[2]} for r in rows]})
 
 
 @api_bp.route("/leveling/bonus-role", methods=["POST"])
@@ -745,7 +751,7 @@ def get_blacklist():
             return await cursor.fetchall()
 
     rows = run_async(fetch())
-    return jsonify({"roles": [{"id": r[0], "role_id": r[1]} for r in rows]})
+    return jsonify({"roles": [{"id": r[0], "role_id": str(r[1]) if r[1] is not None else None} for r in rows]})
 
 
 @api_bp.route("/leveling/blacklist", methods=["POST"])
@@ -956,7 +962,17 @@ def save_prestige_config_api():
 def get_prestige_roles_api():
     from utils.prestige import get_prestige_roles as _get_prestige_roles
     guild_id = get_session_guild_id()
-    return jsonify({"roles": run_async(_get_prestige_roles(guild_id))})
+    raw_roles = run_async(_get_prestige_roles(guild_id))
+    if isinstance(raw_roles, dict):
+        roles_out = {str(k): (str(v) if v is not None else None) for k, v in raw_roles.items()}
+    elif isinstance(raw_roles, list):
+        roles_out = [
+            dict(r, role_id=(str(r["role_id"]) if r.get("role_id") is not None else None))
+            for r in raw_roles
+        ]
+    else:
+        roles_out = raw_roles
+    return jsonify({"roles": roles_out})
 
 
 @api_bp.route("/leveling/prestige-role", methods=["POST"])

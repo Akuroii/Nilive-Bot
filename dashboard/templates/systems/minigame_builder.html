@@ -640,7 +640,7 @@ function buildPayload() {
         auto_spawn: mbState.auto_spawn,
         embed: clean,
         config: mbState.config,
-        channel_id: mbState.channel_id ? parseInt(mbState.channel_id) : null,
+        channel_id: mbState.channel_id ? String(mbState.channel_id) : null,
         rewards: readMbRewards().filter(r => r.reward_value),
     };
 }
@@ -737,7 +737,7 @@ async function loadTemplate(id, silent) {
         reward_type: r.reward_type, reward_value: r.reward_value,
         weight: r.weight, duration_hours: r.duration_hours,
     }));
-    mbState.channel_id = t.channel_id ? String(t.channel_id) : '';
+    mbState.channel_id = (t.channel_id_str || t.channel_id) ? String(t.channel_id_str || t.channel_id) : '';
     mbState.category_id = t.category_id;
     mbState.enabled = !!t.enabled;
     mbState.auto_spawn = !!t.auto_spawn;
@@ -755,7 +755,7 @@ async function loadTemplate(id, silent) {
             // Per-template override wins; else fall back to the guild
             // spawn channel (never clear a picker the admin set).
             const val = mbState.channel_id
-                || (mbState.configRoot && mbState.configRoot.channel_id ? String(mbState.configRoot.channel_id) : '');
+                || (mbState.configRoot && (mbState.configRoot.channel_id_str || mbState.configRoot.channel_id) ? String(mbState.configRoot.channel_id_str || mbState.configRoot.channel_id) : '');
             if (val) $(cp).val(val).trigger('change.select2');
         }
         const cat = document.getElementById('mb-category');
@@ -844,9 +844,10 @@ async function loadBotIdentity() {
     setTimeout(() => {
         if (!__mbPageActive) return;
         const cp = document.getElementById('mb-channel');
-        if (cp && !TEMPLATE_ID && mbState.configRoot && mbState.configRoot.channel_id) {
-            $(cp).val(String(mbState.configRoot.channel_id)).trigger('change.select2');
-            mbState.channel_id = String(mbState.configRoot.channel_id);
+        if (cp && !TEMPLATE_ID && mbState.configRoot && (mbState.configRoot.channel_id_str || mbState.configRoot.channel_id)) {
+            const cfgChan = String(mbState.configRoot.channel_id_str || mbState.configRoot.channel_id);
+            $(cp).val(cfgChan).trigger('change.select2');
+            mbState.channel_id = cfgChan;
         }
     }, 800);
     if (TEMPLATE_ID) {

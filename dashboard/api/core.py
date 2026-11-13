@@ -49,11 +49,13 @@ def get_guild_roles():
             "unassignable_label":  r.get("unassignable_label"),
         } for r in enriched_roles],
         "bot_top_role": {
-            "id":       info["bot_top_role"]["id"],
+            "id":       str(info["bot_top_role"]["id"]),
             "name":     info["bot_top_role"].get("name", "Nero"),
             "position": info["bot_top_role"].get("position", 0),
         } if info.get("bot_top_role") else None,
         "has_manage_roles": info.get("has_manage_roles", False),
+        "bot_status": info.get("bot_status", "unknown"),
+        "bot_status_error": info.get("bot_status_error"),
     })
 
 
@@ -61,17 +63,29 @@ def get_guild_roles():
 @require_api_permission(LEVEL_MODERATOR)
 def get_guild_channels():
     guild_id  = get_session_guild_id()
-    bot_token = os.getenv("DISCORD_TOKEN", "")
+    bot_token = os.getenv("DISCORD_TOKEN", "").strip()
     if not bot_token:
+        if os.getenv("DASHBOARD_DEMO_LOGIN") == "1" and str(guild_id) == os.getenv("DASHBOARD_DEMO_GUILD_ID", "900000000000000001"):
+            return jsonify({
+                "results": [
+                    {"id": "980000000000000001", "name": "general", "text": "general", "type_icon": "#", "category": "Text Channels", "category_id": "980000000000000000", "category_position": 0, "type": "text", "raw_type": 0, "position": 0},
+                    {"id": "980000000000000002", "name": "announcements", "text": "announcements", "type_icon": "megaphone", "category": "Text Channels", "category_id": "980000000000000000", "category_position": 0, "type": "announcement", "raw_type": 5, "position": 1},
+                ]
+            })
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    resp = _req.get(
-        f"https://discord.com/api/v10/guilds/{guild_id}/channels",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
-    )
-    if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
-    channels = resp.json()
+    try:
+        resp = _req.get(
+            f"https://discord.com/api/v10/guilds/{guild_id}/channels",
+            headers={"Authorization": f"Bot {bot_token}"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
+        channels = resp.json()
+    except Exception as exc:
+        return jsonify({"results": [], "error": f"Network error ({type(exc).__name__})"})
+    if not isinstance(channels, list):
+        return jsonify({"results": [], "error": "Malformed channels payload"})
     TYPE_ICON = {0: "#", 2: "speaker", 4: "folder", 5: "megaphone", 10: "thread", 11: "thread", 12: "thread", 13: "mic", 15: "forum"}
     TYPE_NAME = {0: "text", 2: "voice", 4: "category", 5: "announcement", 10: "thread", 11: "thread", 12: "thread", 13: "stage", 15: "forum"}
 
@@ -127,19 +141,27 @@ def get_guild_emojis():
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    resp = _req.get(
-        f"https://discord.com/api/v10/guilds/{guild_id}/emojis",
-        headers={"Authorization": f"Bot {bot_token}"},
-        timeout=8,
-    )
-    if resp.status_code != 200:
-        return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
-    emojis = resp.json()
+    try:
+        resp = _req.get(
+            f"https://discord.com/api/v10/guilds/{guild_id}/emojis",
+            headers={"Authorization": f"Bot {bot_token}"},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
+        emojis = resp.json()
+        if not isinstance(emojis, list):
+            return jsonify({"results": [], "error": "Malformed emojis payload"})
+    except (ValueError, TypeError):
+        return jsonify({"results": [], "error": "Malformed emojis payload"})
+    except Exception as exc:
+        return jsonify({"results": [], "error": f"Network error ({type(exc).__name__})"})
+
     results = [{
-        "id":       e["id"],
+        "id":       str(e["id"]),
         "name":     e["name"],
         "animated": bool(e.get("animated")),
-    } for e in emojis if e.get("id") and e.get("name")]
+    } for e in emojis if isinstance(e, dict) and e.get("id") and e.get("name")]
     results.sort(key=lambda e: e["name"].lower())
     return jsonify({"results": results})
 
@@ -167,15 +189,39 @@ def get_guild_emojis():
 # second way to enumerate the bot's guilds. Capped implicitly by the
 # project's own guild count (2-10), so no pagination/rate-limit concerns.
 @api_bp.route("/guild/emojis/external")
-@require_api_permission(LEVEL_MODERATOR)
+@require_api_permission(LEVEL_OWNER)
 def get_external_guild_emojis():
     current_guild_id = get_session_guild_id()
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:
         return jsonify({"servers": [], "error": "BOT_TOKEN not set"})
 
+    uid = current_user_id()
+    from dashboard.permissions import is_trusted_super_admin
     from dashboard.auth import fetch_bot_guilds_full
-    other_guilds = [g for g in fetch_bot_guilds_full() if int(g["id"]) != current_guild_id]
+
+    if is_trusted_super_admin(uid):
+        allowed_guild_ids = None  # Developer bypass covers all bot guilds
+    else:
+        async def _get_user_granted_guilds():
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute(
+                    """
+                    SELECT guild_id FROM dashboard_users
+                    WHERE user_id = ? AND enabled = 1
+                      AND permission_level IN ('owner', 'admin', 'moderator')
+                    """,
+                    (uid,),
+                )
+                return {int(row[0]) for row in await cur.fetchall()}
+
+        allowed_guild_ids = run_async(_get_user_granted_guilds())
+
+    other_guilds = [
+        g for g in fetch_bot_guilds_full()
+        if int(g["id"]) != current_guild_id
+        and (allowed_guild_ids is None or int(g["id"]) in allowed_guild_ids)
+    ]
 
     headers = {"Authorization": f"Bot {bot_token}"}
     servers = []
@@ -186,14 +232,17 @@ def get_external_guild_emojis():
                 headers=headers, timeout=8)
             if resp.status_code != 200:
                 continue
+            raw_emojis = resp.json()
+            if not isinstance(raw_emojis, list):
+                continue
             emojis = [{
-                "id": e["id"], "name": e["name"], "animated": bool(e.get("animated")),
-            } for e in resp.json() if e.get("id") and e.get("name")]
+                "id": str(e["id"]), "name": e["name"], "animated": bool(e.get("animated")),
+            } for e in raw_emojis if isinstance(e, dict) and e.get("id") and e.get("name")]
             if not emojis:
                 continue
             emojis.sort(key=lambda e: e["name"].lower())
             servers.append({
-                "guild_id": g["id"],
+                "guild_id": str(g["id"]),
                 "guild_name": g.get("name", "Unknown Server"),
                 "emojis": emojis,
             })

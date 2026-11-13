@@ -71,7 +71,11 @@ def get_mvp_config_api():
                 "SELECT * FROM mvp_config WHERE guild_id = ?", (guild_id,))
             row = await cursor.fetchone()
             if row:
-                return dict(zip([d[0] for d in cursor.description], row))
+                d = dict(zip([d[0] for d in cursor.description], row))
+                for k in ("guild_id", "mvp_role_id", "announce_channel_id"):
+                    if d.get(k) is not None:
+                        d[k] = str(d[k])
+                return d
         return {}
 
     return jsonify({"config": run_async(fetch())})

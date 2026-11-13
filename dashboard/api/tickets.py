@@ -80,7 +80,11 @@ def api_tickets_settings_get():
                 "SELECT * FROM ticket_settings WHERE guild_id=?", (guild_id,))
             row = await cur.fetchone()
             if row:
-                return dict(zip([d[0] for d in cur.description], row))
+                d = dict(zip([d[0] for d in cur.description], row))
+                for k in ("guild_id", "transcript_channel_id", "support_role_id"):
+                    if d.get(k) is not None:
+                        d[k] = str(d[k])
+                return d
         return {}
 
     return jsonify(run_async(get()))
@@ -142,12 +146,12 @@ def api_tickets_categories():
             rows = await cur.fetchall()
             return [{
                 "id": r[0], "name": r[1], "emoji": r[2],
-                "viewer_roles":      json.loads(r[3] or "[]"),
-                "closer_roles":      json.loads(r[4] or "[]"),
-                "auto_assign_roles": json.loads(r[5] or "[]"),
+                "viewer_roles":      [str(x) for x in json.loads(r[3] or "[]")],
+                "closer_roles":      [str(x) for x in json.loads(r[4] or "[]")],
+                "auto_assign_roles": [str(x) for x in json.loads(r[5] or "[]")],
                 "open_embed":        json.loads(r[6] or "{}"),
                 "enabled": r[7], "sort_order": r[8],
-                "required_role_id": r[9],
+                "required_role_id": str(r[9]) if r[9] is not None else None,
             } for r in rows]
 
     return jsonify({"categories": run_async(get())})
@@ -242,7 +246,8 @@ def api_tickets_panels():
             """, (guild_id,))
             rows = await cur.fetchall()
             return [{
-                "id": r[0], "name": r[1], "channel_id": r[2],
+                "id": r[0], "name": r[1],
+                "channel_id": str(r[2]) if r[2] is not None else None,
                 "embed_data": json.loads(r[3] or "{}"),
                 "buttons":    json.loads(r[4] or "[]"),
                 "created_at": r[5],
@@ -371,6 +376,6 @@ def api_tickets_ratings():
 
     rows = run_async(get())
     return jsonify([{
-        "user_id": r[0], "rating": r[1],
+        "user_id": str(r[0]) if r[0] is not None else None, "rating": r[1],
         "comment": r[2], "created_at": r[3],
     } for r in rows])
