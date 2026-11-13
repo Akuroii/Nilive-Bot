@@ -185,6 +185,15 @@ def fetch_guild_roles_and_bot_member(guild_id: int) -> tuple[list[dict] | None, 
     return roles, {"_bot_status": BotMemberStatus.UNKNOWN, "_error": member_err}, None
 
 
+def _format_role_ref(role_obj: dict | None, guild_id: int | str) -> str:
+    if not role_obj:
+        return "@Nero's role"
+    if str(role_obj.get("id")) == str(guild_id):
+        return "@everyone"
+    text = str(role_obj.get("name") or "Nero's role")
+    return text if text.startswith("@") else f"@{text}"
+
+
 def compute_role_assignability(
     guild_id: int,
     roles: list[dict],
@@ -245,29 +254,32 @@ def compute_role_assignability(
                     pass
         has_manage_roles = bool(total_perms & ADMINISTRATOR_PERM or total_perms & MANAGE_ROLES_PERM)
 
-    # Determine bot's highest role: higher position wins; on ties, smaller (older) role ID wins.
+    # Determine bot's highest role: higher position wins; on ties, smaller (older) role ID wins;
+    # @everyone (role.id == guild.id) is always the lowest role in Discord's hierarchy.
+    guild_id_str = str(guild_id)
     bot_roles_objs = [role_map[str(rid)] for rid in bot_role_ids if str(rid) in role_map]
 
     def role_hierarchy_key(r):
+        is_default = str(r.get("id")) == guild_id_str
         pos = int(r.get("position", 0))
         try:
             rid_int = int(r["id"])
         except (ValueError, TypeError):
             rid_int = 0
-        return (pos, -rid_int)
+        return (0 if is_default else 1, pos, -rid_int)
 
     bot_top_role = (
-        (max(bot_roles_objs, key=role_hierarchy_key) if bot_roles_objs else role_map.get(str(guild_id)))
+        (max(bot_roles_objs, key=role_hierarchy_key) if bot_roles_objs else role_map.get(guild_id_str))
         if active_member is not None
         else None
     )
-    bot_top_key = role_hierarchy_key(bot_top_role) if bot_top_role else (0, 0)
-    bot_top_name = bot_top_role.get("name", "Nero's role") if bot_top_role else "Nero's role"
+    bot_top_key = role_hierarchy_key(bot_top_role) if bot_top_role else (0, 0, 0)
+    bot_top_ref = _format_role_ref(bot_top_role, guild_id_str)
 
     enriched_roles = []
     for r in roles:
         rid_str = str(r["id"])
-        is_everyone = (rid_str == str(guild_id) or r.get("position", 0) == 0)
+        is_everyone = rid_str == guild_id_str
         is_managed = bool(r.get("managed", False))
         r_key = role_hierarchy_key(r)
 
@@ -297,12 +309,12 @@ def compute_role_assignability(
             label = "Managed by an integration"
         elif not is_owner and r_key >= bot_top_key:
             assignable = False
-            if r.get("position", 0) > (bot_top_role.get("position", 0) if bot_top_role else 0):
+            if r_key > bot_top_key:
                 reason = "above_bot"
-                label = f"Above @{bot_top_name}"
+                label = f"Above {bot_top_ref}"
             else:
                 reason = "equal_to_bot"
-                label = f"Equal to @{bot_top_name}"
+                label = f"Equal to {bot_top_ref}"
 
         enriched_role = dict(r)
         enriched_role["assignable"] = assignable
@@ -360,7 +372,7 @@ def validate_assignable_role(
         reason = role_obj.get("unassignable_reason")
         label = role_obj.get("unassignable_label", "Role is unassignable")
         role_name = role_obj.get("name", str_role)
-        top_name = info["bot_top_role"].get("name", "Nero's role") if info.get("bot_top_role") else "Nero's role"
+        top_ref = _format_role_ref(info.get("bot_top_role"), guild_id)
 
         if reason == "bot_status_unknown":
             detail = info.get("bot_status_error") or label
@@ -372,7 +384,7 @@ def validate_assignable_role(
         elif reason == "managed":
             return False, f"Role @{role_name} is managed by an external integration (bot/booster) and cannot be assigned."
         elif reason in ("above_bot", "equal_to_bot"):
-            return False, f"Nero's highest role (@{top_name}) must be above @{role_name} in Server Settings > Roles."
+            return False, f"Nero's highest role ({top_ref}) must be above @{role_name} in Server Settings > Roles."
         else:
             return False, f"Role @{role_name} cannot be assigned by Nero ({label})."
 

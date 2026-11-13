@@ -267,6 +267,112 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             self.assertEqual(live["nick"], "Nero Guild Nick")
             self.assertFalse(any("/members/@me" in u for u in called))
 
+    def test_issue_a_position_zero_custom_role_and_everyone_hierarchy(self):
+        older_pos0_id = str(SNOWFLAKE_GUILD + 10)
+        bot_pos0_id = str(SNOWFLAKE_GUILD + 20)
+        newer_pos0_id = str(SNOWFLAKE_GUILD + 30)
+        bot_high_id = str(SNOWFLAKE_GUILD + 40)
+
+        base_roles = [
+            {"id": str(SNOWFLAKE_GUILD), "name": "Nilive Community", "position": 0, "color": 0, "managed": False, "permissions": "0"},
+            {"id": older_pos0_id, "name": "OlderPos0", "position": 0, "color": 0x10B981, "managed": False, "permissions": "0"},
+            {"id": bot_pos0_id, "name": "BotCustomPos0", "position": 0, "color": 0x8B5CF6, "managed": False, "permissions": str(rv.MANAGE_ROLES_PERM)},
+            {"id": newer_pos0_id, "name": "NewerPos0", "position": 0, "color": 0xF59E0B, "managed": False, "permissions": "0"},
+            {"id": bot_high_id, "name": "NeroHigh", "position": 2, "color": 0x8B5CF6, "managed": True, "permissions": str(rv.MANAGE_ROLES_PERM)},
+        ]
+
+        # Case 1: Bot has a higher custom role (position 2) -> all non-@everyone roles at
+        # position 0 are assignable, while actual @everyone (id == guild_id) stays unassignable.
+        member_high = {"user": {"id": BOT_USER_ID}, "roles": [bot_high_id]}
+        info_high = rv.compute_role_assignability(SNOWFLAKE_GUILD, base_roles, member_high)
+        self.assertFalse(info_high["role_map"][str(SNOWFLAKE_GUILD)]["assignable"])
+        self.assertEqual(info_high["role_map"][str(SNOWFLAKE_GUILD)]["unassignable_reason"], "everyone")
+        self.assertTrue(info_high["role_map"][older_pos0_id]["assignable"])
+        self.assertIsNone(info_high["role_map"][older_pos0_id]["unassignable_reason"])
+        self.assertTrue(info_high["role_map"][newer_pos0_id]["assignable"])
+
+        # Case 2: Same-position tie at position 0 -> smaller (older) role ID is higher in Discord,
+        # larger (newer) role ID is lower and assignable; @everyone stays strictly lowest.
+        member_pos0 = {"user": {"id": BOT_USER_ID}, "roles": [bot_pos0_id]}
+        info_tie = rv.compute_role_assignability(SNOWFLAKE_GUILD, base_roles, member_pos0)
+        self.assertFalse(info_tie["role_map"][str(SNOWFLAKE_GUILD)]["assignable"])
+        self.assertEqual(info_tie["role_map"][str(SNOWFLAKE_GUILD)]["unassignable_reason"], "everyone")
+        self.assertFalse(info_tie["role_map"][older_pos0_id]["assignable"])
+        self.assertEqual(info_tie["role_map"][older_pos0_id]["unassignable_reason"], "above_bot")
+        self.assertFalse(info_tie["role_map"][bot_pos0_id]["assignable"])
+        self.assertEqual(info_tie["role_map"][bot_pos0_id]["unassignable_reason"], "equal_to_bot")
+        self.assertTrue(info_tie["role_map"][newer_pos0_id]["assignable"])
+        self.assertIsNone(info_tie["role_map"][newer_pos0_id]["unassignable_reason"])
+
+        # Case 3: Bot has ONLY its default @everyone role (granted MANAGE_ROLES on @everyone).
+        # Even though @everyone has the smallest snowflake ID (id == guild_id), @everyone is
+        # always the lowest role in Discord, so custom roles at position 0 are above @everyone.
+        roles_default_perm = [
+            dict(r, permissions=str(rv.MANAGE_ROLES_PERM)) if r["id"] == str(SNOWFLAKE_GUILD) else dict(r)
+            for r in base_roles
+        ]
+        member_default_only = {"user": {"id": BOT_USER_ID}, "roles": []}
+        info_default = rv.compute_role_assignability(SNOWFLAKE_GUILD, roles_default_perm, member_default_only)
+        self.assertEqual(info_default["bot_top_role"]["id"], str(SNOWFLAKE_GUILD))
+        self.assertEqual(info_default["bot_top_role"]["name"], "Nilive Community")
+        self.assertTrue(info_default["has_manage_roles"])
+        self.assertFalse(info_default["role_map"][str(SNOWFLAKE_GUILD)]["assignable"])
+        self.assertEqual(info_default["role_map"][str(SNOWFLAKE_GUILD)]["unassignable_reason"], "everyone")
+        self.assertFalse(info_default["role_map"][newer_pos0_id]["assignable"])
+        self.assertEqual(info_default["role_map"][newer_pos0_id]["unassignable_reason"], "above_bot")
+        self.assertEqual(info_default["role_map"][newer_pos0_id]["unassignable_label"], "Above @everyone")
+        self.assertNotIn("@@everyone", info_default["role_map"][newer_pos0_id]["unassignable_label"])
+
+        # Case 4: Confirm GET /api/guild/roles returns custom roles at position 0 as assignable
+        # without modifying core.py, and validate_assignable_role() accepts them (and always
+        # identifies the default role as "@everyone" — never the guild name or "@@everyone").
+        rv.clear_bot_identity_cache()
+        self._login()
+
+        def fake_default_only_api(url, **kwargs):
+            if url.endswith("/users/@me"):
+                return _mock_resp(200, {"id": BOT_USER_ID})
+            if url.endswith("/roles"):
+                return _mock_resp(200, roles_default_perm)
+            if url.endswith(f"/members/{BOT_USER_ID}"):
+                return _mock_resp(200, member_default_only)
+            return _mock_resp(404, {"code": 0})
+
+        with patch("dashboard.utils.role_validation._req.get", side_effect=fake_default_only_api):
+            ok_def, err_def = rv.validate_assignable_role(SNOWFLAKE_GUILD, newer_pos0_id)
+            self.assertFalse(ok_def)
+            self.assertIn("(@everyone)", err_def or "")
+            self.assertNotIn("Nilive Community", err_def or "")
+            self.assertNotIn("@@everyone", err_def or "")
+
+        def fake_pos0_api(url, **kwargs):
+            if url.endswith("/users/@me"):
+                return _mock_resp(200, {"id": BOT_USER_ID})
+            if url.endswith("/roles"):
+                return _mock_resp(200, base_roles)
+            if url.endswith(f"/members/{BOT_USER_ID}"):
+                return _mock_resp(200, member_high)
+            return _mock_resp(404, {"code": 0})
+
+        with patch("dashboard.utils.role_validation._req.get", side_effect=fake_pos0_api):
+            ok_custom, err_custom = rv.validate_assignable_role(SNOWFLAKE_GUILD, newer_pos0_id)
+            self.assertTrue(ok_custom, err_custom)
+            ok_every, err_every = rv.validate_assignable_role(SNOWFLAKE_GUILD, str(SNOWFLAKE_GUILD))
+            self.assertFalse(ok_every)
+            self.assertIn("@everyone", err_every or "")
+
+            api_res = self.client.get("/api/guild/roles", headers={"X-Guild-ID": str(SNOWFLAKE_GUILD)})
+            self.assertEqual(api_res.status_code, 200)
+            api_json = api_res.get_json()
+            self.assertEqual(api_json.get("bot_status"), "present")
+            by_id = {r["id"]: r for r in api_json["results"]}
+            self.assertIn(newer_pos0_id, by_id)
+            self.assertTrue(by_id[newer_pos0_id]["assignable"])
+            self.assertIsNone(by_id[newer_pos0_id]["unassignable_reason"])
+            self.assertIn(str(SNOWFLAKE_GUILD), by_id)
+            self.assertFalse(by_id[str(SNOWFLAKE_GUILD)]["assignable"])
+            self.assertEqual(by_id[str(SNOWFLAKE_GUILD)]["unassignable_reason"], "everyone")
+
     # ── 2. ISSUE B: Server Discovery Pagination & Indeterminate Handling ───
 
     def test_issue_b_server_discovery_pagination_and_failure_preservation(self):

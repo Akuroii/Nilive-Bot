@@ -1,24 +1,50 @@
 window.NeroSelect = (function () {
     const _optionsCache = {};
+    const _inflight = {};
+    const _ABSENT_CACHE_TTL_MS = 30000;
 
     async function fetchOptions(kind) {
-        if (_optionsCache[kind]) {
-            return { results: _optionsCache[kind], ok: true };
+        const now = Date.now();
+        const cached = _optionsCache[kind];
+        if (cached && (!cached.expiresAt || cached.expiresAt > now)) {
+            return { results: cached.results, ok: true, botStatus: cached.botStatus };
+        }
+        if (cached) {
+            delete _optionsCache[kind];
+        }
+        if (_inflight[kind]) {
+            return _inflight[kind];
         }
         const url = kind === 'role' ? '/api/guild/roles' : '/api/guild/channels';
-        try {
-            const res = await fetch(url);
-            const data = await res.json();
-            if (!res.ok || (data && data.error)) {
-                return { results: [], ok: false };
+        _inflight[kind] = (async () => {
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                if (!res.ok || (data && data.error)) {
+                    return { results: [], ok: false, botStatus: 'unknown' };
+                }
+                const results = Array.isArray(data && data.results) ? data.results : [];
+                const botStatus = kind === 'role'
+                    ? ((data && data.bot_status) || 'present')
+                    : 'present';
+                if (botStatus === 'present') {
+                    _optionsCache[kind] = { results, expiresAt: 0, botStatus };
+                } else if (botStatus === 'absent') {
+                    _optionsCache[kind] = {
+                        results,
+                        expiresAt: Date.now() + _ABSENT_CACHE_TTL_MS,
+                        botStatus,
+                    };
+                }
+                return { results, ok: true, botStatus };
+            } catch (e) {
+                console.error('NeroSelect fetch failed', e);
+                return { results: [], ok: false, botStatus: 'unknown' };
+            } finally {
+                delete _inflight[kind];
             }
-            const results = Array.isArray(data && data.results) ? data.results : [];
-            _optionsCache[kind] = results;
-            return { results, ok: true };
-        } catch (e) {
-            console.error('NeroSelect fetch failed', e);
-            return { results: [], ok: false };
-        }
+        })();
+        return _inflight[kind];
     }
 
     // ── Display helpers ────────────────────────────────────────────────
@@ -236,22 +262,37 @@ window.NeroSelect = (function () {
     }
 
     async function initOne(el, kind) {
-        if (!el || el.dataset.nsInit === '1') return; // don't double-init
-        const { results, ok } = await fetchOptions(kind);
+        if (!el || (el.dataset.nsInit === '1' && el.dataset.nsDegraded !== '1') || el.dataset.nsFetching === '1') return;
+        const wasInit = el.dataset.nsInit === '1';
+        el.dataset.nsFetching = '1';
+        const { results, ok, botStatus } = await fetchOptions(kind);
+        delete el.dataset.nsFetching;
         if (!ok) return;
         el.dataset.nsInit = '1';
+        if (kind === 'role' && botStatus === 'unknown') {
+            el.dataset.nsDegraded = '1';
+        } else {
+            delete el.dataset.nsDegraded;
+        }
 
-        const preselect = el.dataset.value || '';
+        const liveVal = wasInit
+            ? (typeof $ !== 'undefined' ? $(el).val() : el.value)
+            : null;
+        const preselect = liveVal != null ? String(liveVal) : (el.dataset.value || '');
         const assignableOnly = (el.dataset.assignableOnly === 'true' || el.classList.contains('nero-assignable-role-picker'));
         const placeholder = kind === 'role' ? 'Select a role...' : 'Select a channel...';
 
         if (typeof $ === 'undefined') {
             el.innerHTML = buildNativeMarkup(kind, results, id => String(id) === String(preselect), assignableOnly, placeholder);
             if (preselect) el.value = String(preselect);
+            else if (wasInit) el.value = '';
             return;
         }
 
         const $el = $(el);
+        if (wasInit && $el.hasClass && $el.hasClass('select2-hidden-accessible') && typeof $el.select2 === 'function') {
+            try { $el.select2('destroy'); } catch (e) { /* ignore */ }
+        }
         // Build <option> tags so a plain value (no JS) still works
         $el.empty();
         $el.append('<option value=""></option>');
@@ -267,12 +308,14 @@ window.NeroSelect = (function () {
                 templateSelection: kind === 'role' ? formatRole : formatChannel,
             });
             if (preselect) $el.val(preselect).trigger('change.select2');
+            else if (wasInit) $el.val('').trigger('change.select2');
         } catch (e) {
             // select2 itself failed (blocked CDN, version mismatch, etc) —
             // populate readable native <select> with unassignable labels intact.
             console.error('NeroSelect: select2 init failed, using plain <select>', e);
             el.innerHTML = buildNativeMarkup(kind, results, id => String(id) === String(preselect), assignableOnly, placeholder);
             if (preselect) el.value = String(preselect);
+            else if (wasInit) el.value = '';
         }
     }
 
@@ -284,13 +327,21 @@ window.NeroSelect = (function () {
 
     // ── Lazy multi-select (Commands → per-command Edit panel) ──────────
     async function initMulti(el, kind, preselect) {
-        if (!el || el.dataset.nsInit === '1') return;
-        const { results, ok } = await fetchOptions(kind);
+        if (!el || (el.dataset.nsInit === '1' && el.dataset.nsDegraded !== '1') || el.dataset.nsFetching === '1') return;
+        const wasInit = el.dataset.nsInit === '1';
+        el.dataset.nsFetching = '1';
+        const { results, ok, botStatus } = await fetchOptions(kind);
+        delete el.dataset.nsFetching;
         if (!ok) return;
         el.dataset.nsInit = '1';
+        if (kind === 'role' && botStatus === 'unknown') {
+            el.dataset.nsDegraded = '1';
+        } else {
+            delete el.dataset.nsDegraded;
+        }
         el.setAttribute('multiple', 'multiple');
 
-        const preselectStr = (preselect || []).map(String);
+        const preselectStr = (preselect != null ? preselect : (wasInit ? getMultiValues(el) : [])).map(String);
         const assignableOnly = (el.dataset.assignableOnly === 'true' || el.classList.contains('nero-assignable-role-picker'));
 
         if (typeof $ === 'undefined') {
@@ -299,6 +350,9 @@ window.NeroSelect = (function () {
         }
 
         const $el = $(el);
+        if (wasInit && $el.hasClass && $el.hasClass('select2-hidden-accessible') && typeof $el.select2 === 'function') {
+            try { $el.select2('destroy'); } catch (e) { /* ignore */ }
+        }
         $el.empty();
         populateOptions($el, kind, results, id => preselectStr.includes(String(id)), assignableOnly);
 

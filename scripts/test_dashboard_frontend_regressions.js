@@ -613,6 +613,310 @@ async function testNeroSelectResilience() {
     assert(selectEl.innerHTML.includes('Above @Nero'), 'Native fallback must include unassignable reason');
 }
 
+async function testNeroSelectBotStatusCacheAndRetry() {
+    const code = readFile('dashboard/static/js/nero-select.js');
+
+    function makePicker(assignableOnly = true, initialValue = '') {
+        const appended = [];
+        return {
+            dataset: { value: initialValue, assignableOnly: assignableOnly ? 'true' : 'false' },
+            classList: { contains: () => false },
+            innerHTML: '',
+            value: null,
+            appended,
+            select2Active: false,
+            select2InitCount: 0,
+            select2DestroyCount: 0,
+            triggerEvents: [],
+            setAttribute() {},
+        };
+    }
+
+    function makeJqueryStub() {
+        const jq = (el) => {
+            const api = {
+                empty() { el.appended.length = 0; return api; },
+                append(html) {
+                    const str = String(html);
+                    el.appended.push(str);
+                    if (el.value === null && str.includes('value=""')) {
+                        el.value = '';
+                    }
+                    return api;
+                },
+                select2(arg) {
+                    if (arg === 'destroy') {
+                        el.select2DestroyCount += 1;
+                        el.select2Active = false;
+                    } else {
+                        el.select2InitCount += 1;
+                        el.select2Active = true;
+                    }
+                    return api;
+                },
+                val(v) {
+                    if (arguments.length === 0) return el.value;
+                    el.value = v == null ? null : (Array.isArray(v) ? v.slice() : String(v));
+                    return api;
+                },
+                trigger(ev) { el.triggerEvents.push(ev); return api; },
+                hasClass(cls) { return cls === 'select2-hidden-accessible' ? !!el.select2Active : false; },
+            };
+            return api;
+        };
+        return jq;
+    }
+
+    // Sequence A: HTTP 200 bot_status="unknown" -> HTTP 200 bot_status="present"
+    // Must NOT poison _optionsCache['role'], and must recover without a browser reload
+    // both on the next picker initialization AND when re-initializing a degraded Select2 picker
+    // (exercising select2('destroy')/rebuild, preserving selected role, respecting intentionally
+    // cleared selections without restoring dataset.value, and avoiding duplicate options).
+    {
+        let fetchCalls = 0;
+        let currentStatus = 'unknown';
+        const SAVED_ROLE_ID = '1088248319982006322';
+        const REWARD_ROLE_ID = '1088248319982006323';
+        const picker1 = makePicker(true, SAVED_ROLE_ID);
+        const clearedPicker = makePicker(true, SAVED_ROLE_ID);
+        const picker2 = makePicker(true);
+        const picker3 = makePicker(true);
+
+        const sandbox = {
+            Date: { now: () => 1000 },
+            console: { error() {}, warn() {}, log() {} },
+            $: makeJqueryStub(),
+            fetch: async () => {
+                fetchCalls += 1;
+                const isUnknown = currentStatus === 'unknown';
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        bot_status: isUnknown ? 'unknown' : 'present',
+                        results: [
+                            {
+                                id: SAVED_ROLE_ID,
+                                name: 'SavedReward',
+                                assignable: !isUnknown,
+                                unassignable_reason: isUnknown ? 'bot_status_unknown' : null,
+                                unassignable_label: isUnknown ? "Unable to verify Nero's server permissions right now" : null,
+                            },
+                            {
+                                id: REWARD_ROLE_ID,
+                                name: 'Rewardable',
+                                assignable: !isUnknown,
+                                unassignable_reason: isUnknown ? 'bot_status_unknown' : null,
+                                unassignable_label: isUnknown ? "Unable to verify Nero's server permissions right now" : null,
+                            },
+                        ],
+                    }),
+                };
+            },
+            document: { addEventListener() {}, querySelectorAll: () => [] },
+            window: null,
+        };
+        sandbox.window = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox, { filename: 'nero-select.js' });
+
+        await sandbox.window.NeroSelect.initOne(picker1, 'role');
+        assert.strictEqual(fetchCalls, 1);
+        assert.strictEqual(picker1.dataset.nsDegraded, '1', 'Unknown bot_status must mark picker degraded');
+        assert.strictEqual(picker1.select2InitCount, 1);
+        assert.strictEqual(picker1.select2Active, true);
+        assert.strictEqual(picker1.value, SAVED_ROLE_ID, 'Initial preselected role must be set on Select2');
+        assert.strictEqual(picker1.appended.length, 3, 'Initial render has 1 placeholder + 2 role options');
+        assert(picker1.appended.some(h => h.includes('Rewardable') && h.includes('disabled')),
+            'First picker under bot_status=unknown must keep non-selected assignable-only role disabled');
+
+        // Initialize a second picker with SAVED_ROLE_ID in dataset.value under bot_status="unknown",
+        // then intentionally clear its live selection while leaving dataset.value unchanged.
+        await sandbox.window.NeroSelect.initOne(clearedPicker, 'role');
+        assert.strictEqual(fetchCalls, 2, 'bot_status=unknown is uncached across degraded inits');
+        assert.strictEqual(clearedPicker.dataset.nsDegraded, '1');
+        assert.strictEqual(clearedPicker.value, SAVED_ROLE_ID);
+        sandbox.$(clearedPicker).val('').trigger('change.select2');
+        assert.strictEqual(clearedPicker.value, '');
+        assert.strictEqual(clearedPicker.dataset.value, SAVED_ROLE_ID);
+
+        // Clear dataset.value on picker1 so retry proves $(el).val() preserves its live selection
+        picker1.dataset.value = '';
+
+        // Discord recovers without a full browser reload: next picker fetches fresh and gets assignable roles
+        currentStatus = 'present';
+        await sandbox.window.NeroSelect.initOne(picker2, 'role');
+        assert.strictEqual(fetchCalls, 3, 'bot_status=unknown must not poison _optionsCache across subsequent pickers');
+        assert.strictEqual(picker2.dataset.nsDegraded, undefined);
+        const p2Opt = picker2.appended.find(h => h.includes('Rewardable'));
+        assert(p2Opt && !p2Opt.includes('disabled'),
+            'Second picker after recovery must receive usable assignable roles');
+
+        // Subsequent picker uses the healthy cached 'present' response without extra Discord calls
+        await sandbox.window.NeroSelect.initOne(picker3, 'role');
+        assert.strictEqual(fetchCalls, 3, 'Healthy bot_status=present response must be cached');
+
+        // Re-running initOne/initAll on the degraded first picker destroys & rebuilds Select2,
+        // preserves its selected role, and does not duplicate <option> elements.
+        await sandbox.window.NeroSelect.initOne(picker1, 'role');
+        assert.strictEqual(fetchCalls, 3, 'Degraded picker retry reuses fresh present cache');
+        assert.strictEqual(picker1.dataset.nsDegraded, undefined, 'Retry must clear degraded flag');
+        assert.strictEqual(picker1.select2DestroyCount, 1, 'Retry must destroy prior Select2 instance before rebuild');
+        assert.strictEqual(picker1.select2InitCount, 2, 'Retry must re-initialize Select2');
+        assert.strictEqual(picker1.select2Active, true);
+        assert.strictEqual(picker1.value, SAVED_ROLE_ID, 'Retry must preserve selected role value');
+        assert.strictEqual(picker1.appended.length, 3, 'Retry must not duplicate existing <option> tags');
+        const savedMatches = picker1.appended.filter(h => h.includes(`value="${SAVED_ROLE_ID}"`));
+        assert.strictEqual(savedMatches.length, 1, 'Selected role option must appear exactly once');
+        assert(savedMatches[0].includes('selected'), 'Selected role option must remain marked selected');
+        const p1Upgraded = picker1.appended.find(h => h.includes('Rewardable'));
+        assert(p1Upgraded && !p1Upgraded.includes('disabled'),
+            'Degraded picker must upgrade to usable assignable roles on retry without browser reload');
+
+        // Re-running initOne on clearedPicker must NOT restore dataset.value when live value was ''
+        await sandbox.window.NeroSelect.initOne(clearedPicker, 'role');
+        assert.strictEqual(fetchCalls, 3);
+        assert.strictEqual(clearedPicker.dataset.nsDegraded, undefined);
+        assert.strictEqual(clearedPicker.select2DestroyCount, 1);
+        assert.strictEqual(clearedPicker.select2InitCount, 2);
+        assert.strictEqual(clearedPicker.value, '',
+            'Intentionally cleared live selection must not restore old dataset.value on retry');
+        assert.strictEqual(clearedPicker.appended.length, 3,
+            'Retry on cleared picker must not duplicate <option> tags');
+        assert(!clearedPicker.appended.some(h => h.includes('selected')),
+            'No role option may be marked selected after user intentionally cleared selection');
+    }
+
+    // Sequence B: Confirmed bot_status="absent" uses a short TTL cache to avoid hammering Discord
+    // on every picker init, then re-checks cleanly once the TTL expires without page reload.
+    {
+        let nowMs = 10000;
+        let fetchCalls = 0;
+        let currentStatus = 'absent';
+        const pA1 = makePicker(true);
+        const pA2 = makePicker(true);
+        const pA3 = makePicker(true);
+
+        const sandbox = {
+            Date: { now: () => nowMs },
+            console: { error() {}, warn() {}, log() {} },
+            $: makeJqueryStub(),
+            fetch: async () => {
+                fetchCalls += 1;
+                const assignable = currentStatus === 'present';
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        bot_status: currentStatus,
+                        results: [{
+                            id: '1088248319982006323',
+                            name: 'Rewardable',
+                            assignable,
+                            unassignable_reason: assignable ? null : 'bot_missing',
+                            unassignable_label: assignable ? null : 'Nero not found in server',
+                        }],
+                    }),
+                };
+            },
+            document: { addEventListener() {}, querySelectorAll: () => [] },
+            window: null,
+        };
+        sandbox.window = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox, { filename: 'nero-select.js' });
+
+        await sandbox.window.NeroSelect.initOne(pA1, 'role');
+        assert.strictEqual(fetchCalls, 1);
+
+        nowMs += 5000; // Within 30s TTL -> must reuse short-lived absent cache
+        await sandbox.window.NeroSelect.initOne(pA2, 'role');
+        assert.strictEqual(fetchCalls, 1, 'Confirmed absent status must short-cache to avoid repeated Discord calls per picker');
+
+        nowMs += 30000; // Past 30s TTL and bot was invited -> refreshes without reload
+        currentStatus = 'present';
+        await sandbox.window.NeroSelect.initOne(pA3, 'role');
+        assert.strictEqual(fetchCalls, 2, 'Expired absent cache must re-fetch on next picker init');
+        const pA3Opt = pA3.appended.find(h => h.includes('Rewardable'));
+        assert(pA3Opt && !pA3Opt.includes('disabled'),
+            'Picker initialized after absent cache expiry and bot invite must receive assignable roles');
+    }
+
+    // Sequence C: Two simultaneous picker initializations share one in-flight /api/guild/roles request,
+    // and failed requests clear _inflight cleanly so subsequent retries are not stuck.
+    {
+        let fetchCalls = 0;
+        let shouldFail = true;
+        let releaseFetch = null;
+        const cFail1 = makePicker(true);
+        const cFail2 = makePicker(true);
+        const cOk1 = makePicker(true);
+        const cOk2 = makePicker(true);
+
+        const sandbox = {
+            Date: { now: () => 20000 },
+            console: { error() {}, warn() {}, log() {} },
+            $: makeJqueryStub(),
+            fetch: () => {
+                fetchCalls += 1;
+                return new Promise((resolve, reject) => {
+                    releaseFetch = () => {
+                        if (shouldFail) {
+                            reject(new Error('network blip'));
+                            return;
+                        }
+                        resolve({
+                            ok: true,
+                            status: 200,
+                            json: async () => ({
+                                bot_status: 'present',
+                                results: [{
+                                    id: '1088248319982006323',
+                                    name: 'ConcurrentRole',
+                                    assignable: true,
+                                    unassignable_reason: null,
+                                    unassignable_label: null,
+                                }],
+                            }),
+                        });
+                    };
+                });
+            },
+            document: { addEventListener() {}, querySelectorAll: () => [] },
+            window: null,
+        };
+        sandbox.window = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(code, sandbox, { filename: 'nero-select.js' });
+
+        // First simultaneous pair fails -> shares 1 in-flight request and clears _inflight in finally
+        const failPair = Promise.all([
+            sandbox.window.NeroSelect.initOne(cFail1, 'role'),
+            sandbox.window.NeroSelect.initOne(cFail2, 'role'),
+        ]);
+        assert.strictEqual(fetchCalls, 1, 'Simultaneous failed inits must share 1 in-flight fetch');
+        releaseFetch();
+        await failPair;
+        assert.strictEqual(cFail1.dataset.nsInit, undefined);
+        assert.strictEqual(cFail2.dataset.nsInit, undefined);
+
+        // Next simultaneous pair succeeds -> proves _inflight was cleared and shares 1 request
+        shouldFail = false;
+        const okPair = Promise.all([
+            sandbox.window.NeroSelect.initOne(cOk1, 'role'),
+            sandbox.window.NeroSelect.initOne(cOk2, 'role'),
+        ]);
+        assert.strictEqual(fetchCalls, 2, 'Simultaneous picker initializations must share exactly one in-flight /api/guild/roles request');
+        releaseFetch();
+        await okPair;
+        assert.strictEqual(fetchCalls, 2);
+        assert.strictEqual(cOk1.dataset.nsInit, '1');
+        assert.strictEqual(cOk2.dataset.nsInit, '1');
+        assert(cOk1.appended.some(h => h.includes('ConcurrentRole') && !h.includes('disabled')));
+        assert(cOk2.appended.some(h => h.includes('ConcurrentRole') && !h.includes('disabled')));
+    }
+}
+
 function testServerSelectDegradedTemplate() {
     const html = readFile('dashboard/templates/server_select.html');
     assert(html.includes('data.degraded'), 'server_select.html must inspect degraded discovery flag');
@@ -625,6 +929,7 @@ function testServerSelectDegradedTemplate() {
     await testTicketsCategoryRenderAndEdit();
     await testTemplateEscapingAndMinigameSnowflake();
     await testNeroSelectResilience();
+    await testNeroSelectBotStatusCacheAndRetry();
     testServerSelectDegradedTemplate();
     console.log('All Dashboard frontend regression checks passed.');
 })().catch((err) => {
