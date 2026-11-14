@@ -76,13 +76,20 @@ def is_usable(metadata: dict | None) -> bool:
 
 
 async def use_potion(guild_id: int, user_id: int, item_name: str, *,
-                     entry_key: str | None = None) -> dict:
+                     entry_key: str | None = None,
+                     expected_quantity: int | None = None) -> dict:
     """Commit consumption, provenance and the XP effect as one SQLite transaction.
 
     Metadata is read under the same write transaction as consumption. An error
     or cancellation before commit rolls everything back; there is no refund
-    transaction and no window with only consumption durably recorded. This does
-    not deduplicate separate UI requests when multiple copies are owned.
+    transaction and no window with only consumption durably recorded.
+
+    `expected_quantity` is the stack size the caller's panel was rendered
+    with. It is compared under the write lock, so one rendered panel can
+    consume at most one potion: a repeated or concurrent click from the same
+    (now stale) panel finds a different quantity and is refused instead of
+    silently using a second copy. Callers that omit it keep the old
+    behaviour, where every call consumes one potion.
     """
     import json
     from utils.inventory import remove_item, InsufficientItems
@@ -101,6 +108,9 @@ async def use_potion(guild_id: int, user_id: int, item_name: str, *,
                         "error": f"You don't own **{item_name}**."}
             if entry_key is not None and entry_key != f"i:{owned[3]}":
                 return {"success": False, "error": "That potion entry is no longer available."}
+            if expected_quantity is not None and int(owned[0]) != int(expected_quantity):
+                return {"success": False,
+                        "error": "That potion stack changed. Open it again."}
             if owned[1] != POTION_ITEM_TYPE:
                 return {"success": False,
                         "error": f"**{item_name}** isn't a potion."}

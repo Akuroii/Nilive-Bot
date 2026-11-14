@@ -30,57 +30,14 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
             await db.execute('DELETE FROM trade_history')
             await db.commit()
 
-    async def test_acquire_drop_and_isolation(self):
+    async def test_acquire_and_isolation(self):
         await inventory.give_item(1, 2, 'Sword', 3, source='mission')
         await inventory.give_item(1, 3, 'Other', 1, source='event')
-        await inventory.drop_item(1, 2, 'Sword')
         events = await inventory_activity.get_activity_page(1, 2)
         self.assertEqual([(e['event_type'], e['quantity'], e['source']) for e in events],
-                         [('dropped', 3, 'inventory'), ('acquired', 3, 'mission')])
+                         [('acquired', 3, 'mission')])
         self.assertEqual(await inventory_activity.get_activity_page(2, 2), [])
         self.assertTrue(await inventory_activity.get_activity_start())
-
-    async def test_member_drop_confirmation_preserves_permanent_behavior(self):
-        from types import SimpleNamespace
-        from cogs import wallet
-        await inventory.give_item(1, 2, 'Sword', 3)
-        item = (await inventory.get_inventory_entries(1, 2))[0]
-        interaction = SimpleNamespace(
-            client=object(), message=object(),
-            response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock()))
-        with patch.object(wallet, '_brand_inventory'), \
-             patch.object(wallet, 'open_inventory_panel', AsyncMock()) as back:
-            await wallet.open_drop_confirm(interaction, 1, 2, wallet.TAB_ITEMS, item['entry_key'])
-            view = interaction.response.edit_message.await_args.kwargs['view']
-            await view.confirm_button.callback(interaction)
-            back.assert_awaited_once()
-        self.assertFalse(await inventory.has_item(1, 2, 'Sword'))
-        self.assertEqual([e['event_type'] for e in await inventory_activity.get_activity_page(1, 2)],
-                         ['dropped', 'acquired'])
-        view.stop()
-
-    async def test_member_cannot_drop_live_timed_holding(self):
-        from datetime import datetime, timedelta, timezone
-        from types import SimpleNamespace
-        from cogs import wallet
-        from utils import timed_ownership as timed
-        future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-        ident = await timed.grant_timed_holding(1, 2, 'Clock', expires_at=future)
-        interaction = SimpleNamespace(response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock()))
-        await wallet.open_drop_confirm(interaction, 1, 2, wallet.TAB_ITEMS, f'h:{ident}')
-        interaction.response.edit_message.assert_not_awaited()
-        self.assertIn('cannot be dropped', interaction.response.send_message.await_args.args[0])
-        self.assertIsNotNone(await timed.get_timed_holding(f'h:{ident}'))
-        self.assertEqual([e['event_type'] for e in await inventory_activity.get_activity_page(1, 2)], ['acquired'])
-
-    async def test_drop_rejects_replaced_stack_id(self):
-        await inventory.give_item(1, 2, 'Sword', 1)
-        old_id = (await inventory.get_inventory(1, 2))[0]['id']
-        self.assertTrue((await inventory.drop_item(1, 2, 'Sword', expected_id=old_id))['success'])
-        await inventory.give_item(1, 2, 'Sword', 2)
-        self.assertFalse((await inventory.drop_item(1, 2, 'Sword', expected_id=old_id))['success'])
-        self.assertTrue(await inventory.has_item(1, 2, 'Sword', 2))
-        self.assertEqual([e['event_type'] for e in await inventory_activity.get_activity_page(1, 2)].count('dropped'), 1)
 
     async def test_caller_rollback_discards_event_and_inventory(self):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -196,18 +153,17 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
         events = await inventory_activity.get_activity_page(1, 2)
         self.assertEqual([e['event_type'] for e in events], ['expired', 'acquired'])
 
-    async def test_timed_drop_identity_and_event(self):
+    async def test_live_timed_holding_cannot_be_removed_before_expiry(self):
+        """Only real expiry retires a live timed holding."""
         from datetime import datetime, timedelta, timezone
         from utils import timed_ownership as timed
         future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
         holding_id = await timed.grant_timed_holding(1, 2, 'Clock', expires_at=future)
         holding = await timed.get_timed_holding(f'h:{holding_id}')
-        changed = dict(holding, quantity=holding['quantity'] + 1)
-        self.assertEqual((await timed.expire_one(None, changed, drop_requested=True))['status'], 'skipped')
-        self.assertEqual((await timed.expire_one(None, holding, drop_requested=True))['status'], 'removed')
-        self.assertEqual((await timed.expire_one(None, holding, drop_requested=True))['status'], 'skipped')
+        self.assertEqual((await timed.expire_one(None, holding))['status'], 'skipped')
+        self.assertIsNotNone(await timed.get_timed_holding(f'h:{holding_id}'))
         self.assertEqual([e['event_type'] for e in await inventory_activity.get_activity_page(1, 2)],
-                         ['dropped', 'acquired'])
+                         ['acquired'])
 
     async def test_potion_commit_and_stale_identity(self):
         from utils import potion_engine
@@ -248,15 +204,6 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
         await inventory.give_item(1, 2, 'Potion', item_type='custom')
         self.assertFalse((await trade_engine.execute_trade(1, 3,
             {'items': {'Potion': 1}}, 2, {'items': {'Gift': 1}}))['success'])
-
-    async def test_drop_confirmation_quantity_is_transaction_guarded(self):
-        await inventory.give_item(1, 2, 'Stack', 1)
-        entry = (await inventory.get_inventory_entries(1, 2))[0]
-        await inventory.give_item(1, 2, 'Stack', 1)
-        result = await inventory.drop_item(1, 2, 'Stack', expected_id=entry['id'],
-                                           expected_quantity=1, expected_metadata={})
-        self.assertFalse(result['success'])
-        self.assertTrue(await inventory.has_item(1, 2, 'Stack', 2))
 
 
 if __name__ == '__main__':

@@ -444,11 +444,10 @@ class ComponentBehaviourTests(unittest.IsolatedAsyncioTestCase):
         response.send_message.assert_awaited_once()
         view.stop()
 
-    async def test_timed_holdings_have_no_drop_button(self):
+    async def test_item_panel_actions_are_equip_and_back_only(self):
         item = entry("Temporary Cape", "h:20", item_type="temp_role", timed=True)
         view = wallet.ItemPanelView(1, 2, wallet.TAB_ITEMS, item, False)
-        self.assertFalse(any(isinstance(x, wallet.DropButton)
-                             for x in view.children))
+        self.assertEqual([x.label for x in view.children], ["Equip", "Back"])
         view.stop()
 
     async def test_equipped_view_shows_actual_equip_only(self):

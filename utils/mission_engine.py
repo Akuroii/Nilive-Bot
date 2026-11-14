@@ -274,6 +274,12 @@ async def create_definition(guild_id: int, *, name: str, mtype: str,
         raise ValueError(
             f"description must be {MAX_DESCRIPTION_LENGTH} characters or fewer")
 
+    if reward_type == "item":
+        # An item reward lands in the Inventory under this name, so it must
+        # not share it with a potion, title or role item (ValueError).
+        from utils.item_identity import ensure_name_available, KIND_PLAIN
+        await ensure_name_available(guild_id, reward_value, KIND_PLAIN)
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             INSERT INTO missions_definitions
@@ -384,6 +390,42 @@ async def record_activity(bot, guild_id: int, user_id: int,
     definitions query and one connection."""
     return await record_activities(
         bot, guild_id, user_id, {mtype: amount}, channel_id=channel_id)
+
+
+HELD_REWARD_NOTICE = ("Your mission is complete! Your reward is waiting for "
+                      "delivery because of an item conflict.")
+
+
+async def _notify_held_reward(bot, guild_id: int, user_id: int,
+                              definition: dict, channel_id) -> bool:
+    """Tell the member their completed mission's reward is being held.
+
+    A direct message first (it concerns only them); if their DMs are closed,
+    the channel the completing activity happened in. Best effort: a failed
+    notice never affects the completion or the held reward, and the Inventory
+    keeps showing it either way.
+    """
+    text = (f"**{definition.get('name')}** — {HELD_REWARD_NOTICE} It will be "
+            f"delivered automatically once that is resolved; you do not need "
+            f"to do the mission again. See `/inventory`.")
+    try:
+        guild = bot.get_guild(int(guild_id)) if bot else None
+        member = guild.get_member(int(user_id)) if guild else None
+        if member is not None:
+            try:
+                await member.send(text)
+                return True
+            except Exception:
+                pass                          # DMs closed: fall back below
+        channel = (guild.get_channel(int(channel_id))
+                   if guild and channel_id else None)
+        if channel is not None:
+            await channel.send(f"<@{int(user_id)}> {text}")
+            return True
+    except Exception as exc:
+        print(f"[MISSIONS] could not send the held-reward notice to "
+              f"user={user_id} guild={guild_id}: {exc}")
+    return False
 
 
 async def record_activities(bot, guild_id: int, user_id: int,
@@ -539,6 +581,10 @@ async def record_activities(bot, guild_id: int, user_id: int,
                 source="mission",
                 idempotency_key=idem,
             )
+            if result.get("pending"):
+                # Held, not lost (utils.pending_rewards). Said once, here: a
+                # later retry goes through give_reward only, never this loop.
+                await _notify_held_reward(bot, guild_id, user_id, d, channel_id)
             if not result.get("success"):
                 print(f"[MISSIONS] Reward grant failed for mission "
                       f"{d['id']} ({d['name']}) guild={guild_id} "

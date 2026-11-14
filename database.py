@@ -1914,6 +1914,13 @@ async def init_db():
         for _statement in INVENTORY_ACTIVITY_SCHEMA:
             await db.execute(_statement)
 
+        # Earned rewards the Inventory refused over a name clash, kept until
+        # they can be delivered (utils/pending_rewards.py). A new table only:
+        # nothing existing is altered or backfilled.
+        from utils.pending_rewards import SCHEMA as PENDING_REWARDS_SCHEMA
+        for _statement in PENDING_REWARDS_SCHEMA:
+            await db.execute(_statement)
+
         # Level/reward provenance, operation journal and the per-member
         # coordination lease (utils/level_ops.py). Created here so a normal boot
         # has them, and created lazily by level_ops.ensure_tables() for a

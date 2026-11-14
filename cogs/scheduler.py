@@ -98,6 +98,18 @@ class Scheduler(commands.Cog):
         except Exception as e:
             print(f"[SCHEDULER] queued-XP sweep failed: {e}")
 
+        # Mission / minigame / event rewards the Inventory refused over a name
+        # clash wait in pending_rewards; deliver the ones whose name is free
+        # now. One indexed SELECT when nothing is waiting.
+        try:
+            from utils.pending_rewards import retry as retry_pending_rewards
+            retried = await retry_pending_rewards(self.bot)
+            if retried.get("delivered"):
+                print(f"[SCHEDULER] delivered {retried['delivered']} pending "
+                      f"reward(s)")
+        except Exception as e:
+            print(f"[SCHEDULER] pending-reward retry failed: {e}")
+
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""

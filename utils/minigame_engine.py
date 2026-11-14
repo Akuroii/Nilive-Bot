@@ -165,6 +165,10 @@ def _parse_color(value):
         return None
 
 
+HELD_REWARD_NOTICE = ("You won! Your reward is temporarily held and will be "
+                      "delivered once the issue is resolved.")
+
+
 def _grant_kwargs(rolled: dict) -> dict:
     """Map a rolled reward row onto give_reward()'s kwargs (plan §7)."""
     t, v = rolled["reward_type"], rolled["reward_value"]
@@ -509,6 +513,7 @@ class MinigameEngine:
         #    second one, or enqueues it itself when step 2 was a no-op. So this
         #    pays exactly once, and ALREADY_CLOSED — where a second payment
         #    for one round is possible — is already returned above.
+        held: list[dict] = []
         for entry, rolled in pending:
             try:
                 res = await give_reward(
@@ -524,7 +529,13 @@ class MinigameEngine:
                     idempotency_key=(f"minigame:{self.guild_id}:{self.log_id}:"
                                      f"{entry['id']}"
                                      if rolled["reward_type"] == "xp" else None))
-                if not res or not res.get("success"):
+                if res and res.get("pending"):
+                    # Kept in utils.pending_rewards and delivered by a later
+                    # retry. The win stands (status stays "won", as it does
+                    # for a queued XP award); the run log keeps the reason.
+                    entry["error"] = str(res.get("error"))[:300]
+                    held.append(entry)
+                elif not res or not res.get("success"):
                     entry["status"] = "failed"
                     entry["error"] = str((res or {}).get("error")
                                          or "grant failed")[:300]
@@ -538,13 +549,20 @@ class MinigameEngine:
             if result_text:
                 base = embed.description or ""
                 embed.description = (base + "\n\n" + result_text)[:4096]
+            if held:
+                # Said once, in the result itself: a later retry delivers
+                # through give_reward and never comes back here.
+                notice = "\n".join(f"<@{entry['id']}> {HELD_REWARD_NOTICE}"
+                                   for entry in held)
+                base = embed.description or ""
+                embed.description = (base + "\n\n" + notice)[:4096]
             self._view = self._make_view(self.final_component_rows())
             try:
                 await self._message.edit(embed=embed, view=self._view)
             except Exception as e:
                 # A failed edit NEVER loses rewards — they are already safe.
                 print(f"[MINIGAMES] run {self.log_id}: final embed edit "
-                      f"failed (rewards already delivered): {e}")
+                      f"failed (rewards already granted or held): {e}")
 
         # 5) close the run row
         try:

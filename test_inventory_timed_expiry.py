@@ -1,4 +1,9 @@
-"""Timed Drop role reconciliation, using scratch SQLite and Discord stubs."""
+"""Timed role expiry reconciliation, using scratch SQLite and Discord stubs.
+
+These scenarios used to drive the member "Drop" path of `expire_one`. Drop was
+removed; the same Discord-failure, entitlement and cancellation guarantees are
+now asserted on the only remaining removal path, real expiry.
+"""
 import asyncio
 import unittest
 from unittest.mock import AsyncMock
@@ -9,60 +14,73 @@ from utils.inventory import set_quantity
 from utils.inventory_activity import get_activity_page
 
 
-class TimedRoleDropTests(unittest.IsolatedAsyncioTestCase):
+class TimedRoleExpiryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await reset_database()
         seed_member(balance=500)
         purge_timed()
         for table in ('inventory_activity', 'equipped_roles', 'inventory_items', 'timed_holdings'):
             execute(f'DELETE FROM {table}')
-        self.role = role_stub(9511, 'DropRole')
+        self.role = role_stub(9511, 'ExpiryRole')
         _, self.person, self.bot, _ = purchase_ctx(granted_role=self.role)
         self.person.roles = [self.role]
-        ident = await timed.grant_timed_holding(GUILD, USER, 'DropRole',
+        ident = await timed.grant_timed_holding(GUILD, USER, 'ExpiryRole',
             expires_at=iso_in(2), item_type='temp_role', role_id=9511,
             metadata={'role_id': 9511})
-        self.holding = await timed.get_timed_holding(f'h:{ident}')
-        await equip.record_equipped(GUILD, USER, 'DropRole', role_id=9511,
-                                    entry_key=self.holding['entry_key'])
+        self.key = f'h:{ident}'
+        await equip.record_equipped(GUILD, USER, 'ExpiryRole', role_id=9511,
+                                    entry_key=self.key)
+        self.holding = await timed.get_timed_holding(self.key)
+
+    async def lapse(self):
+        execute('UPDATE timed_holdings SET expires_at=? WHERE id=?',
+                (iso_in(-1), self.holding['id']))
+        self.holding = await timed.get_timed_holding(self.key)
 
     async def events(self):
         return [e['event_type'] for e in await get_activity_page(GUILD, USER)]
 
-    async def test_discord_failure_then_retry_records_one_drop(self):
+    async def test_discord_failure_then_retry_records_one_expiry(self):
+        await self.lapse()
         self.person.remove_roles = AsyncMock(side_effect=RuntimeError('network'))
-        result = await timed.expire_one(self.bot, self.holding, drop_requested=True)
+        result = await timed.expire_one(self.bot, self.holding)
         self.assertEqual(result['status'], 'kept')
-        self.assertNotIn('dropped', await self.events())
-        self.assertIsNotNone(await timed.get_timed_holding(self.holding['entry_key']))
+        self.assertNotIn('expired', await self.events())
+        self.assertIsNotNone(await timed.get_timed_holding(self.key))
         self.person.remove_roles = AsyncMock()
-        self.assertEqual((await timed.expire_one(self.bot, self.holding, drop_requested=True))['status'], 'removed')
-        self.assertEqual((await timed.expire_one(self.bot, self.holding, drop_requested=True))['status'], 'skipped')
-        self.assertEqual((await self.events()).count('dropped'), 1)
+        self.assertEqual((await timed.expire_one(self.bot, self.holding))['status'], 'removed')
+        self.assertEqual((await timed.expire_one(self.bot, self.holding))['status'], 'skipped')
+        self.assertEqual((await self.events()).count('expired'), 1)
         self.assertIsNone(await equip.get_equipped(GUILD, USER))
 
     async def test_independent_entitlement_keeps_discord_role(self):
+        await self.lapse()
         await set_quantity(GUILD, USER, 'Permanent', 1, item_type='role', metadata={'role_id': 9511})
-        result = await timed.expire_one(self.bot, self.holding, drop_requested=True)
+        result = await timed.expire_one(self.bot, self.holding)
         self.assertEqual(result['status'], 'removed')
         self.person.remove_roles.assert_not_awaited()
         self.assertIn(self.role, self.person.roles)
-        self.assertEqual((await self.events()).count('dropped'), 1)
+        self.assertEqual((await self.events()).count('expired'), 1)
 
-    async def test_cancelled_removal_leaves_retry_marker_and_no_drop(self):
+    async def test_cancelled_removal_leaves_retry_marker_and_no_event(self):
+        await self.lapse()
         self.person.remove_roles = AsyncMock(side_effect=asyncio.CancelledError())
         with self.assertRaises(asyncio.CancelledError):
-            await timed.expire_one(self.bot, self.holding, drop_requested=True)
-        self.assertIsNotNone(await timed.get_timed_holding(self.holding['entry_key']))
-        self.assertNotIn('dropped', await self.events())
+            await timed.expire_one(self.bot, self.holding)
+        self.assertIsNotNone(await timed.get_timed_holding(self.key))
+        self.assertNotIn('expired', await self.events())
         self.person.remove_roles = AsyncMock()
-        self.assertEqual((await asyncio.wait_for(timed.expire_one(self.bot, self.holding, drop_requested=True), 3))['status'], 'removed')
+        self.assertEqual((await asyncio.wait_for(timed.expire_one(self.bot, self.holding), 3))['status'], 'removed')
 
-    async def test_expired_confirmation_refused(self):
-        execute('UPDATE timed_holdings SET expires_at=? WHERE id=?', (iso_in(-1), self.holding['id']))
-        self.assertEqual((await timed.expire_one(self.bot, self.holding, drop_requested=True))['status'], 'skipped')
+    async def test_live_holding_is_never_removed(self):
+        """No member-requested removal exists: an unexpired holding stays."""
+        self.assertEqual((await timed.expire_one(self.bot, self.holding))['status'], 'skipped')
+        with self.assertRaises(TypeError):
+            await timed.expire_one(self.bot, self.holding, drop_requested=True)
         self.person.remove_roles.assert_not_awaited()
-        self.assertNotIn('dropped', await self.events())
+        self.assertIsNotNone(await timed.get_timed_holding(self.key))
+        self.assertEqual((await equip.get_equipped(GUILD, USER))['entry_key'], self.key)
+        self.assertEqual(await self.events(), ['equipped', 'acquired'])
 
 class DuplicateRolePurchaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

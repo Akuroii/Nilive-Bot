@@ -4,8 +4,9 @@ TIMED OWNERSHIP — separately identifiable temporary holdings.
 Why this module exists
 ----------------------
 `inventory_items` has UNIQUE(guild_id, user_id, item_name) and every write path
-(`give_item`, `set_quantity`) upserts on that key, overwriting `item_type` and
-`metadata`. That model cannot represent what the Shop now sells:
+(`give_item`, `set_quantity`) upserts on that key - one stack per name, whose
+`metadata` a later grant replaces. That model cannot represent what the Shop now
+sells:
 
   * a permanent "Golden Key" AND an 8-hour "Golden Key" at the same time,
   * several timed copies of one name with different expiry times.
@@ -2304,7 +2305,7 @@ def _serialised_expiry(func):
 
 
 @_serialised_expiry
-async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dict:
+async def expire_one(bot, holding: dict) -> dict:
     """Retire ONE expired holding, reconciling Discord and bookkeeping.
 
     Idempotent by construction: every step reads current state first, and the
@@ -2320,15 +2321,9 @@ async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dic
     if (not current or int(current["guild_id"]) != guild_id or
             int(current["user_id"]) != user_id):
         return {"status": "skipped", "reason": "holding no longer owned"}
-    if drop_requested:
-        # The confirmation snapshots the exact selected holding. Do not turn a
-        # stale or already-expired button into a different ownership mutation.
-        fields = ("id", "item_name", "item_type", "quantity", "role_id", "expires_at", "metadata")
-        if is_expired(current.get("expires_at")) or any(current.get(k) != holding.get(k) for k in fields):
-            return {"status": "skipped", "reason": "holding changed or expired"}
-    elif not is_expired(current.get("expires_at")):
+    if not is_expired(current.get("expires_at")):
         return {"status": "skipped", "reason": "holding no longer expired"}
-    removal_event = "dropped" if drop_requested else "expired"
+    removal_event = "expired"
     holding = current
     role_id = holding.get("role_id")
 
@@ -2419,7 +2414,7 @@ async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dic
         and (is_late_rollback or role in member_roles)
     ):
         try:
-            await member.remove_roles(role, reason="Inventory item dropped" if drop_requested else "Timed entitlement expired")
+            await member.remove_roles(role, reason="Timed entitlement expired")
             if isinstance(getattr(member, "roles", None), list) and role in member.roles:
                 member.roles.remove(role)
         except Exception as exc:

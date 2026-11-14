@@ -7,13 +7,13 @@ existing engine tests:
   1. Schema migration adds coin_emoji_id, diamond_name, diamond_emoji_id.
   2. Currency config returns defaults; custom names/emojis persist.
   3. /daily command is gone (import sanity).
-  4. drop_item removes full stack and returns qty.
+  4. The member Drop action and its backend are gone.
   5. equip_role then unequip_role clears Discord bookkeeping (mock).
   6. Streak panel embeds contain NO UTC, NO "capped", NO "00:00", NO "!".
   7. Claim panel embeds match the spec field names.
   8. Receipts format uses relative time and configured currency names.
   9. Inventory embeds do NOT contain "Expires"/"Paid"/"Bought".
- 10. Item detail embed has Equip/Unequip/Drop/Back for equippables.
+ 10. Item detail embed has Equip/Unequip/Back for equippables.
 """
 import os
 import sys
@@ -97,15 +97,20 @@ async def main():
           "daily" not in (wallet_commands | economy_commands),
           str(wallet_commands | economy_commands))
 
-    section("4. drop_item removes full stack")
-    from utils.inventory import give_item, drop_item, get_inventory
+    section("4. Drop is removed; owned stacks stay owned")
+    import utils.inventory as inventory_module
+    import cogs.wallet as wallet_module
+    from utils.inventory import give_item, get_inventory
     await give_item(GUILD, USER, "Hat", 3, item_type="shop_custom")
-    r = await drop_item(GUILD, USER, "Hat")
-    check("drop returns success", r.get("success") is True, str(r))
-    check("drop returns quantity 3", r["quantity"] == 3, str(r))
+    check("utils.inventory has no drop_item",
+          not hasattr(inventory_module, "drop_item"))
+    check("wallet has no Drop button / confirmation",
+          not any(hasattr(wallet_module, name) for name in (
+              "DropButton", "DropConfirmView", "open_drop_confirm",
+              "build_drop_confirm_embed")))
     inv = await get_inventory(GUILD, USER)
-    check("item no longer in inventory",
-          all(it["item_name"] != "Hat" for it in inv))
+    check("item is still in inventory",
+          any(it["item_name"] == "Hat" and it["quantity"] == 3 for it in inv))
 
     section("5. Streak panel embeds — no UTC / capped / 00:00 / !")
     from utils.daily_engine import get_streak_preview
@@ -186,7 +191,7 @@ async def main():
         check(f"inventory list contains no '{banned}'",
               banned.lower() not in ir.lower(), ir)
 
-    section("7. Item detail includes Equip/Drop/Back; no Expires")
+    section("7. Item detail includes Equip/Back only; no Expires")
     # We don't have a real Guild to pass, but we can build the View class
     # to confirm button labels.
     from cogs.wallet import ItemPanelView
@@ -199,7 +204,7 @@ async def main():
     view = ItemPanelView(GUILD, USER, TAB_ITEMS, item, equipped=False)
     labels = sorted((c.label or "") for c in view.children)
     check("buttons include Equip", "Equip" in labels, str(labels))
-    check("buttons include Drop", "Drop" in labels, str(labels))
+    check("buttons do not include Drop", "Drop" not in labels, str(labels))
     check("buttons include Back", "Back" in labels, str(labels))
 
     from cogs.wallet import build_item_embed

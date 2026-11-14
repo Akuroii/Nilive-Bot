@@ -1633,9 +1633,11 @@ def inventory_page():
 
     async def get_summary():
         from utils.inventory import get_guild_inventory_summary
-        return await get_guild_inventory_summary(guild_id, limit=200)
+        from utils.pending_rewards import list_pending
+        return (await get_guild_inventory_summary(guild_id, limit=200),
+                await list_pending(guild_id))
 
-    items = run_async(get_summary())
+    items, pending_rewards = run_async(get_summary())
 
     async def resolve():
         from utils.discord_user_cache import resolve_users
@@ -1647,7 +1649,8 @@ def inventory_page():
     user_map = run_async(resolve())
     ctx      = get_current_user_context()
     return render("systems/inventory.html",
-                  items=items, target_user_id=None, user_map=user_map, **ctx)
+                  items=items, target_user_id=None, user_map=user_map,
+                  pending_rewards=pending_rewards, **ctx)
 
 
 @app.route("/inventory/<int:user_id>")
@@ -1656,10 +1659,33 @@ def inventory_user_page(user_id: int):
     guild_id = get_session_guild_id()
 
     async def get_user_items():
-        from utils.inventory import get_inventory
-        return await get_inventory(guild_id, user_id, include_empty=False)
+        # The same reader the member's own /inventory panel uses, so staff see
+        # what the member sees: permanent stacks AND live timed holdings, with
+        # the persisted equip slots marked. Read-only — equipping needs the
+        # bot's Discord session and stays in the bot.
+        from utils.inventory import get_inventory_entries
+        from utils.equip_engine import get_equipped
+        from utils.title_engine import get_equipped_title, TITLE_ITEM_TYPE
+        from utils.potion_engine import get_active_effects
+        entries = await get_inventory_entries(guild_id, user_id)
+        role_slot = await get_equipped(guild_id, user_id)
+        title_slot = await get_equipped_title(guild_id, user_id)
+        for it in entries:
+            if it.get("item_type") in ("role", "temp_role") and role_slot:
+                if role_slot.get("entry_key"):
+                    it["equipped"] = it["entry_key"] == role_slot["entry_key"]
+                else:
+                    it["equipped"] = (not it.get("timed")
+                                      and it["item_name"] == role_slot["item_name"])
+            elif it.get("item_type") == TITLE_ITEM_TYPE and title_slot:
+                it["equipped"] = it["item_name"] == title_slot["item_name"]
+            else:
+                it["equipped"] = False
+        from utils.pending_rewards import list_pending
+        return (entries, await get_active_effects(guild_id, user_id),
+                await list_pending(guild_id, user_id))
 
-    items = run_async(get_user_items())
+    items, active_effects, pending_rewards = run_async(get_user_items())
 
     async def resolve():
         from utils.discord_user_cache import resolve_users
@@ -1668,7 +1694,9 @@ def inventory_user_page(user_id: int):
     user_map = run_async(resolve())
     ctx      = get_current_user_context()
     return render("systems/inventory.html",
-                  items=items, target_user_id=user_id, user_map=user_map, **ctx)
+                  items=items, target_user_id=user_id, user_map=user_map,
+                  active_effects=active_effects,
+                  pending_rewards=pending_rewards, **ctx)
 
 
 # ── Trade (read-only history) ───────────────────────────────────────────────
@@ -2970,14 +2998,55 @@ def api_edit_member():
     data      = request.json
     user_id   = data.get("user_id")
     xp        = max(0, int(data.get("xp", 0)))
-    coins     = max(0, int(data.get("coins", 0)))
-    # The Members-page edit modal predates diamonds and sends only
-    # {user_id, xp, coins}. Treat an ABSENT field as "leave diamonds alone"
-    # rather than "set them to 0": this route overwrites the wallet absolutely,
-    # so defaulting to 0 silently destroyed every diamond the member owned.
-    # An explicit value (including an explicit 0) still overwrites, as before.
-    diamonds_raw = data.get("diamonds")
-    diamonds = None if diamonds_raw is None else max(0, int(diamonds_raw))
+    # This route overwrites the wallet ABSOLUTELY with the values the form
+    # holds, so two rules protect a balance the form does not know about:
+    #
+    #   * A currency whose field is ABSENT is left alone. (The Members-page
+    #     modal predates diamonds and sends none; an absent field used to
+    #     default to 0 and silently destroyed the member's diamonds.)
+    #   * A currency whose field is PRESENT is being written, and then the
+    #     matching snapshot - `expected_coins` / `expected_diamonds`, the value
+    #     the form was opened with - is REQUIRED. It is compared under the
+    #     write lock below; a missing, unreadable or stale snapshot is refused
+    #     and nothing is written. Without it a form opened before the member
+    #     spent or earned would hand a Shop charge back or wipe earnings.
+    #     There is no fallback to the old unconditional overwrite.
+    def _amount(key):
+        raw = data.get(key)
+        if raw is None:
+            return None
+        if isinstance(raw, bool):
+            raise ValueError(key)
+        return int(raw)
+
+    wallet_request = {}
+    for field, snapshot in (("coins", "expected_coins"),
+                            ("diamonds", "expected_diamonds")):
+        try:
+            value = _amount(field)
+        except (TypeError, ValueError):
+            return jsonify({"success": False,
+                            "error": f"Invalid {field} value."}), 400
+        if value is None:
+            wallet_request[field] = (None, None)
+            continue
+        try:
+            expected = _amount(snapshot)
+            unreadable = False
+        except (TypeError, ValueError):
+            expected, unreadable = None, True
+        if expected is None:
+            return jsonify({
+                "success": False, "code": "WALLET_SNAPSHOT_REQUIRED",
+                "error": (f"Changing {field} needs `{snapshot}` - the "
+                          f"{field} this form was opened with"
+                          + (", as a whole number" if unreadable else "")
+                          + ". Nothing was changed; reload the page and try "
+                            "again."),
+            }), 400
+        wallet_request[field] = (max(0, value), expected)
+    coins, expected_coins = wallet_request["coins"]
+    diamonds, expected_diamonds = wallet_request["diamonds"]
     new_level = calculate_level_from_xp(xp)
     from utils import level_ops as ops
     from utils.level_claims import (
@@ -3070,12 +3139,32 @@ def api_edit_member():
                     "SELECT balance, diamonds FROM economy "
                     "WHERE guild_id=? AND user_id=?", (guild_id, user_id))
                 wallet_before = await cursor.fetchone() or (0, 0)
+                # Compared under the write lock, against the row this
+                # transaction is about to overwrite. `expected` is None only
+                # for a currency this request does not write.
+                stale = [
+                    f"{label} {int(current or 0)} (this form was opened at {expected})"
+                    for label, current, expected in (
+                        ("coins", wallet_before[0], expected_coins),
+                        ("diamonds", wallet_before[1], expected_diamonds))
+                    if expected is not None and int(current or 0) != expected]
+                if stale:
+                    await db.execute("ROLLBACK")
+                    return {
+                        "success": False, "stale": True,
+                        "error": ("This member's wallet changed while the form "
+                                  "was open: now " + ", ".join(stale) + ". "
+                                  "Nothing was changed - reload the page and "
+                                  "apply your edit to the current values."),
+                    }
                 # Preserve the stored diamonds when the caller did not send the
                 # field. Resolved inside BEGIN IMMEDIATE, from the same row this
                 # transaction overwrites, so a concurrent dashboard save cannot
                 # make the preserved value stale.
                 effective_diamonds = (int(wallet_before[1] or 0)
                                       if diamonds is None else diamonds)
+                effective_coins = (int(wallet_before[0] or 0)
+                                   if coins is None else coins)
                 await db.execute("""
                     INSERT INTO levels (guild_id, user_id, xp, level)
                     VALUES (?,?,?,?)
@@ -3101,7 +3190,7 @@ def api_edit_member():
                     guild_id=guild_id, user_id=int(user_id),
                     source=SOURCE_DASHBOARD, actor_id=actor_id,
                     reason=("dashboard member edit; wallet overwritten "
-                            f"{wallet_before[0]}->{coins} coins, "
+                            f"{wallet_before[0]}->{effective_coins} coins, "
                             f"{wallet_before[1]}->{effective_diamonds} diamonds"),
                     xp_before=old_xp, xp_after=xp,
                     level_before=calculate_level_from_xp(old_xp),
@@ -3112,10 +3201,11 @@ def api_edit_member():
                     VALUES (?,?,?,?)
                     ON CONFLICT(guild_id, user_id)
                     DO UPDATE SET balance=?, diamonds=?
-                """, (guild_id, user_id, coins, effective_diamonds,
-                       coins, effective_diamonds))
+                """, (guild_id, user_id, effective_coins, effective_diamonds,
+                       effective_coins, effective_diamonds))
                 await db.commit()
-                return {"success": True, "diamonds": effective_diamonds}
+                return {"success": True, "coins": effective_coins,
+                        "diamonds": effective_diamonds}
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
@@ -3127,7 +3217,7 @@ def api_edit_member():
         return jsonify(outcome), 409
     log_action(
         guild_id,
-        f"Edited member {user_id}: xp={xp} coins={coins} "
+        f"Edited member {user_id}: xp={xp} coins={outcome.get('coins')} "
         f"diamonds={outcome.get('diamonds')}",
         "members", target_id=int(user_id) if user_id else None)
     return jsonify({"success": True})

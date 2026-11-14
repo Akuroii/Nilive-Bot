@@ -165,6 +165,15 @@ class ButtonRaceView(discord.ui.View):
                              f"{interaction.user.id}"
                              if self.reward_type == "xp" else None))
 
+        if result.get("pending"):
+            # Kept, not lost: utils.pending_rewards delivers it on a retry.
+            await interaction.response.send_message(
+                "You won! Your reward is being held because you already own a "
+                "different item with the same name. It arrives by itself once "
+                "that item is used up — see `/inventory`.",
+                ephemeral=True)
+            await self._finish_if_full(interaction)
+            return
         if not result.get("success"):
             await interaction.response.send_message(
                 "You won, but the reward could not be delivered. Please contact a moderator.",
@@ -357,6 +366,16 @@ class Events(commands.Cog):
                 f"{', '.join(valid_types)}",
                 ephemeral=True)
             return
+
+        if reward_type == "item":
+            # The item lands in the winner's Inventory under this name, so it
+            # must not share it with a potion, title or role item.
+            from utils.item_identity import find_name_conflict, KIND_PLAIN
+            conflict = await find_name_conflict(
+                interaction.guild.id, reward_value, KIND_PLAIN)
+            if conflict:
+                await interaction.response.send_message(conflict, ephemeral=True)
+                return
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""

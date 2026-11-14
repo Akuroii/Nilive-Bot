@@ -305,7 +305,10 @@ def save_minigames_config_api():
         await store.ensure_tables()
         return await store.save_config(guild_id, **fields)
 
-    cfg = run_async(save())
+    try:
+        cfg = run_async(save())
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)})
     log_action(guild_id, "Updated minigames config", "minigames")
     return jsonify({"success": True, "config": _with_channel_id_str(cfg)})
 

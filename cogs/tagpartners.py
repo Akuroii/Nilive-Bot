@@ -79,7 +79,11 @@ class TagPartners(commands.Cog):
                   f"partner={partner_guild_id}: {e}")
             return
 
-        if not result.get("success"):
+        # A reward held over an item-name clash (utils.pending_rewards) is
+        # owed and will be delivered by its own retry, so it is logged like a
+        # granted one: another join must not queue it a second time.
+        held = bool(result.get("pending"))
+        if not result.get("success") and not held:
             print(f"[TAGPARTNERS] reward failed guild={member.guild.id} "
                   f"user={member.id}: {result.get('error')}")
             return
@@ -92,6 +96,8 @@ class TagPartners(commands.Cog):
             """, (member.guild.id, partner_guild_id, member.id))
             await db.commit()
 
+        if held:
+            return      # the welcome text may promise a reward not yet delivered
         if welcome_message:
             try:
                 await member.send(welcome_message)

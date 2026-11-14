@@ -171,6 +171,47 @@ async def swap_and_record_equipped(bot: discord.Client | None,
 _SLOT_UNSPECIFIED = object()
 
 
+async def _finish(task: asyncio.Future) -> None:
+    """Wait until `task` is done, even if the waiter is cancelled meanwhile.
+
+    The caller re-raises its own cancellation afterwards; this only makes sure
+    a Discord side effect and its bookkeeping (or its reversal) are not left
+    half-done. Bounded by the task itself: one Discord call plus SQLite's busy
+    timeout.
+    """
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+
+
+async def _take_back_unsaved_role(guild_id: int, user_id: int, member, role,
+                                  role_id: int) -> str:
+    """Undo a role an equip added but could not record.
+
+    Returns "removed" (role taken back), "recorded" (the slot does name this
+    role, so the equip landed and the role is left alone) or "left_on" (the
+    removal failed: the member wears a role no slot accounts for).
+    """
+    try:
+        recorded = await get_equipped(guild_id, user_id)
+    except Exception:
+        recorded = None
+    if recorded is not None and int(recorded["role_id"]) == role_id:
+        return "recorded"
+    try:
+        await member.remove_roles(
+            role, reason="Equip could not be saved - reverted")
+        return "removed"
+    except Exception as revert_error:
+        print(f"[EQUIP] Could not revert role {role_id} on {user_id} in "
+              f"{guild_id} after a failed slot write: {revert_error}")
+        return "left_on"
+
+
 def slot_identity(slot: dict | None):
     return (slot.get("entry_key"), slot.get("item_name"), int(slot["role_id"])) if slot else None
 
@@ -236,44 +277,126 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
     if not can_assign:
         return {"success": False, "error": warning}
 
-    role_was_present = role in member.roles
-    if not role_was_present:
+    # ── Discord + slot write: one unit that a cancellation cannot split ──────
+    # Everything above only reads. From here on a Discord role is added and
+    # then the slot row is written; a caller cancelled between the two would
+    # leave the member wearing a role no record accounts for. So the pair runs
+    # as its own task and the caller only waits for it:
+    #   * caller cancelled  -> the pair still runs to its normal end (equipped,
+    #     or reverted by its own error handling); the cancellation is then
+    #     re-raised. Nothing is retried and no second Discord add is sent.
+    #   * the pair ITSELF cancelled (event loop shutting down) -> it takes back
+    #     the role it added before propagating; if that cannot be confirmed the
+    #     outcome is logged as UNCERTAIN, never as a success or a clean failure.
+    async def _apply() -> dict:
+        role_was_present = role in member.roles
         try:
-            await member.add_roles(role, reason=reason)
+            return await _add_and_record(role_was_present)
+        except BaseException as stop:
+            if isinstance(stop, Exception):
+                raise
+            # CancelledError (or interpreter shutdown) inside the unit. The
+            # add may have reached Discord even if it never returned.
+            if not role_was_present:
+                cleanup = asyncio.ensure_future(_take_back_unsaved_role(
+                    guild_id, user_id, member, role, role_id))
+                await _finish(cleanup)
+                state = ("left_on" if cleanup.cancelled() or cleanup.exception()
+                         else cleanup.result())
+                if state == "left_on":
+                    print(f"[EQUIP][UNCERTAIN] Equip of {item_name!r} (role "
+                          f"{role_id}) for {user_id} in {guild_id} was "
+                          f"cancelled after the Discord role step and the "
+                          f"role could not be confirmed removed. The member "
+                          f"may be wearing a role the slot does not record; "
+                          f"an admin needs to reconcile it.")
+                elif state == "recorded":
+                    print(f"[EQUIP][UNCERTAIN] Equip of {item_name!r} (role "
+                          f"{role_id}) for {user_id} in {guild_id} was "
+                          f"cancelled after the slot was saved. The item is "
+                          f"equipped; a previously equipped role may still "
+                          f"be on the member and need removing.")
+                else:
+                    print(f"[EQUIP] Equip of {item_name!r} for {user_id} in "
+                          f"{guild_id} was cancelled; the role it added was "
+                          f"taken back and the slot is unchanged.")
+            raise
+
+    async def _add_and_record(role_was_present: bool) -> dict:
+        if not role_was_present:
+            try:
+                await member.add_roles(role, reason=reason)
+            except Exception as e:
+                from utils.timed_ownership import is_ambiguous_discord_role_error
+                ambiguous = is_ambiguous_discord_role_error(
+                    e, member=member, role=role)
+                role_now_present = role in (getattr(member, "roles", None) or ())
+                return {"success": False,
+                        "error": f"Discord error assigning role: {e}",
+                        "role_added": bool(role_now_present),
+                        "uncertain": bool(ambiguous or role_now_present)}
+
+        # Non-role inventory writers may run while Discord is awaited. Never
+        # record a slot for an entry that disappeared, expired, or changed type/role.
+        live = find_entry(await get_inventory_entries(guild_id, user_id), entry_key=owned_key)
+        if (not live or live.get("item_name") != item_name or
+                live.get("item_type") != owned.get("item_type") or
+                (live.get("metadata") or {}).get("role_id") != (owned.get("metadata") or {}).get("role_id") or
+                live.get("role_id") != owned.get("role_id")):
+            return {"success": False, "error": "The ownership entry changed during the Discord update; an admin may need to reconcile the role.",
+                    "role_added": not role_was_present, "uncertain": not role_was_present}
+
+        try:
+            await swap_and_record_equipped(
+                bot, guild_id, user_id,
+                item_name=item_name, role_id=role_id, entry_key=owned_key,
+                guild=guild, member=member, reason=reason)
         except Exception as e:
-            from utils.timed_ownership import is_ambiguous_discord_role_error
-            ambiguous = is_ambiguous_discord_role_error(
-                e, member=member, role=role)
-            role_now_present = role in (getattr(member, "roles", None) or ())
-            return {"success": False,
-                    "error": f"Discord error assigning role: {e}",
-                    "role_added": bool(role_now_present),
-                    "uncertain": bool(ambiguous or role_now_present)}
+            # swap_and_record_equipped() writes the slot row BEFORE it touches the
+            # previous role, so a failure here means: this call's role is on the
+            # member, the slot is unchanged. Left like that, a later Equip of a
+            # different item finds no such slot, swaps nothing out, and the member
+            # wears two roles. Take back the role THIS call added (never one the
+            # member already wore, never one the slot does record). If that fails
+            # too, the outcome stays uncertain and is reported as such.
+            role_left_on = not role_was_present
+            if role_left_on:
+                role_left_on = await _take_back_unsaved_role(
+                    guild_id, user_id, member, role, role_id) != "removed"
+            if role_left_on:
+                error = (f"The role was assigned but the equip could not be saved "
+                         f"({e}). An admin may need to reconcile the role.")
+            else:
+                error = ("The equip could not be saved, so nothing was changed. "
+                         "Please try again.")
+            return {"success": False, "error": error,
+                    "role_added": role_left_on, "uncertain": role_left_on}
 
-    # Non-role inventory writers may run while Discord is awaited. Never
-    # record a slot for an entry that disappeared, expired, or changed type/role.
-    live = find_entry(await get_inventory_entries(guild_id, user_id), entry_key=owned_key)
-    if (not live or live.get("item_name") != item_name or
-            live.get("item_type") != owned.get("item_type") or
-            (live.get("metadata") or {}).get("role_id") != (owned.get("metadata") or {}).get("role_id") or
-            live.get("role_id") != owned.get("role_id")):
-        return {"success": False, "error": "The ownership entry changed during the Discord update; an admin may need to reconcile the role.",
-                "role_added": not role_was_present, "uncertain": not role_was_present}
+        return {"success": True, "item_name": item_name,
+                "role_id": role_id, "role_name": role.name,
+                "entry_key": owned_key, "role_added": not role_was_present}
 
+
+
+    unit = asyncio.ensure_future(_apply())
     try:
-        await swap_and_record_equipped(
-            bot, guild_id, user_id,
-            item_name=item_name, role_id=role_id, entry_key=owned_key,
-            guild=guild, member=member, reason=reason)
-    except Exception as e:
-        return {"success": False,
-                "error": f"Database error recording equipped role: {e}",
-                "role_added": not role_was_present,
-                "uncertain": not role_was_present}
-
-    return {"success": True, "item_name": item_name,
-            "role_id": role_id, "role_name": role.name,
-            "entry_key": owned_key, "role_added": not role_was_present}
+        return await asyncio.shield(unit)
+    except asyncio.CancelledError:
+        await _finish(unit)
+        if not unit.cancelled():
+            failure = unit.exception()
+            outcome = {"success": False, "uncertain": True,
+                       "error": repr(failure)} if failure else unit.result()
+            if outcome.get("uncertain"):
+                print(f"[EQUIP][UNCERTAIN] Equip of {item_name!r} for "
+                      f"{user_id} in {guild_id}: caller cancelled and the "
+                      f"outcome is uncertain: {outcome.get('error')}")
+            else:
+                print(f"[EQUIP] Equip of {item_name!r} for {user_id} in "
+                      f"{guild_id} ran to its end after its caller was "
+                      f"cancelled: "
+                      f"{'equipped' if outcome.get('success') else outcome.get('error')}")
+        raise
 
 
 @_serialised_per_member
@@ -338,6 +461,7 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
     role_id = int(current["role_id"])
     removed_name = current["item_name"]
 
+    role_taken_off = None
     if member is not None:
         from utils.timed_ownership import non_slot_role_entitlement
         try:
@@ -355,35 +479,73 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
                 except Exception as e:
                     return {"success": False,
                             "error": f"Discord error removing role: {e}"}
+                role_taken_off = old_role
 
     # Conditional delete carrying the identity that was validated. Everything
     # above this point can suspend on the Discord round-trip, and a legitimate
     # equip that lands in that window owns the slot by now; deleting by member
-    # alone would erase it and report the NEW item as removed.
-    async with aiosqlite.connect(DB_PATH) as db:
-        if current_key:
-            cursor = await db.execute(
-                "DELETE FROM equipped_roles"
-                " WHERE guild_id=? AND user_id=? AND entry_key=?",
-                (guild_id, user_id, current_key))
-        else:
-            # Legacy row: its identity is "no entry_key, this role".
-            cursor = await db.execute(
-                "DELETE FROM equipped_roles"
-                " WHERE guild_id=? AND user_id=?"
-                " AND (entry_key IS NULL OR entry_key='') AND role_id=?",
-                (guild_id, user_id, role_id))
-        cleared = int(getattr(cursor, "rowcount", 0) or 0)
-        if cleared:
-            from utils.inventory_activity import record_activity
-            await record_activity(db, guild_id=guild_id, user_id=user_id,
-                                  event_type="unequipped", item_name=removed_name,
-                                  item_type="role", quantity=1, source="equipment")
-        await db.commit()
+    # alone would erase it and report the NEW item as removed. The row must
+    # still be exactly the one read at the top: same entry, same role, same
+    # item name.
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if current_key:
+                cursor = await db.execute(
+                    "DELETE FROM equipped_roles"
+                    " WHERE guild_id=? AND user_id=? AND entry_key=?"
+                    " AND role_id=? AND item_name=?",
+                    (guild_id, user_id, current_key, role_id, removed_name))
+            else:
+                # Legacy row: its identity is "no entry_key, this role".
+                cursor = await db.execute(
+                    "DELETE FROM equipped_roles"
+                    " WHERE guild_id=? AND user_id=?"
+                    " AND (entry_key IS NULL OR entry_key='') AND role_id=?"
+                    " AND item_name=?",
+                    (guild_id, user_id, role_id, removed_name))
+            cleared = int(getattr(cursor, "rowcount", 0) or 0)
+            if cleared:
+                from utils.inventory_activity import record_activity
+                await record_activity(db, guild_id=guild_id, user_id=user_id,
+                                      event_type="unequipped", item_name=removed_name,
+                                      item_type="role", quantity=1, source="equipment")
+            await db.commit()
+    except Exception as e:
+        # Wallet callers rely on a result, not an exception. The Discord role
+        # may already be off while the slot row is still there: the item keeps
+        # showing as equipped, and pressing Unequip again finishes the job
+        # (the role is gone by then, so only the row is cleared).
+        print(f"[EQUIP] Slot row for {user_id} in {guild_id} was not cleared "
+              f"after the Discord role step: {e}")
+        return {"success": False, "uncertain": True,
+                "error": ("The change could not be saved. Press Unequip "
+                          "again to finish.")}
 
     if not cleared:
         # The slot moved on. Say so instead of claiming an equip state change
         # this call did not make; the newer slot is left exactly as it is.
+        # If that newer slot wears the very role this call just took off
+        # Discord, put the role back - otherwise the slot it preserved would
+        # name a role the member no longer has.
+        if role_taken_off is not None:
+            try:
+                newer = await get_equipped(guild_id, user_id)
+            except Exception:
+                newer = None
+            if newer is not None and int(newer["role_id"]) == role_id:
+                try:
+                    await member.add_roles(
+                        role_taken_off,
+                        reason="Equipped role changed during unequip - restored")
+                except Exception as e:
+                    print(f"[EQUIP][UNCERTAIN] Role {role_id} was removed from "
+                          f"{user_id} in {guild_id} while the slot changed to "
+                          f"an item that wears it, and could not be restored: {e}")
+                    return {"success": False, "uncertain": True,
+                            "error": ("The equipped role changed while it was "
+                                      "being unequipped and its Discord role "
+                                      "could not be restored. Equip the item "
+                                      "again to fix it.")}
         return {"success": False,
                 "error": ("The equipped role changed while it was being "
                           "unequipped; nothing was cleared.")}

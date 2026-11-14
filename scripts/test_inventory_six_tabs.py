@@ -134,12 +134,15 @@ class SixTabTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_awaited_once()
         view.stop()
 
-    async def test_timed_drop_not_offered_on_any_item_type(self):
-        for kind in ('custom', 'temp_role', 'potion', 'title'):
-            item = entry('Timed', 'h:2', item_type=kind, timed=True)
-            view = wallet.ItemPanelView(1, 2, wallet.TAB_ITEMS, item, False)
-            self.assertFalse(any(isinstance(x, wallet.DropButton) for x in view.children))
-            view.stop()
+    async def test_no_destructive_action_on_any_item_type(self):
+        expected = {'custom': ['Back'], 'temp_role': ['Equip', 'Back'],
+                    'potion': ['Activate', 'Back'], 'title': ['Equip', 'Back']}
+        for kind, labels in expected.items():
+            for key, timed in (('h:2', True), ('i:2', False)):
+                item = entry('Thing', key, item_type=kind, timed=timed)
+                view = wallet.ItemPanelView(1, 2, wallet.TAB_ITEMS, item, False)
+                self.assertEqual([x.label for x in view.children], labels)
+                view.stop()
 
 
 if __name__ == '__main__':

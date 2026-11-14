@@ -235,6 +235,14 @@ class TagMissions(commands.Cog):
                         if result.get("success"):
                             outcome = "rewarded"
                             dm_text = success_message
+                        elif result.get("pending"):
+                            # Earned and kept (utils.pending_rewards): not the
+                            # failure text, and no claim that it arrived.
+                            outcome = "rewarded"
+                            dm_text = ("You completed the mission! Your reward "
+                                       "is waiting for delivery because of an "
+                                       "item conflict. It will be delivered "
+                                       "automatically once that is resolved.")
                         else:
                             print(f"[TAGMISSIONS] mission {mission_id} reward "
                                   f"failed user={user_id}: {result.get('error')}")

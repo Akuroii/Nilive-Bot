@@ -62,7 +62,7 @@ Three defects came out of that design and are fixed here, with the storage in
 1. **Provenance.** The claim engine now writes a `reward_grants` row inside the
    same transaction as each delivery, carrying the claim id, the exact quantity
    and a `remaining_quantity`. Every path that removes units from a stack
-   (`remove_item`, `drop_item`, a trade) decrements that counter FIFO, and an
+   (`remove_item`, a trade) decrements that counter FIFO, and an
    absolute `set_quantity` write marks the stack's grants unattributed because it
    cannot say which units it replaced. So "how many of this reward's units are
    still here" is a recorded fact.

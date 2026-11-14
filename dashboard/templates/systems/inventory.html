@@ -22,15 +22,57 @@
         </div>
     </div>
     <p class="text-muted text-sm" style="margin-bottom:16px;">
-        Read-only view of stackable items held per member — shop "Custom" purchases, event drops,
-        and future mission rewards. Role/temp-role grants aren't shown here; they live on Discord
-        roles directly (see Shop → Temp Roles).
+        Read-only view of what members own. The server-wide list shows permanent stacks; open a
+        member to also see timed holdings, what is equipped and any running XP boost. Members
+        equip roles, colors and titles and activate potions themselves from <code>/inventory</code> in Discord.
     </p>
+    {% if pending_rewards %}
+    <div class="text-sm" style="margin-bottom:16px;">
+        <strong>Rewards waiting for delivery ({{ pending_rewards|length }}):</strong>
+        <span class="text-muted">earned, but not delivered yet. Nothing has to be earned again.
+        <em>Pending</em>: the member owns a different kind of item with the same name; the bot delivers it by itself
+        (within a minute) once that item is used up, removed or renamed.
+        <em>Needs review</em>: a delivery was started and its outcome is unknown, so the bot will not pay it again on its own —
+        check the member's items and roles, then choose.</span>
+        <ul style="margin:6px 0 0 18px;">
+        {% for p in pending_rewards %}
+            <li>{% if not target_user_id %}<a href="/inventory/{{ p.user_id }}">{{ p.user_id }}</a>: {% endif %}{{ p.label }} — {{ p.reason or p.source }} ({{ p.source }}) —
+                <strong>{% if p.needs_review %}Needs review{% elif p.status == 'delivering' %}Delivering now{% else %}Pending{% endif %}</strong>,
+                waiting since {{ p.created_at[:16]|replace("T", " ") }} UTC, {{ p.attempts }} attempt(s)
+                <br><span class="text-muted">{{ p.last_error }}</span>
+                {% if p.status == 'needs_review' %}
+                <br><button type="button" class="btn btn-secondary btn-sm" onclick="resolvePendingReward({{ p.id }}, 'retry')">Not received — retry delivery</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="resolvePendingReward({{ p.id }}, 'delivered')">Received — mark as delivered</button>
+                {% endif %}</li>
+        {% endfor %}
+        </ul>
+    </div>
+    <script>
+    // The global fetch wrapper (dashboard.js) adds the X-CSRF-Token.
+    async function resolvePendingReward(id, action) {
+        const question = action === 'retry'
+            ? 'Retry delivery? Only do this if the member does NOT have the reward - it will be granted again.'
+            : 'Mark as delivered? Only do this if the member already HAS the reward - it will not be granted again.';
+        if (!confirm(question)) return;
+        const res = await fetch('/api/pending-rewards/' + id + '/' + action, { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (data.success) { location.reload(); }
+        else { alert(data.error || 'Could not update this reward.'); }
+    }
+    </script>
+    {% endif %}
+    {% if target_user_id and active_effects %}
+    <p class="text-sm" style="margin-bottom:16px;">
+        <strong>Active XP boost:</strong>
+        {% for fx in active_effects %}{{ "%g"|format(fx.multiplier) }}× until {{ fx.expires_at[:16]|replace("T", " ") }} UTC{% if not loop.last %} · {% endif %}{% endfor %}
+        <span class="text-muted">(the highest multiplier applies)</span>
+    </p>
+    {% endif %}
     <div class="table-wrap">
         <table class="table">
             <thead>
                 {% if target_user_id %}
-                <tr><th>Item</th><th>Type</th><th>Quantity</th><th>Source</th><th>Last Updated</th></tr>
+                <tr><th>Item</th><th>Type</th><th>Quantity</th><th>Status</th><th>Source</th><th>Last Updated</th></tr>
                 {% else %}
                 <tr><th>User ID</th><th>Item</th><th>Type</th><th>Quantity</th><th>Last Updated</th></tr>
                 {% endif %}
@@ -42,8 +84,14 @@
                     <td><strong>{{ it.item_name }}</strong></td>
                     <td><span class="badge badge-accent">{{ it.item_type }}</span></td>
                     <td>×{{ it.quantity }}</td>
+                    <td>
+                        {% if it.equipped %}<span class="badge badge-accent">Equipped</span>{% endif %}
+                        {% if it.expires_at %}<span class="text-muted">Expires {{ it.expires_at[:16]|replace("T", " ") }} UTC</span>{% endif %}
+                        {% if not it.equipped and not it.expires_at %}<span class="text-muted">—</span>{% endif %}
+                    </td>
                     <td><span class="badge badge-source">{{ it.source }}</span></td>
-                    <td class="text-muted">{{ it.updated_at[:16] if it.updated_at else "—" }}</td>
+                    {% set stamp = it.updated_at or it.created_at %}
+                    <td class="text-muted">{{ stamp[:16] if stamp else "—" }}</td>
                     {% else %}
                     {% set u = user_map.get(it.user_id, {}) %}
                     <td>{{ user_identity(it.user_id, u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
@@ -54,7 +102,7 @@
                     {% endif %}
                 </tr>
                 {% else %}
-                <tr><td colspan="5" class="empty">
+                <tr><td colspan="{{ 6 if target_user_id else 5 }}" class="empty">
                     {% if target_user_id %}This member holds no items{% else %}No items held anywhere in this server yet{% endif %}
                 </td></tr>
                 {% endfor %}

@@ -31,6 +31,21 @@ def wallet(user=USER):
         (GUILD, user))[0]
 
 
+def dashboard_body(xp):
+    """Dashboard member edit that also sets the wallet to 0 / 0.
+
+    The route requires the wallet the form was opened with for every currency
+    it is asked to write (a stale or missing snapshot is refused).
+    """
+    held = rows(
+        "SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
+        (GUILD, USER))
+    coins, diamonds = held[0] if held else (0, 0)
+    return {"user_id": USER, "xp": xp, "coins": 0, "diamonds": 0,
+            "expected_coins": int(coins or 0),
+            "expected_diamonds": int(diamonds or 0)}
+
+
 def claims(user=USER):
     return rows(
         "SELECT reward_level, track, reward_ref, status, payload_json, "
@@ -326,7 +341,7 @@ async def main():
     before_dash = len(claims())
     response = client.post(
         "/api/edit-member",
-        json={"user_id": USER, "xp": 400, "coins": 0, "diamonds": 0},
+        json=dashboard_body(400),
         headers={"X-CSRF-Token": "phase1-csrf"})
     check("10 dashboard XP edit does not duplicate entitlement identities",
           response.status_code < 400 and len(claims()) == before_dash
@@ -338,7 +353,7 @@ async def main():
     seed_currency(3, 40)
     response = client.post(
         "/api/edit-member",
-        json={"user_id": USER, "xp": 1000, "coins": 0, "diamonds": 0},
+        json=dashboard_body(1000),
         headers={"X-CSRF-Token": "phase1-csrf"})
     created = [c for c in claims() if c[0] == 3]
     check("10 dashboard crossing creates one entitlement for the new identity",
@@ -350,7 +365,7 @@ async def main():
     dashboard_side_effects_before = reward_side_effect_snapshot()
     response = client.post(
         "/api/edit-member",
-        json={"user_id": USER, "xp": -987, "coins": 0, "diamonds": 0},
+        json=dashboard_body(-987),
         headers={"X-CSRF-Token": "phase1-csrf"})
     after_negative_dashboard = level_of()
     # A NEGATIVE/absent XP field reaches this route clamped to 0, which is still a
