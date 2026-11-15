@@ -1187,6 +1187,604 @@ class UnequipSlotChangeTests(AuditCase):
         self.assertEqual(self.member.add_roles.await_count, 1)   # tried once
 
 
+# ── 6c. failures after the Discord role step (no cancellation involved) ─────
+class EquipAfterRoleStepTests(AuditCase):
+    """Discord added the role; then the equip cannot be recorded.
+
+    Three places: the ownership re-read fails, the ownership entry is gone,
+    or Discord itself did not confirm the add. The role this call added is
+    taken back unless another system entitles the member to it; whenever the
+    Discord state cannot be confirmed the result AND the log say "uncertain".
+    Every test asserts the result, the slot, the worn roles and the log.
+    """
+    async def equip_flame(self, *, reread_fails=False, entry_vanishes=False):
+        """Equip Flame with one fault injected right after Discord added it."""
+        real_entries = inventory.get_inventory_entries
+        added = self.member.add_roles
+        state = {"role_on": False}
+
+        async def add_roles(role, reason=None):
+            await added(role, reason=reason)
+            state["role_on"] = True
+            if entry_vanishes:
+                execute("DELETE FROM inventory_items WHERE user_id=? AND "
+                        "item_name='Flame'", (USER,))
+
+        async def entries(*args, **kwargs):
+            if reread_fails and state["role_on"]:
+                raise sqlite3.OperationalError("disk I/O error")
+            return await real_entries(*args, **kwargs)
+
+        self.member.add_roles = AsyncMock(side_effect=add_roles)
+        log = io.StringIO()
+        try:
+            with patch.object(inventory, "get_inventory_entries", entries), \
+                    contextlib.redirect_stdout(log):
+                result = await equip_engine.equip_role(
+                    self.bot, GUILD, USER, "Flame")
+        finally:
+            self.member.add_roles = added          # the fault is one-shot
+        return result, log.getvalue()
+
+    def entitled(self, reason="level reward role"):
+        from utils import timed_ownership
+        return patch.object(timed_ownership, "non_slot_role_entitlement",
+                            AsyncMock(return_value=reason))
+
+    def uncertain_lines(self, log):
+        return [line for line in log.splitlines() if "[EQUIP][UNCERTAIN]" in line]
+
+    def assert_traceable(self, line, stage):
+        """The log line names everything needed to check the member by hand."""
+        for part in ("operation=equip", f"stage={stage}", f"guild={GUILD}",
+                     f"user={USER}", "item='Flame'", f"role={FLAME}", "entry=i:"):
+            self.assertIn(part, line)
+
+    # ── the ownership re-read fails ────────────────────────────────────────
+    async def test_failed_ownership_reread_is_a_result_and_takes_the_role_back(self):
+        await self.give_roles()
+        result, log = await self.equip_flame(reread_fails=True)   # does not raise
+        self.assertFalse(result["success"])
+        self.assertEqual((result["role_added"], result["uncertain"]), (False, False))
+        self.assertIn("nothing was changed", result["error"])
+        self.assertEqual((slot(), worn(self.member)), ([], []))
+        self.assertEqual(self.member.remove_roles.await_count, 1)
+        self.assertEqual(self.uncertain_lines(log), [])
+
+    async def test_failed_reread_and_failed_removal_is_uncertain_and_logged(self):
+        await self.give_roles()
+        self.member.remove_roles = AsyncMock(side_effect=RuntimeError("Discord 500"))
+        result, log = await self.equip_flame(reread_fails=True)
+        self.assertFalse(result["success"])
+        self.assertEqual((result["role_added"], result["uncertain"]), (True, True))
+        self.assertIn("reconcile", result["error"])
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        self.assertEqual(self.member.remove_roles.await_count, 1)     # not retried
+        lines = self.uncertain_lines(log)
+        self.assertEqual(len(lines), 1)
+        self.assert_traceable(lines[0], "ownership_recheck")
+        self.member.roles.clear()        # the fixture's own inconsistency
+
+    async def test_failed_reread_through_the_equip_button_gets_a_reply(self):
+        await self.give_roles()
+        view, _ = await self.panel_of("Flame")
+        real_entries = inventory.get_inventory_entries
+
+        async def entries(*args, **kwargs):
+            if worn(self.member):
+                raise sqlite3.OperationalError("disk I/O error")
+            return await real_entries(*args, **kwargs)
+
+        with patch.object(inventory, "get_inventory_entries", entries), \
+                contextlib.redirect_stdout(io.StringIO()):
+            outcome = await self.click(view, wallet.EquipToggleButton)
+        self.assertEqual(outcome[0], "refused")
+        self.assertIn("nothing was changed", outcome[1])
+        self.assertEqual((slot(), worn(self.member)), ([], []))
+
+    # ── the ownership entry is gone ────────────────────────────────────────
+    async def test_entry_gone_during_the_discord_call_takes_the_role_back(self):
+        await self.give_roles()
+        result, log = await self.equip_flame(entry_vanishes=True)
+        self.assertFalse(result["success"])
+        self.assertEqual((result["role_added"], result["uncertain"]), (False, False))
+        self.assertIn("nothing was changed", result["error"])
+        self.assertEqual((slot(), worn(self.member)), ([], []))
+        self.assertEqual(self.member.remove_roles.await_count, 1)
+        self.assertEqual(self.uncertain_lines(log), [])
+
+    async def test_entry_gone_and_failed_removal_is_uncertain_and_logged(self):
+        await self.give_roles()
+        self.member.remove_roles = AsyncMock(side_effect=RuntimeError("Discord 500"))
+        result, log = await self.equip_flame(entry_vanishes=True)
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, True, True))
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        lines = self.uncertain_lines(log)
+        self.assertEqual(len(lines), 1)
+        self.assert_traceable(lines[0], "ownership_changed")
+        self.member.roles.clear()
+
+    # ── another system entitles the member to the same role ────────────────
+    async def test_role_covered_by_another_entitlement_is_kept_not_removed(self):
+        for fault in ({"entry_vanishes": True}, {"reread_fails": True}):
+            with self.subTest(fault):
+                await self.give_roles()
+                with self.entitled() as check:
+                    result, log = await self.equip_flame(**fault)
+                self.assertFalse(result["success"])
+                self.assertEqual(check.await_count, 1)
+                self.assertEqual(check.await_args.args, (GUILD, USER, FLAME))
+                self.assertFalse(result["success"])
+                self.assertEqual((result["role_added"], result["uncertain"]),
+                                 (False, False))
+                self.assertTrue(result["role_kept_by_entitlement"])
+                self.assertEqual(self.member.remove_roles.await_count, 0)
+                self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+                self.assertEqual(self.uncertain_lines(log), [])
+                self.assertIn("another entitlement covers it", log)
+                self.member.roles.clear()
+                execute("DELETE FROM inventory_items WHERE user_id=?", (USER,))
+
+    async def test_failed_slot_write_keeps_a_role_another_entitlement_covers(self):
+        await self.give_roles()
+        with self.entitled(), patch.object(
+                equip_engine, "record_equipped",
+                AsyncMock(side_effect=sqlite3.OperationalError("database is locked"))):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual((result["success"], result["uncertain"]), (False, False))
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        self.member.roles.clear()
+
+    async def test_unverifiable_entitlement_leaves_the_role_and_is_uncertain(self):
+        await self.give_roles()
+        from utils import timed_ownership
+        with patch.object(timed_ownership, "non_slot_role_entitlement",
+                          AsyncMock(side_effect=sqlite3.OperationalError("locked"))):
+            result, log = await self.equip_flame(entry_vanishes=True)
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, True, True))
+        self.assertEqual(self.member.remove_roles.await_count, 0)   # unknown is not "no"
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        self.assertEqual(len(self.uncertain_lines(log)), 1)
+        self.member.roles.clear()
+
+    # ── a role the member wore before the operation ────────────────────────
+    async def test_role_worn_before_the_operation_is_never_removed(self):
+        for fault in ({"entry_vanishes": True}, {"reread_fails": True}):
+            with self.subTest(fault):
+                await self.give_roles()
+                self.member.roles.append(self.guild.get_role(FLAME))
+                real_entries = inventory.get_inventory_entries
+                calls = {"n": 0}
+
+                async def entries(*args, **kwargs):
+                    # No Discord add happens here, so the fault is injected at
+                    # the re-read itself: the second read of this equip.
+                    calls["n"] += 1
+                    if calls["n"] == 2:
+                        if fault.get("reread_fails"):
+                            raise sqlite3.OperationalError("disk I/O error")
+                        execute("DELETE FROM inventory_items WHERE user_id=? "
+                                "AND item_name='Flame'", (USER,))
+                    return await real_entries(*args, **kwargs)
+
+                log = io.StringIO()
+                with patch.object(inventory, "get_inventory_entries", entries), \
+                        contextlib.redirect_stdout(log):
+                    result = await equip_engine.equip_role(
+                        self.bot, GUILD, USER, "Flame")
+                self.assertEqual(calls["n"], 2)
+                self.assertFalse(result["success"])
+                self.assertEqual((result["role_added"], result["uncertain"]),
+                                 (False, False))
+                self.assertEqual(self.member.add_roles.await_count, 0)
+                self.assertEqual(self.member.remove_roles.await_count, 0)
+                self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+                self.assertEqual(self.uncertain_lines(log.getvalue()), [])
+                self.member.roles.clear()
+                execute("DELETE FROM inventory_items WHERE user_id=?", (USER,))
+
+    # ── Discord did not confirm the add ────────────────────────────────────
+    async def test_discord_applied_the_role_but_timed_out(self):
+        await self.give_roles()
+
+        async def add_roles(role, reason=None):
+            self.member.roles.append(role)
+            raise asyncio.TimeoutError()
+
+        self.member.add_roles = AsyncMock(side_effect=add_roles)
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, True, True))
+        self.assertIn("may or may not have been applied", result["error"])
+        # Deliberately neither retried nor undone.
+        self.assertEqual(self.member.add_roles.await_count, 1)
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        lines = self.uncertain_lines(log.getvalue())
+        self.assertEqual(len(lines), 1)
+        self.assert_traceable(lines[0], "discord_add")
+        self.assertIn("role visible on the member: True", lines[0])
+        self.member.roles.clear()
+
+    async def test_discord_timeout_with_no_role_visible_is_still_uncertain(self):
+        await self.give_roles()
+        self.member.add_roles = AsyncMock(side_effect=asyncio.TimeoutError())
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, False, True))
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([], []))
+        lines = self.uncertain_lines(log.getvalue())
+        self.assertEqual(len(lines), 1)
+        self.assertIn("role visible on the member: False", lines[0])
+
+    async def test_definite_discord_refusal_is_a_clean_failure_without_the_log(self):
+        await self.give_roles()
+        refused = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"),
+                                    "Missing Permissions")
+        self.member.add_roles = AsyncMock(side_effect=refused)
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, False, False))
+        self.assertNotIn("may or may not", result["error"])
+        self.assertEqual(self.uncertain_lines(log.getvalue()), [])
+        self.assertEqual((slot(), worn(self.member)), ([], []))
+
+    # ── the slot cannot be read back ───────────────────────────────────────
+    # A failed read is not proof that the slot is empty: the role stays on.
+    def slot_unreadable_once(self, armed):
+        real = equip_engine.get_equipped
+
+        async def get_equipped(*args, **kwargs):
+            if armed["on"]:
+                raise sqlite3.OperationalError("database is locked")
+            return await real(*args, **kwargs)
+        return patch.object(equip_engine, "get_equipped", get_equipped)
+
+    def committing_then_raising(self, armed):
+        real = equip_engine.record_equipped
+
+        async def record(*args, **kwargs):
+            await real(*args, **kwargs)                 # the row IS committed
+            armed["on"] = True
+            raise sqlite3.OperationalError("disk I/O error")
+        return patch.object(equip_engine, "record_equipped", record)
+
+    async def test_unreadable_slot_never_removes_a_role_the_slot_records(self):
+        await self.give_roles()
+        armed, log = {"on": False}, io.StringIO()
+        with self.committing_then_raising(armed), self.slot_unreadable_once(armed), \
+                contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([("Flame", FLAME)], ["Flame"]))
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, True, True))
+        lines = self.uncertain_lines(log.getvalue())
+        self.assertEqual(len(lines), 1)
+        self.assert_traceable(lines[0], "slot_write")
+
+    async def test_unreadable_slot_during_a_swap_keeps_the_new_role(self):
+        await self.give_roles()
+        await equip_engine.equip_role(self.bot, GUILD, USER, "Blue")
+        removed_before = self.member.remove_roles.await_count
+        armed = {"on": False}
+        with self.committing_then_raising(armed), self.slot_unreadable_once(armed), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual(self.member.remove_roles.await_count, removed_before)
+        self.assertEqual(slot(), [("Flame", FLAME)])
+        self.assertIn("Flame", worn(self.member))        # the recorded role is on
+        self.assertTrue(result["uncertain"])
+        self.member.roles[:] = [self.guild.get_role(FLAME)]   # fixture: drop Blue
+
+    async def test_unreadable_slot_after_a_failed_write_is_uncertain_not_removed(self):
+        # Nothing was written here, but the helper cannot know that.
+        await self.give_roles()
+        armed, log = {"on": False}, io.StringIO()
+
+        async def record(*args, **kwargs):
+            armed["on"] = True
+            raise sqlite3.OperationalError("database is locked")
+
+        with patch.object(equip_engine, "record_equipped", record), \
+                self.slot_unreadable_once(armed), contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, True, True))
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        self.assertEqual(len(self.uncertain_lines(log.getvalue())), 1)
+        self.member.roles.clear()
+
+    async def test_cancelled_after_the_slot_was_saved_with_unreadable_slot(self):
+        await self.give_roles()
+        armed, log = {"on": False}, io.StringIO()
+        real = equip_engine.record_equipped
+
+        async def record(*args, **kwargs):
+            await real(*args, **kwargs)
+            armed["on"] = True
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+        with patch.object(equip_engine, "record_equipped", record), \
+                self.slot_unreadable_once(armed), contextlib.redirect_stdout(log):
+            task = asyncio.ensure_future(
+                equip_engine.equip_role(self.bot, GUILD, USER, "Flame"))
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([("Flame", FLAME)], ["Flame"]))
+        self.assertIn("[EQUIP][UNCERTAIN]", log.getvalue())
+
+    # ── a role must not vouch for itself (Booster "already worn" rule) ──────
+    # Nothing about entitlement is stubbed below unless a test says so: the
+    # real non_slot_role_entitlement and Booster rules run. A live
+    # discord.Member carries no boost count, so every active booster is
+    # "count unknown", and the Booster rule then lets a level-2 role the
+    # member already WEARS count as theirs. The role an equip has just added
+    # is worn too, and Member.add_roles does not update member.roles (the
+    # gateway echo does, later), so the answer used to depend on timing.
+    async def booster(self, *, colour_level=None, boost2=False, count=None,
+                      boosting=True):
+        await self.give_roles()
+        self.addCleanup(self.booster_cleanup)
+        if boosting:
+            self.member.premium_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        if count is not None:
+            self.member.premium_subscription_count = count
+        execute("INSERT OR REPLACE INTO boost_config (guild_id,enabled,"
+                "boost2_role_id) VALUES (?,1,?)", (GUILD, FLAME if boost2 else None))
+        if colour_level:
+            execute("INSERT INTO boost_color_roles (guild_id,role_id,role_name,"
+                    "requires_boost_level) VALUES (?,?,?,?)",
+                    (GUILD, FLAME, "Flame", colour_level))
+
+    def booster_cleanup(self):
+        self.member.premium_since = None
+        self.member.roles.clear()
+        if hasattr(self.member, "premium_subscription_count"):
+            del self.member.premium_subscription_count
+        for table in ("boost_color_roles", "boost_config", "mvp_history",
+                      "mvp_config"):
+            execute(f"DELETE FROM {table}")
+
+    def discord_state(self, *, echo, during_add=None):
+        """Keep what Discord HAS apart from what the member cache SHOWS.
+
+        Returns the set of role ids really on the member. `echo=False` is the
+        real client between a role call and its gateway event: the call
+        reaches Discord, member.roles does not change.
+        """
+        on_discord = set()
+
+        async def add_roles(role, reason=None):
+            await asyncio.sleep(0.01)
+            on_discord.add(role.id)
+            if echo and role not in self.member.roles:
+                self.member.roles.append(role)
+            if during_add:
+                during_add(on_discord)
+
+        async def remove_roles(role, reason=None):
+            await asyncio.sleep(0.01)
+            on_discord.discard(role.id)
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        self.member.add_roles = AsyncMock(side_effect=add_roles)
+        self.member.remove_roles = AsyncMock(side_effect=remove_roles)
+        return on_discord
+
+    async def real_entitlement(self):
+        return await timed_ownership.non_slot_role_entitlement(
+            GUILD, USER, FLAME, bot=self.bot, member=self.member)
+
+    async def equip_with_failed_write(self):
+        log = io.StringIO()
+        with patch.object(equip_engine, "record_equipped", AsyncMock(
+                side_effect=sqlite3.OperationalError("database is locked"))), \
+                contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        return result, log.getvalue()
+
+    def outcome(self, result):
+        return (result["success"], result["role_added"], result["uncertain"],
+                bool(result.get("role_kept_by_entitlement")))
+
+    def assert_kept_uncertain(self, result, log):
+        """Kept, NOT called an entitlement, and one line an admin can act on."""
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual(slot(), [])
+        self.assertEqual(self.outcome(result), (False, True, True, False))
+        lines = self.uncertain_lines(log)
+        self.assertEqual(len(lines), 1)
+        self.assert_traceable(lines[0], "slot_write")
+
+    async def test_booster_level2_colour_added_by_the_equip_is_not_an_entitlement(self):
+        await self.booster(colour_level=2)
+        self.assertIsNone(await self.real_entitlement())     # before the equip
+        result, log = await self.equip_with_failed_write()
+        self.assertEqual(worn(self.member), ["Flame"])
+        self.assert_kept_uncertain(result, log)
+
+    async def test_booster_boost2_role_added_by_the_equip_is_not_an_entitlement(self):
+        await self.booster(boost2=True)
+        self.assertIsNone(await self.real_entitlement())
+        result, log = await self.equip_with_failed_write()
+        self.assertEqual(worn(self.member), ["Flame"])
+        self.assert_kept_uncertain(result, log)
+
+    async def test_booster_fallback_role_when_the_unit_is_cancelled(self):
+        await self.booster(colour_level=2)
+
+        async def add_roles(role, reason=None):
+            self.member.roles.append(role)
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+        self.member.add_roles = AsyncMock(side_effect=add_roles)
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            with self.assertRaises(asyncio.CancelledError):
+                await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        self.assertEqual(len(self.uncertain_lines(log.getvalue())), 1)
+        self.assertNotIn("another entitlement covers", log.getvalue())
+
+    async def test_proven_boost_count_still_keeps_the_role_as_an_entitlement(self):
+        await self.booster(colour_level=2, count=2)          # two boosts KNOWN
+        self.assertTrue(await self.real_entitlement())
+        result, log = await self.equip_with_failed_write()
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        self.assertEqual(self.outcome(result), (False, False, False, True))
+        self.assertEqual(self.uncertain_lines(log), [])
+
+    async def test_level1_booster_colour_still_keeps_the_role_as_an_entitlement(self):
+        await self.booster(colour_level=1)
+        self.assertTrue(await self.real_entitlement())
+        result, log = await self.equip_with_failed_write()
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual(worn(self.member), ["Flame"])
+        self.assertEqual(self.outcome(result), (False, False, False, True))
+
+    async def test_booster_role_worn_before_the_equip_is_never_touched(self):
+        await self.booster(colour_level=2)
+        self.member.roles.append(self.guild.get_role(FLAME))
+        result, log = await self.equip_with_failed_write()
+        self.assertEqual((self.member.add_roles.await_count,
+                          self.member.remove_roles.await_count), (0, 0))
+        self.assertEqual(worn(self.member), ["Flame"])
+        self.assertEqual(self.outcome(result), (False, False, False, False))
+        self.assertEqual(self.uncertain_lines(log), [])
+
+    async def test_recorded_entitlement_granted_during_the_equip_keeps_the_role(self):
+        # An MVP award written while Discord is awaited: a check taken before
+        # the add would miss it. No echo, so only the record can speak.
+        await self.booster(boosting=False)
+
+        def crown(on_discord):
+            execute("INSERT OR REPLACE INTO mvp_config (guild_id,enabled,"
+                    "mvp_role_id) VALUES (?,1,?)", (GUILD, FLAME))
+            execute("INSERT INTO mvp_history (guild_id,user_id,user_display_name,"
+                    "cycle_start,cycle_end,score) VALUES (?,?,'M','2026-11-12',"
+                    "'2026-11-13',1)", (GUILD, USER))
+        on_discord = self.discord_state(echo=False, during_add=crown)
+        self.assertIsNone(await self.real_entitlement())
+        result, log = await self.equip_with_failed_write()
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertIn(FLAME, on_discord)
+        self.assertEqual(self.outcome(result), (False, False, False, True))
+        self.assertEqual(self.uncertain_lines(log), [])
+
+    async def test_failed_entitlement_check_at_either_stage_is_uncertain(self):
+        await self.booster(colour_level=2)
+        real = timed_ownership.non_slot_role_entitlement
+        for failing_call in (1, 2):
+            with self.subTest(failing_call=failing_call):
+                self.member.roles.clear()
+                slow_discord(self.member)
+                calls = []
+
+                async def check(*args, **kwargs):
+                    calls.append(1)
+                    if len(calls) == failing_call:
+                        raise timed_ownership.EntitlementCheckError(
+                            "boost tables unreadable")
+                    return await real(*args, **kwargs)
+                log = io.StringIO()
+                with patch.object(equip_engine, "record_equipped", AsyncMock(
+                side_effect=sqlite3.OperationalError("database is locked"))), \
+                        patch.object(timed_ownership, "non_slot_role_entitlement",
+                                     check), contextlib.redirect_stdout(log):
+                    result = await equip_engine.equip_role(
+                        self.bot, GUILD, USER, "Flame")
+                self.assertEqual(len(calls), failing_call)
+                self.assertEqual(worn(self.member), ["Flame"])
+                self.assert_kept_uncertain(result, log.getvalue())
+
+    async def test_booster_with_unreadable_slot_after_a_committed_write(self):
+        await self.booster(colour_level=2)
+        armed, log = {"on": False}, io.StringIO()
+        with self.committing_then_raising(armed), self.slot_unreadable_once(armed), \
+                contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([("Flame", FLAME)], ["Flame"]))
+        self.assertEqual(self.outcome(result), (False, True, True, False))
+        self.assertEqual(len(self.uncertain_lines(log.getvalue())), 1)
+
+    async def test_booster_with_readable_slot_after_a_committed_write(self):
+        await self.booster(colour_level=2)
+        armed, log = {"on": False}, io.StringIO()
+        with self.committing_then_raising(armed), contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual(self.member.remove_roles.await_count, 0)
+        self.assertEqual((slot(), worn(self.member)), ([("Flame", FLAME)], ["Flame"]))
+        self.assertEqual(self.outcome(result), (False, True, True, False))
+        self.assertIn("the slot names this role", log.getvalue())
+
+    async def test_stale_cache_does_not_remove_a_booster_role_granted_earlier(self):
+        # The role is on Discord already (put there outside this bot), but the
+        # member cache has not caught up, so the equip believes it added it.
+        await self.booster(colour_level=2)
+        on_discord = self.discord_state(echo=False)
+        on_discord.add(FLAME)
+        result, log = await self.equip_with_failed_write()
+        self.assertIn(FLAME, on_discord)
+        self.assert_kept_uncertain(result, log)
+
+    async def test_booster_role_granted_during_the_equip_is_not_removed(self):
+        await self.booster(colour_level=2)
+        on_discord = self.discord_state(
+            echo=False, during_add=lambda held: held.add(FLAME))
+        result, log = await self.equip_with_failed_write()
+        self.assertIn(FLAME, on_discord)
+        self.assert_kept_uncertain(result, log)
+
+    async def test_booster_fallback_outcome_does_not_depend_on_the_gateway_echo(self):
+        await self.booster(colour_level=2)
+        seen = {}
+        for echo in (True, False):
+            self.member.roles.clear()
+            on_discord = self.discord_state(echo=echo)
+            result, log = await self.equip_with_failed_write()
+            self.assert_kept_uncertain(result, log)
+            seen[echo] = (self.outcome(result), sorted(on_discord),
+                          self.member.remove_roles.await_count)
+        self.assertEqual(seen[True], seen[False])
+        self.assertEqual(seen[True][1], [FLAME])
+
+    # ── anything unforeseen after the role step ────────────────────────────
+    async def test_unexpected_error_after_the_role_step_is_uncertain_not_raised(self):
+        await self.give_roles()
+        log = io.StringIO()
+        with patch.object(equip_engine, "_take_back_unsaved_role",
+                          AsyncMock(side_effect=RuntimeError("bug"))), \
+                patch.object(equip_engine, "record_equipped",
+                             AsyncMock(side_effect=sqlite3.OperationalError("locked"))), \
+                contextlib.redirect_stdout(log):
+            result = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertEqual((result["success"], result["role_added"],
+                          result["uncertain"]), (False, True, True))
+        self.assertEqual((slot(), worn(self.member)), ([], ["Flame"]))
+        lines = self.uncertain_lines(log.getvalue())
+        self.assertEqual(len(lines), 1)
+        self.assert_traceable(lines[0], "unexpected_error")
+        self.member.roles.clear()
+
+
 # ── 7. Discord failure / uncertain outcome ──────────────────────────────────
 class DiscordFailureTests(AuditCase):
     async def test_role_that_could_not_be_added_changes_nothing(self):
