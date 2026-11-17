@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import aiosqlite
+import discord  # noqa: E402
 
 from phase1_support import GUILD, USER, execute, rows, reset_database
 
@@ -44,7 +45,7 @@ from utils import (  # noqa: E402
 )
 import dashboard.app as dashboard  # noqa: E402
 from test_inventory_actions import (  # noqa: E402
-    InventoryActionCase as _ActionCase, FLAME, labels,
+    InventoryActionCase as _ActionCase, BLUE, FLAME, labels,
 )
 
 OTHER_USER = 8202
@@ -692,6 +693,169 @@ class DefinitionsSourceTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await db.execute("DROP TABLE schema_probe")
                 await db.commit()
+
+
+class PermanentRoleKeptUnequippedTests(RewardPreservationCase):
+    """PATCH 5 through the real Mission path: a refused equip keeps the role.
+
+    The Mission completes, the role is written into the Inventory, and the
+    equip is refused because the previously equipped role cannot be released.
+    The role must stay owned (not rolled back, not parked, not paid twice).
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Blue owns the slot and cannot be released.
+        self.assertTrue((await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=BLUE, source="test"))["success"])
+        refused = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+
+        async def cannot_release_blue(role, reason=None):
+            if role.id == BLUE:
+                raise refused
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        self.member.remove_roles = AsyncMock(side_effect=cannot_release_blue)
+
+    def slot_and_worn(self):
+        slot = rows("SELECT item_name, role_id FROM equipped_roles "
+                    "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        return slot, [r.name for r in self.member.roles]
+
+    async def test_the_mission_role_reward_survives_the_refused_equip(self):
+        legacy_mission(FLAME, reward_type="role", name="Cape")
+        completed = await self.complete_mission()
+        # The objective is done and stays done.
+        self.assertEqual([d["name"] for d in completed], ["Cape"])
+        self.assertEqual(self.progress(), [(1, 1)])
+        # The role is the member's, unequipped; the slot still names Blue.
+        self.assertEqual(rows("SELECT item_name, item_type, quantity FROM "
+                              "inventory_items WHERE item_name='Blue'"),
+                         [("Blue", "role", 1)])
+        self.assertTrue(any(r[0] == "Flame" for r in rows(
+            "SELECT item_name FROM inventory_items")), rows(
+                "SELECT item_name FROM inventory_items"))
+        slot, worn = self.slot_and_worn()
+        self.assertEqual((slot, worn), ([("Blue", BLUE)], ["Blue"]))
+        # Not a held reward: it was delivered, so no retry can pay it twice.
+        self.assertEqual(pending(), [])
+        # And the item can be equipped later from the Inventory, exactly once.
+        self.member.remove_roles = AsyncMock(
+            side_effect=lambda role, reason=None: self.member.roles.remove(role)
+            if role in self.member.roles else None)
+        entries = await inventory.get_inventory_entries(GUILD, USER)
+        flame = next(e for e in entries if e["item_name"] == "Flame")
+        equipped = await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame", entry_key=flame["entry_key"])
+        self.assertTrue(equipped["success"], equipped)
+        self.assertEqual(self.slot_and_worn(), ([("Flame", FLAME)], ["Flame"]))
+        self.assertEqual(rows("SELECT COUNT(*) FROM inventory_items "
+                              "WHERE item_name='Flame'"), [(1,)])
+
+
+class PendingRewardIdentityTests(_ActionCase):
+    """D: one reward source is one debt, and one source is one row."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        await mission_engine.ensure_tables()
+
+    async def test_three_concurrent_parks_with_one_key_create_one_row(self):
+        payload = {"item_name": "Tonic", "source": "mission",
+                   "idempotency_key": "mission:8101:8201:7:2026-11"}
+        ids = await asyncio.gather(*[
+            pending_rewards.park(
+                GUILD, USER, "item", dict(payload), source="mission",
+                reason="Mission complete: Chatter", error="name clash")
+            for _ in range(3)])
+        self.assertEqual(len(set(ids)), 1, ids)               # atomic
+        self.assertEqual(rows("SELECT COUNT(*) FROM pending_rewards"), [(1,)])
+
+    async def test_every_source_identity_is_stable_per_reward_type(self):
+        identities = [
+            ("mission", "mission:8101:8201:7:2026-11"),
+            ("event", "event:8101:44:8201"),
+            ("tag_mission", "tag_mission:8101:9:8201"),
+            ("tag_partner", "tag_partner:8101:55:8201"),
+            ("minigame", "minigame:8101:301:8201"),
+        ]
+        for source, identity in identities:
+            for reward_type in ("item", "role", "temp_role"):
+                payload = {"item_name": f"{source}-{reward_type}",
+                           "source": source, "idempotency_key": identity}
+                first = await pending_rewards.park(
+                    GUILD, USER, reward_type, dict(payload), source=source,
+                    reason="reward", error="name clash")
+                again = await pending_rewards.park(
+                    GUILD, USER, reward_type, dict(payload), source=source,
+                    reason="reward", error="name clash")
+                self.assertEqual(first, again, (source, reward_type))
+                # A different reward of the same source stays a second debt.
+                other = await pending_rewards.park(
+                    GUILD, USER, reward_type,
+                    {**payload, "idempotency_key": identity + ":other"},
+                    source=source, reason="reward", error="name clash")
+                self.assertNotEqual(other, first, (source, reward_type))
+        self.assertEqual(rows("SELECT COUNT(*) FROM pending_rewards"),
+                         [(len(identities) * 3 * 2,)])
+
+    async def test_a_replayed_give_reward_is_one_held_copy_for_each_type(self):
+        await inventory.give_item(GUILD, USER, "Tonic", 1, item_type="potion",
+                                  source="shop")
+        for reward_type in ("item", "role", "temp_role"):
+            kwargs = {"source": "mission",
+                      "idempotency_key": f"mission:8101:8201:7:{reward_type}"}
+            if reward_type == "item":
+                kwargs["item_name"] = "Tonic"
+            else:
+                kwargs["role_id"] = FLAME
+            # Shop potion "Tonic" owns the name: a role named "Tonic" clashes,
+            # and so does an item grant called "Tonic".
+            if reward_type != "item":
+                self.guild.get_role(FLAME).name = "Tonic"
+            for _ in range(2):
+                await reward_engine.give_reward(
+                    self.bot, GUILD, USER, reward_type, **kwargs)
+            held = rows("SELECT reward_type, source, payload FROM "
+                        "pending_rewards WHERE reward_type=?", (reward_type,))
+            self.assertEqual(len(held), 1, (reward_type, held))
+            self.assertEqual(json.loads(held[0][2])["idempotency_key"],
+                             kwargs["idempotency_key"])
+            self.guild.get_role(FLAME).name = "Flame"
+
+    async def test_the_event_wrapper_keeps_the_key_on_its_item_branch(self):
+        from cogs import events as events_cog
+        await inventory.give_item(GUILD, USER, "Tonic", 1, item_type="potion",
+                                  source="shop")
+        key = "event:8101:44:8201"
+        member = SimpleNamespace(id=USER, roles=[], bot=False)
+        guild = SimpleNamespace(id=GUILD)
+        result = await events_cog.give_reward(
+            self.bot, guild, member, "item", "Tonic", 0, idempotency_key=key)
+        self.assertTrue(result.get("pending"), result)
+        held = rows("SELECT source, payload FROM pending_rewards")
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0][0], "event")
+        self.assertEqual(json.loads(held[0][1])["idempotency_key"], key)
+
+    def test_no_one_shot_source_still_keys_xp_only(self):
+        """The five call sites carry the key for every one-shot type."""
+        import pathlib as _p
+        root = _p.Path(__file__).resolve().parents[1]
+        wanted = {
+            "cogs/events.py": 'f"event:{interaction.guild.id}:{self.event_id}:"',
+            "utils/mission_engine.py": "f\"mission:{guild_id}:{user_id}:{d['id']}:\"",
+            "cogs/tagmissions.py": 'f"tag_mission:{guild_id}:{mission_id}:{user_id}"',
+            "cogs/tagpartners.py": 'f"tag_partner:{member.guild.id}:{partner_guild_id}:"',
+            "utils/minigame_engine.py": 'f"minigame:{self.guild_id}:{self.log_id}:"',
+        }
+        for name, marker in wanted.items():
+            text = (root / name).read_text()
+            self.assertIn(marker, text, name)
+            self.assertNotIn('if reward_type == "xp" else None', text, name)
+            self.assertNotIn('if rolled["reward_type"] == "xp" else None', text, name)
 
 
 class PermanentRoleGrantCollisionTests(RewardPreservationCase):

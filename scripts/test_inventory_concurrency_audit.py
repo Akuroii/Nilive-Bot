@@ -2785,6 +2785,76 @@ class TimedGrantObservationTests(AuditCase):
             await timed_ownership.get_timed_holding(result["entry_key"]))
 
 
+class PermanentRoleKeptUnequippedTests(AuditCase):
+    """PATCH 5: a refused equip never costs the member the permanent role.
+
+    The previous role cannot be released and the new role is confirmed off the
+    member, so the equip failed CLEANLY - but the ownership is real. The role
+    stays in the Inventory, unequipped; nothing is deleted, nothing is
+    refunded, nothing is uncertain.
+    """
+
+    async def occupy_the_slot_with_blue(self):
+        """Blue is equipped and CANNOT be released (the refused swap)."""
+        self.assertTrue((await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=BLUE,
+            source="test"))["success"])
+        self.assertEqual(slot(), [("Blue", BLUE)])
+        refused = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+
+        async def cannot_release_blue(role, reason=None):
+            if role.id == BLUE:
+                raise refused
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        self.member.remove_roles = AsyncMock(side_effect=cannot_release_blue)
+
+    async def test_an_earned_role_reward_is_kept_unequipped_with_reward_wording(self):
+        await self.occupy_the_slot_with_blue()
+        result = await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=FLAME, source="mission",
+            reason="Mission complete: Chatter")
+        # Ownership kept, the equip is honest about it, nothing is uncertain.
+        self.assertTrue(result["success"], result)
+        self.assertFalse(result["uncertain"], result)
+        self.assertTrue(result["keep_unequipped"], result)
+        self.assertFalse(result["equipped"], result)
+        self.assertFalse(result["role_added"], result)
+        # The item is the member's, the slot and Discord still say Blue.
+        self.assertEqual(rows("SELECT item_name, item_type, quantity "
+                              "FROM inventory_items WHERE item_name='Flame'"),
+                         [("Flame", "role", 1)])
+        self.assertEqual((slot(), worn(self.member)), ([("Blue", BLUE)], ["Blue"]))
+        self.assertEqual(rows("SELECT COUNT(*) FROM equipped_roles"), [(1,)])
+        # E: the wording names the source, never a purchase.
+        self.assertIn("granted as a mission reward", result["warning"])
+        self.assertNotIn("purchased", result["warning"])
+        # Nothing was held for a retry: the reward is already delivered.
+        self.assertFalse(result.get("pending"))
+        self.assertEqual(rows("SELECT COUNT(*) FROM pending_rewards"), [(0,)])
+
+    async def test_a_purchased_permanent_role_is_kept_and_says_purchased(self):
+        from cogs.shop import _deliver_purchase_effects
+        await self.occupy_the_slot_with_blue()      # the previous role holds
+        itx = shop_interaction(self.member, self.guild, self.bot)
+        result = await _deliver_purchase_effects(
+            itx, guild_id=GUILD, user_id=USER, itype="role", listing_type="role",
+            name="Flame", role_id=FLAME, product_id=77, source="shop",
+            op_id="op-kept-1")
+        # Delivered: success (so nothing is refunded) but not equipped.
+        self.assertTrue(result["success"], result)
+        self.assertIsNone(result["error"])
+        self.assertTrue(result["keep_unequipped"], result)
+        self.assertEqual(rows("SELECT item_name, item_type FROM inventory_items "
+                              "WHERE item_name='Flame'"), [("Flame", "role")])
+        self.assertEqual((slot(), worn(self.member)), ([("Blue", BLUE)], ["Blue"]))
+        # E: purchase wording on the purchase branch.
+        self.assertIn("was purchased", result["warning"])
+        self.assertNotIn("granted as", result["warning"])
+
+
 class FreshMemberCheckTests(AuditCase):
     """An absence in the member cache is confirmed with Discord before an add."""
 

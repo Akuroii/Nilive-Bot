@@ -526,9 +526,10 @@ class MinigameEngine:
                     # the fence refuses would never be retried. `log_id` is the
                     # run row opened before start(), so the key is stable across
                     # a retry and a repeat pays nothing.
+                    # Run (log_id) + member for every one-shot type, so a held
+                    # role/item reward is paid exactly once too.
                     idempotency_key=(f"minigame:{self.guild_id}:{self.log_id}:"
-                                     f"{entry['id']}"
-                                     if rolled["reward_type"] == "xp" else None))
+                                     f"{entry['id']}"))
                 if res and res.get("pending"):
                     # Kept in utils.pending_rewards and delivered by a later
                     # retry. The win stands (status stays "won", as it does

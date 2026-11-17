@@ -228,9 +228,10 @@ class TagMissions(commands.Cog):
                             # 'completed' status are written below regardless of
                             # delivery, so a refused award is never retried.
                             # Keying it makes the XP award durable.
+                            # Mission + member for every one-shot type, so a
+                            # held role/item reward is paid exactly once too.
                             idempotency_key=(
-                                f"tag_mission:{guild_id}:{mission_id}:{user_id}"
-                                if reward_type == "xp" else None),
+                                f"tag_mission:{guild_id}:{mission_id}:{user_id}"),
                         )
                         if result.get("success"):
                             outcome = "rewarded"

@@ -113,38 +113,47 @@ async def park(guild_id: int, user_id: int, reward_type: str, payload: dict, *,
     identity = str(payload.get("idempotency_key") or "").strip() or None
     now = _now()
     async with aiosqlite.connect(DB_PATH) as db:
-        if identity is not None:
+        # One write transaction for the lookup AND the insert. A bare SELECT
+        # followed by an INSERT lets two replays of the same source both find
+        # nothing and both insert a copy; BEGIN IMMEDIATE serialises them, so
+        # the second one sees the first one's row.
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            if identity is not None:
+                cursor = await db.execute(
+                    "SELECT id, payload FROM pending_rewards WHERE guild_id=? "
+                    "AND user_id=? AND reward_type=? AND source IS ? AND status "
+                    "IN (?, ?, ?) ORDER BY id",
+                    (guild_id, user_id, reward_type, source, *OPEN_STATUSES))
+                for held_id, held_payload in await cursor.fetchall():
+                    try:
+                        held_identity = str(
+                            (json.loads(held_payload or "{}") or {})
+                            .get("idempotency_key") or "").strip()
+                    except (TypeError, ValueError):
+                        held_identity = ""
+                    if held_identity and held_identity == identity:
+                        await db.execute(
+                            "UPDATE pending_rewards SET last_error=?, "
+                            "updated_at=? WHERE id=?",
+                            (str(error)[:300], now, held_id))
+                        await db.commit()
+                        print(f"[REWARDS] {reward_type} reward for "
+                              f"guild={guild_id} user={user_id} is already held "
+                              f"as pending reward #{held_id} (source identity "
+                              f"{identity!r}); not parked twice.")
+                        return int(held_id)
             cursor = await db.execute(
-                "SELECT id, payload FROM pending_rewards WHERE guild_id=? AND "
-                "user_id=? AND reward_type=? AND source IS ? AND status IN "
-                "(?, ?, ?) ORDER BY id",
-                (guild_id, user_id, reward_type, source, *OPEN_STATUSES))
-            for held_id, held_payload in await cursor.fetchall():
-                try:
-                    held_identity = str(
-                        (json.loads(held_payload or "{}") or {})
-                        .get("idempotency_key") or "").strip()
-                except (TypeError, ValueError):
-                    held_identity = ""
-                if held_identity and held_identity == identity:
-                    await db.execute(
-                        "UPDATE pending_rewards SET last_error=?, updated_at=? "
-                        "WHERE id=?",
-                        (str(error)[:300], now, held_id))
-                    await db.commit()
-                    print(f"[REWARDS] {reward_type} reward for guild={guild_id} "
-                          f"user={user_id} is already held as pending reward "
-                          f"#{held_id} (source identity {identity!r}); not "
-                          f"parked twice.")
-                    return int(held_id)
-        cursor = await db.execute(
-            "INSERT INTO pending_rewards (guild_id, user_id, reward_type, "
-            "payload, source, reason, status, attempts, last_error, "
-            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?,?)",
-            (guild_id, user_id, reward_type, json.dumps(payload), source,
-             reason, STATUS_PENDING, str(error)[:300], now, now))
-        await db.commit()
-        return cursor.lastrowid
+                "INSERT INTO pending_rewards (guild_id, user_id, reward_type, "
+                "payload, source, reason, status, attempts, last_error, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,1,?,?,?)",
+                (guild_id, user_id, reward_type, json.dumps(payload), source,
+                 reason, STATUS_PENDING, str(error)[:300], now, now))
+            await db.commit()
+            return cursor.lastrowid
+        except BaseException:
+            await db.rollback()
+            raise
 
 
 async def list_pending(guild_id: int, user_id: int | None = None) -> list[dict]:

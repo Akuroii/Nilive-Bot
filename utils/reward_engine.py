@@ -540,6 +540,28 @@ async def give_reward(bot: discord.Client,
                 role_added = (bool(equip_result.get("role_added"))
                               or ((not role_was_present) and (role in member.roles)))
                 equip_uncertain = bool(equip_result.get("uncertain"))
+                if not role_added and not equip_uncertain and reward_type == "role":
+                    # PATCH 5 - permanent role ownership survives a refused
+                    # equip. The role is confirmed OFF the member and the slot
+                    # is settled (no uncertainty), but the ownership is real:
+                    # keep the role in the Inventory, unequipped, instead of
+                    # deleting what was just earned or bought. Nothing is
+                    # refunded and nothing is granted twice - this row IS the
+                    # member's item; /inventory equips it once the slot is free.
+                    warning = unequipped_warning(
+                        display_name,
+                        purchased=bool(op_id) or str(source or "").lower() == "shop",
+                        source=source, error=equip_result.get("error"))
+                    print(f"[REWARDS] {reward_type} {display_name!r} for "
+                          f"guild={guild_id} user={user_id} is owned but not "
+                          f"equipped; kept in the inventory (no rollback).")
+                    return {"success": True, "reward_type": reward_type,
+                            "role_id": role_id, "item_name": display_name,
+                            "entry_key": entry_key, "role_added": False,
+                            "equipped": False, "keep_unequipped": True,
+                            "warning": warning, "uncertain": False,
+                            "prior_inventory": prior_inv,
+                            "delivered_inventory": delivered_inv}
                 inv_restored = False
                 if not role_added and not equip_uncertain:
                     inv_restored = await _restore_prior_inventory()
@@ -653,6 +675,37 @@ async def give_reward(bot: discord.Client,
 
     else:
         raise RewardError(f"Unknown reward_type: {reward_type!r}")
+
+_SOURCE_REWARD_LABEL = {
+    "mission": "mission",
+    "event": "event",
+    "minigame": "minigame",
+    "tag_mission": "tag mission",
+    "tag_partner": "tag partner",
+    "system": None,
+}
+
+
+def unequipped_warning(item_name: str, *, purchased: bool, source: str | None,
+                       error: str | None) -> str:
+    """The member-facing text for an item that is owned but not worn.
+
+    The wording follows the SOURCE, never an assumption: a Shop purchase was
+    purchased, a Mission / Event / Minigame / Tag reward was granted. Telling a
+    member their mission "was purchased" is wrong, and so is telling a buyer
+    their purchase was "granted as a reward".
+    """
+    if purchased:
+        opening = (f"**{item_name}** was purchased and is in your inventory, "
+                   f"but it is not equipped")
+    else:
+        label = _SOURCE_REWARD_LABEL.get(str(source or "").strip().lower())
+        granted_as = f"a {label} reward" if label else "a reward"
+        opening = (f"**{item_name}** was granted as {granted_as} and is in your "
+                   f"inventory, but it is not equipped")
+    return (f"{opening}: {error or 'the equip slot could not be updated'}. "
+            f"Open it from `/inventory` to equip it.")
+
 
 async def _name_conflict_result(guild_id: int, user_id: int, reward_type: str,
                                 exc: Exception, *, op_id, park_on_conflict: bool,

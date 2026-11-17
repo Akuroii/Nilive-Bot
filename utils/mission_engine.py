@@ -567,10 +567,11 @@ async def record_activities(bot, guild_id: int, user_id: int,
             # award refused by a correction's fence would be gone for good.
             # `idempotency_key` queues it and retries until it lands, and makes
             # a repeat of this same completion pay nothing.
-            idem = None
-            if d["reward_type"] == "xp":
-                idem = (f"mission:{guild_id}:{user_id}:{d['id']}:"
-                        f"{period_keys.get(d['id'])}")
+            # Mission + period + member, for EVERY one-shot type: a role or
+            # item reward the Inventory holds is the same single debt as an XP
+            # award, and a replay of this completion must not park it twice.
+            idem = (f"mission:{guild_id}:{user_id}:{d['id']}:"
+                    f"{period_keys.get(d['id'])}")
             result = await give_reward(
                 bot, guild_id, user_id, d["reward_type"],
                 amount=d["reward_value"] if d["reward_type"] in ("coins", "diamonds", "xp") else None,

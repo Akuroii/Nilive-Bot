@@ -2000,9 +2000,21 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         res_perm_def = await give_reward(
             bot, GUILD, USER, "role", role_id=951,
             item_name="ForbiddenPermColor", source="shop")
-        self.assertFalse(res_perm_def["success"])
         self.assertFalse(res_perm_def["uncertain"],
                          "definite 403 Forbidden in give_reward must be uncertain=False")
+        # PATCH 5: a definite rejection is a settled failure, so the ownership
+        # is NOT rolled back. The permanent role stays in the Inventory,
+        # unequipped, and the result says exactly that - it never claims the
+        # role is on the member (it is not) and never reports uncertainty.
+        self.assertTrue(res_perm_def["success"], res_perm_def)
+        self.assertFalse(res_perm_def["equipped"], res_perm_def)
+        self.assertTrue(res_perm_def["keep_unequipped"], res_perm_def)
+        self.assertEqual(person.roles, [])
+        self.assertEqual(
+            rows("SELECT item_name, item_type FROM inventory_items "
+                 "WHERE item_name='ForbiddenPermColor'"),
+            [("ForbiddenPermColor", "role")])
+        self.assertIn("was purchased", res_perm_def["warning"])
 
         # ── 2. Propagation through Shop `process_purchase`:
         # 2a. Ambiguous timeout during timed Color purchase -> parked as `uncertain`, NOT refunded.

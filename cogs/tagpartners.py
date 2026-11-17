@@ -70,9 +70,11 @@ class TagPartners(commands.Cog):
                 # award would normally be retried on the next join - which for a
                 # partner tag may never happen. Keying it makes the XP award
                 # durable instead of dependent on a repeat event.
+                # Guild + partner guild + member for every one-shot type, so a
+                # held role/item reward is paid exactly once too.
                 idempotency_key=(
                     f"tag_partner:{member.guild.id}:{partner_guild_id}:"
-                    f"{member.id}" if reward_type == "xp" else None),
+                    f"{member.id}"),
             )
         except RewardError as e:
             print(f"[TAGPARTNERS] reward config error guild={member.guild.id} "

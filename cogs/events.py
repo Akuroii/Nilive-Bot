@@ -53,6 +53,9 @@ async def give_reward(bot: discord.Client,
             amount=1, item_name=reward_value, item_type="event_drop",
             reason=f"Event reward: {reward_value}",
             source="event",
+            # The item branch used to drop the key, so a held item reward could
+            # not be matched to this win. Every one-shot type carries it.
+            idempotency_key=idempotency_key,
         )
     else:
         result = await _engine_give_reward(
@@ -161,9 +164,11 @@ class ButtonRaceView(discord.ui.View):
             # refused with "You already claimed this reward" and a grant the
             # correction fence refused would never be retried. Keying it makes
             # the award durable instead of lost.
+            # Keyed for EVERY one-shot type, not just XP: the key is the
+            # winner's identity for this event, so a held role/item reward is
+            # one debt however often the claim path replays.
             idempotency_key=(f"event:{interaction.guild.id}:{self.event_id}:"
-                             f"{interaction.user.id}"
-                             if self.reward_type == "xp" else None))
+                             f"{interaction.user.id}"))
 
         if result.get("pending"):
             # Kept, not lost: utils.pending_rewards delivers it on a retry.
