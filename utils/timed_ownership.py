@@ -2364,6 +2364,26 @@ async def expire_one(bot, holding: dict) -> dict:
         if not await _late_rollback_prereqs_complete(linked_op_id, entry_key=entry_key):
             err = "inventory or equip rollback pending"
             return {"status": "kept", "reason": err, "error": err}
+    if (member is not None and not is_late_rollback
+            and hasattr(guild, "fetch_member")
+            and not any(getattr(r, "id", r) == int(role_id)
+                        for r in (getattr(member, "roles", None) or ()))):
+        # The gateway cache only says what Discord last echoed. An "absent"
+        # read from it would skip the removal below and still delete the
+        # holding, leaving a role on the member that nothing records. Confirm
+        # the absence with a fresh read first; if that read fails the holding
+        # is kept so the sweep retries it.
+        try:
+            fresh_member = await guild.fetch_member(user_id)
+        except Exception as exc:
+            if _is_member_not_found(exc):
+                member, member_departed = None, True
+            else:
+                err = f"member lookup failed: {exc}"
+                return {"status": "kept", "reason": err, "error": err}
+        else:
+            if fresh_member is not None:
+                member = fresh_member
     try:
         reason = await role_still_entitled(
             guild_id, user_id, role_id, exclude_entry_key=entry_key,

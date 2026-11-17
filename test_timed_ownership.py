@@ -414,6 +414,61 @@ class ExpiryCleanupTests(unittest.IsolatedAsyncioTestCase):
         second = await TO.cleanup_expired_holdings(bot)
         self.assertEqual(second, {"removed": 0, "kept": 0, "errors": []})
 
+    def _stale_cache(self, role, *, rest_roles):
+        """A cached member that shows no roles, and a REST member that does."""
+        _, person, bot, guild = purchase_ctx(granted_role=role)
+        rest = SimpleNamespace(**{**person.__dict__})
+        rest.roles = list(rest_roles)
+        rest.remove_roles = AsyncMock()
+        person.roles = []
+        person.remove_roles = AsyncMock()
+        guild.fetch_member = AsyncMock(return_value=rest)
+        return person, rest, bot, guild
+
+    async def test_stale_cache_does_not_orphan_a_worn_role_at_expiry(self):
+        role = role_stub(957)
+        person, rest, bot, guild = self._stale_cache(role, rest_roles=[])
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="Flame", duration_hours=1,
+            item_type="temp_role", role_id=957)
+        self.assertTrue(granted["success"], granted)
+        rest.roles = [role]          # Discord says worn; the cache says not
+        await self._expire(granted["entry_key"])
+
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 1, str(stats))
+        rest.remove_roles.assert_awaited_once()
+        person.remove_roles.assert_not_awaited()
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+
+    async def test_cache_absent_and_rest_absent_removes_nothing_and_retires(self):
+        role = role_stub(958)
+        person, rest, bot, guild = self._stale_cache(role, rest_roles=[])
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="Flame", duration_hours=1,
+            item_type="temp_role", role_id=958)
+        await self._expire(granted["entry_key"])
+
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 1, str(stats))
+        rest.remove_roles.assert_not_awaited()
+        person.remove_roles.assert_not_awaited()
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+
+    async def test_failed_rest_check_keeps_the_holding_for_retry(self):
+        role = role_stub(959)
+        person, rest, bot, guild = self._stale_cache(role, rest_roles=[])
+        granted = await TO.grant_timed_product(
+            bot, GUILD, USER, item_name="Flame", duration_hours=1,
+            item_type="temp_role", role_id=959)
+        guild.fetch_member = AsyncMock(side_effect=RuntimeError("discord down"))
+        await self._expire(granted["entry_key"])
+
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 0, str(stats))
+        self.assertEqual(stats["kept"], 1, str(stats))
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(1,)])
+
 
 # ── 4. entry-key targeted equipping ─────────────────────────────────────────
 
