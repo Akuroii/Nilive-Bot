@@ -677,7 +677,7 @@ class DefinitionsSourceTests(unittest.IsolatedAsyncioTestCase):
     """C: a missing table defines nothing; a missing column is a schema error."""
 
     async def asyncSetUp(self):
-        reset_database()
+        await reset_database()
 
     async def test_a_missing_table_is_an_empty_source_and_a_missing_column_is_not(self):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -725,11 +725,18 @@ class PermanentRoleKeptUnequippedTests(RewardPreservationCase):
         return slot, [r.name for r in self.member.roles]
 
     async def test_the_mission_role_reward_survives_the_refused_equip(self):
+        self.member.send = AsyncMock()
         legacy_mission(FLAME, reward_type="role", name="Cape")
         completed = await self.complete_mission()
         # The objective is done and stays done.
         self.assertEqual([d["name"] for d in completed], ["Cape"])
         self.assertEqual(self.progress(), [(1, 1)])
+        # Member is told it was granted as a mission reward and is unequipped.
+        self.assertEqual(self.member.send.await_count, 1)
+        dm = self.member.send.await_args.args[0]
+        self.assertIn("**Flame** was granted as a mission reward and is in your "
+                      "inventory, but it is not equipped", dm)
+        self.assertNotIn("was purchased", dm)
         # The role is the member's, unequipped; the slot still names Blue.
         self.assertEqual(rows("SELECT item_name, item_type, quantity FROM "
                               "inventory_items WHERE item_name='Blue'"),
@@ -753,6 +760,105 @@ class PermanentRoleKeptUnequippedTests(RewardPreservationCase):
         self.assertEqual(self.slot_and_worn(), ([("Flame", FLAME)], ["Flame"]))
         self.assertEqual(rows("SELECT COUNT(*) FROM inventory_items "
                               "WHERE item_name='Flame'"), [(1,)])
+
+    async def test_all_other_reward_callers_surface_source_specific_unequipped_warning(self):
+        """Patch 5 + E across Event, Minigame, Tag Mission, and Tag Partner."""
+        from cogs.events import ButtonRaceView
+        from cogs.tagmissions import TagMissions
+        from cogs.tagpartners import TagPartners
+        from utils import minigame_engine
+
+        # 1) Event ButtonRaceView
+        execute("INSERT INTO events (id, guild_id, title, type, reward_type, "
+                "reward_value, max_winners, enabled) VALUES (11,?,?,?,?,?,3,1)",
+                (GUILD, "FlameRace", "button_race", "role", str(FLAME)))
+        view = ButtonRaceView(11, 3, "role", str(FLAME), None)
+        self._views.append(view)
+        view._finish_if_full = AsyncMock()
+        itx = SimpleNamespace(
+            client=self.bot, guild=self.guild,
+            user=SimpleNamespace(id=USER, mention=f"<@{USER}>",
+                                 display_name="member"),
+            response=SimpleNamespace(send_message=AsyncMock()))
+        await next(c for c in view.children).callback(itx)
+        event_msg = itx.response.send_message.await_args.args[0]
+        self.assertIn("**Flame** was granted as an event reward and is in your "
+                      "inventory, but it is not equipped", event_msg)
+        self.assertNotIn("was purchased", event_msg)
+        self.assertEqual(stack("Flame"), ("role", 1))
+        self.assertEqual(self.slot_and_worn(), ([("Blue", BLUE)], ["Blue"]))
+
+        # Reset Flame stack before testing Minigame
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=? "
+                "AND item_name='Flame'", (GUILD, USER))
+        await minigame_store.ensure_tables()
+        run_id = await minigame_store.start_run(
+            GUILD, None, "Quick", None, "Quick", "quick_click", "manual", None)
+        engine = minigame_engine.MinigameEngine(
+            {"guild_id": GUILD, "name": "Quick",
+             "embed": {"description": "Hit the button"},
+             "rewards": [{"reward_type": "role", "reward_value": str(FLAME),
+                          "weight": 1}]},
+            "manual", run_id, bot=self.bot)
+        engine._message = SimpleNamespace(edit=AsyncMock())
+        self.assertTrue(await engine.resolve(
+            [{"id": USER, "name": "Member"}], result_text="🏆 **Member** won."))
+        if engine._view is not None:
+            engine._view.stop()
+        mg_desc = engine._message.edit.await_args.kwargs["embed"].description
+        self.assertIn("**Flame** was granted as a minigame reward and is in your "
+                      "inventory, but it is not equipped", mg_desc)
+        self.assertNotIn("was purchased", mg_desc)
+        self.assertEqual(stack("Flame"), ("role", 1))
+
+        # Reset Flame stack before testing Tag Mission
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=? "
+                "AND item_name='Flame'", (GUILD, USER))
+        self.member.send = AsyncMock()
+        self.member.primary_guild = SimpleNamespace(
+            identity_enabled=True, identity_guild_id=GUILD)
+        self.guild.fetch_member = AsyncMock(return_value=self.member)
+        tm_id = execute(
+            "INSERT INTO tag_missions (guild_id, title, reward_type, "
+            "reward_role_id, starts_at, ends_at, status, success_message, "
+            "failure_message) VALUES (?, 'Loyal', 'role', ?, '2020-01-01', "
+            "'2020-01-02', 'active', 'ROLE DELIVERED', 'TAG REMOVED')",
+            (GUILD, FLAME))
+        execute("INSERT INTO tag_mission_participants (mission_id, guild_id, "
+                "user_id) VALUES (?,?,?)", (tm_id, GUILD, USER))
+        tm_cog = TagMissions.__new__(TagMissions)
+        tm_cog.bot = self.bot
+        await TagMissions._resolve_mission(
+            tm_cog, tm_id, GUILD, "role", None, FLAME, None,
+            "ROLE DELIVERED", "TAG REMOVED")
+        tm_dm = self.member.send.await_args.args[0]
+        self.assertIn("**Flame** was granted as a tag mission reward and is in "
+                      "your inventory, but it is not equipped", tm_dm)
+        self.assertNotIn("was purchased", tm_dm)
+        self.assertNotIn("ROLE DELIVERED", tm_dm)
+        self.assertNotIn("TAG REMOVED", tm_dm)
+
+        # Reset Flame stack before testing Tag Partner
+        execute("DELETE FROM inventory_items WHERE guild_id=? AND user_id=? "
+                "AND item_name='Flame'", (GUILD, USER))
+        self.member.send = AsyncMock()
+        partner = 99077
+        execute("INSERT INTO tag_partner_rewards (guild_id, partner_guild_id, "
+                "reward_type, reward_role_id, welcome_message, enabled) "
+                "VALUES (?,?,'role',?, 'WELCOME - ROLE GRANTED', 1)",
+                (GUILD, partner, FLAME))
+        self.member.primary_guild = SimpleNamespace(
+            identity_enabled=True, identity_guild_id=partner)
+        tp_cog = TagPartners.__new__(TagPartners)
+        tp_cog.bot = self.bot
+        await TagPartners.on_member_join(tp_cog, self.member)
+        tp_dm = self.member.send.await_args.args[0]
+        self.assertIn("**Flame** was granted as a tag partner reward and is in "
+                      "your inventory, but it is not equipped", tp_dm)
+        self.assertNotIn("was purchased", tp_dm)
+        self.assertNotIn("WELCOME - ROLE GRANTED", tp_dm)
+        self.assertEqual(stack("Flame"), ("role", 1))
+        self.assertEqual(self.slot_and_worn(), ([("Blue", BLUE)], ["Blue"]))
 
 
 class PendingRewardIdentityTests(_ActionCase):
@@ -856,6 +962,122 @@ class PendingRewardIdentityTests(_ActionCase):
             self.assertIn(marker, text, name)
             self.assertNotIn('if reward_type == "xp" else None', text, name)
             self.assertNotIn('if rolled["reward_type"] == "xp" else None', text, name)
+
+    async def test_replaying_real_five_callers_holds_one_row_each_and_delivers_once(self):
+        """D end-to-end: replaying all 5 real reward callers produces 1 held row each."""
+        from cogs.events import ButtonRaceView
+        from cogs.tagmissions import TagMissions
+        from cogs.tagpartners import TagPartners
+        from utils import minigame_engine
+
+        await minigame_store.ensure_tables()
+        self.member.send = AsyncMock()
+        self.guild.fetch_member = AsyncMock(return_value=self.member)
+        # Own potions named 'Tonic', 'Flame', and 'Blue' so item('Tonic'),
+        # temp_role('Flame'), and permanent role('Blue') hit genuine runtime
+        # name conflicts across all 5 real callers.
+        for clash_name in ("Tonic", "Flame", "Blue"):
+            await inventory.give_item(GUILD, USER, clash_name, 1,
+                                      item_type="potion", metadata=POTION_META)
+
+        # 1) Mission (item): replay completion twice -> 1 held row with mission key
+        m_id = legacy_mission("Tonic", reward_type="item", name="DailyChat")
+        for _ in range(2):
+            execute("DELETE FROM mission_progress WHERE guild_id=? AND user_id=?",
+                    (GUILD, USER))
+            await mission_engine.record_activities(
+                self.bot, GUILD, USER, {"messages": 1}, channel_id=None)
+
+        # 2) Event ButtonRaceView (item): replay winner claim twice -> 1 held row with event key
+        execute("INSERT INTO events (id, guild_id, title, type, reward_type, "
+                "reward_value, max_winners, enabled) VALUES (51,?,?,?,?,?,5,1)",
+                (GUILD, "Race51", "button_race", "item", "Tonic"))
+        for _ in range(2):
+            execute("DELETE FROM event_winners WHERE event_id=51 AND user_id=?", (USER,))
+            view = ButtonRaceView(51, 5, "item", "Tonic", None)
+            view._finish_if_full = AsyncMock()
+            itx = SimpleNamespace(
+                client=self.bot, guild=self.guild,
+                user=SimpleNamespace(id=USER, mention=f"<@{USER}>",
+                                     display_name="member"),
+                response=SimpleNamespace(send_message=AsyncMock()))
+            await next(c for c in view.children).callback(itx)
+            view.stop()
+
+        # 3) MinigameEngine (temp_role): replay resolve twice with same log_id -> 1 held row
+        run_id = await minigame_store.start_run(
+            GUILD, None, "Quick", None, "Quick", "quick_click", "manual", None)
+        for _ in range(2):
+            execute("UPDATE minigames_log SET status='running' WHERE id=?", (run_id,))
+            engine = minigame_engine.MinigameEngine(
+                {"guild_id": GUILD, "name": "Quick",
+                 "embed": {"description": "Go"},
+                 "rewards": [{"reward_type": "temp_role",
+                              "reward_value": str(FLAME),
+                              "duration_hours": 2, "weight": 1}]},
+                "manual", run_id, bot=self.bot)
+            engine._message = SimpleNamespace(edit=AsyncMock())
+            await engine.resolve([{"id": USER, "name": "Member"}])
+            if engine._view is not None:
+                engine._view.stop()
+
+        # 4) TagMissions (temp_role): replay _resolve_mission twice -> 1 held row
+        self.member.primary_guild = SimpleNamespace(
+            identity_enabled=True, identity_guild_id=GUILD)
+        tm_id = execute(
+            "INSERT INTO tag_missions (guild_id, title, reward_type, "
+            "reward_role_id, reward_duration_hours, starts_at, ends_at, status, "
+            "success_message, failure_message) VALUES (?, 'TagHold', 'temp_role', "
+            "?, 2, '2020-01-01', '2020-01-02', 'active', 'OK', 'NO')",
+            (GUILD, FLAME))
+        execute("INSERT INTO tag_mission_participants (mission_id, guild_id, "
+                "user_id) VALUES (?,?,?)", (tm_id, GUILD, USER))
+        tm_cog = TagMissions.__new__(TagMissions)
+        tm_cog.bot = self.bot
+        for _ in range(2):
+            execute("UPDATE tag_mission_participants SET outcome=NULL "
+                    "WHERE mission_id=? AND user_id=?", (tm_id, USER))
+            await TagMissions._resolve_mission(
+                tm_cog, tm_id, GUILD, "temp_role", None, FLAME, 2, "OK", "NO")
+
+        # 5) TagPartners (role): replay on_member_join twice -> 1 held row
+        partner = 99088
+        execute("INSERT INTO tag_partner_rewards (guild_id, partner_guild_id, "
+                "reward_type, reward_role_id, welcome_message, enabled) "
+                "VALUES (?,?,'role',?, 'WELCOME', 1)",
+                (GUILD, partner, BLUE))
+        self.member.primary_guild = SimpleNamespace(
+            identity_enabled=True, identity_guild_id=partner)
+        tp_cog = TagPartners.__new__(TagPartners)
+        tp_cog.bot = self.bot
+        for _ in range(2):
+            execute("DELETE FROM tag_join_reward_log WHERE guild_id=? "
+                    "AND partner_guild_id=? AND user_id=?",
+                    (GUILD, partner, USER))
+            await TagPartners.on_member_join(tp_cog, self.member)
+
+        held = rows("SELECT source, reward_type, payload FROM pending_rewards "
+                    "ORDER BY id")
+        self.assertEqual(len(held), 5, held)
+        keys = {src: json.loads(payload)["idempotency_key"]
+                for src, _, payload in held}
+        self.assertEqual(keys["mission"], f"mission:{GUILD}:{USER}:{m_id}:once")
+        self.assertEqual(keys["event"], f"event:{GUILD}:51:{USER}")
+        self.assertEqual(keys["minigame"], f"minigame:{GUILD}:{run_id}:{USER}")
+        self.assertEqual(keys["tag_mission"], f"tag_mission:{GUILD}:{tm_id}:{USER}")
+        self.assertEqual(keys["tag_partner"], f"tag_partner:{GUILD}:{partner}:{USER}")
+
+        # Freeing the clashing names and retrying delivers all 5 once (no double grant).
+        for clash_name in ("Tonic", "Flame", "Blue"):
+            await inventory.remove_item(GUILD, USER, clash_name, 1)
+        retried = await pending_rewards.retry(self.bot, GUILD, USER)
+        self.assertEqual(retried["delivered"], 5, retried)
+        self.assertEqual(stack("Tonic"), ("custom", 2))       # 1 mission + 1 event
+        self.assertEqual(stack("Flame"), ("temp_role", 1))    # timed Flame
+        self.assertEqual(stack("Blue"), ("role", 1))          # permanent Blue
+        # Second retry is a no-op.
+        self.assertEqual(await pending_rewards.retry(self.bot, GUILD, USER),
+                         {"delivered": 0, "still_pending": 0, "uncertain": 0})
 
 
 class PermanentRoleGrantCollisionTests(RewardPreservationCase):

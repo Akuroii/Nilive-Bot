@@ -514,6 +514,7 @@ class MinigameEngine:
         #    pays exactly once, and ALREADY_CLOSED — where a second payment
         #    for one round is possible — is already returned above.
         held: list[dict] = []
+        unequipped_notices: list[str] = []
         for entry, rolled in pending:
             try:
                 res = await give_reward(
@@ -540,6 +541,9 @@ class MinigameEngine:
                     entry["status"] = "failed"
                     entry["error"] = str((res or {}).get("error")
                                          or "grant failed")[:300]
+                elif res.get("keep_unequipped") and res.get("warning"):
+                    unequipped_notices.append(
+                        f"<@{entry['id']}> {res['warning']}")
             except Exception as e:
                 entry["status"] = "failed"
                 entry["error"] = str(e)[:300]
@@ -555,6 +559,10 @@ class MinigameEngine:
                 # through give_reward and never comes back here.
                 notice = "\n".join(f"<@{entry['id']}> {HELD_REWARD_NOTICE}"
                                    for entry in held)
+                base = embed.description or ""
+                embed.description = (base + "\n\n" + notice)[:4096]
+            if unequipped_notices:
+                notice = "\n".join(unequipped_notices)
                 base = embed.description or ""
                 embed.description = (base + "\n\n" + notice)[:4096]
             self._view = self._make_view(self.final_component_rows())

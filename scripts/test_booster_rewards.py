@@ -370,13 +370,15 @@ async def main():
     interaction = SimpleNamespace(
         user=plain, guild=guild,
         response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
         edit_original_response=AsyncMock())
     await view.claim_all.callback(interaction)
-    sent = interaction.edit_original_response.await_args.kwargs
+    sent = interaction.followup.send.await_args.kwargs
+    sent_text = sent["embed"].footer.text or sent["embed"].description or ""
     check("Claim All callback reports locked, not failed, for a non-booster",
-          AR_LOCKED in sent["embed"].footer.text
-          and AR_RETRY + "0." in sent["embed"].footer.text
-          and view.claim_all.disabled, sent["embed"].footer.text)
+          AR_LOCKED in sent_text
+          and AR_RETRY + "0." in sent_text
+          and sent.get("ephemeral") is True, sent_text)
 
     # ── 8. Migration: idempotent, legacy rows default to Everyone ──
     from database import init_db

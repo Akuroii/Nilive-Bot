@@ -2933,5 +2933,162 @@ class TimedGrantPurchaseWarningTests(AuditCase):
         self.assertIsNone(result["error"])
 
 
+class UncertainPreviousRoleSwapTests(AuditCase):
+    """A/B + Patch 5: ambiguous Discord removal of the old role stays uncertain."""
+
+    def _timeout_on_role(self, target_role_id: int):
+        async def remove_roles(role, reason=None):
+            if role.id == target_role_id:
+                raise asyncio.TimeoutError("Discord read timed out")
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        self.member.remove_roles = AsyncMock(side_effect=remove_roles)
+
+    async def test_equip_role_keeps_uncertain_when_previous_role_removal_times_out(self):
+        await self.give_roles()
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Blue"))["success"])
+        self._timeout_on_role(BLUE)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = await equip_engine.equip_role(
+                self.bot, GUILD, USER, "Flame")
+        self.assertFalse(result["success"], result)
+        self.assertTrue(result["uncertain"], result)
+        self.assertIn("An admin may need to reconcile", result["error"])
+        self.assertIn("[EQUIP][UNCERTAIN]", buf.getvalue())
+        # Old slot is preserved (never overwritten) and newly added Flame was reverted.
+        self.assertEqual((slot(), worn(self.member)), ([("Blue", BLUE)], ["Blue"]))
+
+    async def test_permanent_role_reward_stays_uncertain_not_keep_unequipped_on_timeout(self):
+        self.assertTrue((await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=BLUE, source="mission"))["success"])
+        self._timeout_on_role(BLUE)
+
+        result = await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=FLAME,
+            reason="Mission complete", source="mission")
+        self.assertFalse(result["success"], result)
+        self.assertTrue(result["uncertain"], result)
+        self.assertFalse(result.get("keep_unequipped", False), result)
+        # Ownership is NOT rolled back on uncertain Discord state, nor claimed equipped.
+        self.assertEqual(quantity("Flame"), 1)
+        self.assertEqual((slot(), worn(self.member)), ([("Blue", BLUE)], ["Blue"]))
+
+    async def test_temp_role_grant_and_pending_retry_escalate_uncertain_old_role_swap(self):
+        from utils import pending_rewards
+        self.assertTrue((await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=BLUE, source="mission"))["success"])
+        # Park a timed Flame reward via a temporary name clash, then free the clash.
+        await inventory.give_item(GUILD, USER, "Flame", 1, item_type="potion",
+                                  metadata=POTION)
+        parked = await reward_engine.give_reward(
+            self.bot, GUILD, USER, "temp_role", role_id=FLAME, duration_hours=2,
+            reason="Tag mission reward", source="tag_mission",
+            idempotency_key="tag_mission:8101:99:8201")
+        self.assertTrue(parked.get("pending"), parked)
+        await inventory.remove_item(GUILD, USER, "Flame", 1)
+
+        self._timeout_on_role(BLUE)
+        retried = await pending_rewards.retry(self.bot, GUILD, USER)
+        self.assertEqual(retried, {"delivered": 0, "still_pending": 0, "uncertain": 1})
+        self.assertEqual(
+            rows("SELECT status FROM pending_rewards WHERE id=?",
+                 (parked["pending_id"],)),
+            [("needs_review",)])
+
+        # Direct grant_timed_product also surfaces source-normalized warning without
+        # claiming the previous role was cleanly left as it was.
+        direct = await timed_ownership.grant_timed_product(
+            self.bot, GUILD, USER, item_name="Flame", duration_hours=2,
+            item_type="temp_role", role_id=FLAME, source="tag_mission")
+        self.assertTrue(direct["success"], direct)
+        self.assertFalse(direct["equipped"], direct)
+        self.assertTrue(direct["equip_uncertain"], direct)
+        self.assertIn("was granted as a tag mission reward", direct["equip_warning"])
+        self.assertNotIn("was purchased", direct["equip_warning"])
+        self.assertNotIn("was left as it was", direct["equip_warning"])
+
+
+class EndToEndPermanentRoleShopPatch5Tests(AuditCase):
+    """Patch 5 + E through real cogs.shop.process_purchase."""
+
+    async def test_shop_permanent_role_purchase_settled_vs_uncertain_end_to_end(self):
+        # Seed Blue as currently equipped role.
+        self.assertTrue((await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=BLUE, source="mission"))["success"])
+        start_bal = balance()
+        flame_item_id = listing("Flame", "role", price=300, stock=5, role_id=FLAME)
+
+        # 1) Settled 403 refusal on releasing Blue: ownership stays, NO refund,
+        #    warning says 'was purchased' (never 'granted as'), not claimed equipped.
+        refused = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
+
+        async def forbid_blue_release(role, reason=None):
+            if role.id == BLUE:
+                raise refused
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        self.member.remove_roles = AsyncMock(side_effect=forbid_blue_release)
+        itx = shop_interaction(self.member, self.guild, self.bot)
+        await process_purchase(itx, flame_item_id)
+
+        self.assertEqual(balance(), start_bal - 300)
+        self.assertEqual(quantity("Flame"), 1)
+        self.assertEqual((slot(), worn(self.member)), ([("Blue", BLUE)], ["Blue"]))
+        self.assertEqual(
+            rows("SELECT status, refunded FROM shop_purchase_operations "
+                 "WHERE item_id=?", (flame_item_id,)),
+            [("delivered", 0)])
+        sent_kwargs = (itx.followup.send.await_args or
+                       itx.response.send_message.await_args).kwargs
+        embed = sent_kwargs["embed"]
+        notes = [f.value for f in embed.fields if f.name == "Note"]
+        self.assertEqual(len(notes), 1, embed.fields)
+        self.assertIn("**Flame** was purchased and is in your inventory, "
+                      "but it is not equipped", notes[0])
+        self.assertNotIn("granted as", notes[0])
+
+        # Once the slot can be released, the member equips Flame from /inventory.
+        async def clean_remove(role, reason=None):
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        self.member.remove_roles = AsyncMock(side_effect=clean_remove)
+        equipped = await equip_engine.equip_role(self.bot, GUILD, USER, "Flame")
+        self.assertTrue(equipped["success"], equipped)
+        self.assertEqual((slot(), worn(self.member)), ([("Flame", FLAME)], ["Flame"]))
+
+        # 2) Uncertain timeout on releasing Flame during a second shop role purchase:
+        #    routes to PURCHASE_UNCERTAIN (neither delivered nor auto-refunded).
+        gold_item_id = listing(
+            "TimedBlue", "role", price=200, stock=5, role_id=actions.TIMED_BLUE)
+
+        async def timeout_flame_release(role, reason=None):
+            if role.id == FLAME:
+                raise asyncio.TimeoutError("Discord gateway timeout")
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        self.member.remove_roles = AsyncMock(side_effect=timeout_flame_release)
+        itx2 = shop_interaction(self.member, self.guild, self.bot)
+        await process_purchase(itx2, gold_item_id)
+
+        self.assertEqual(balance(), start_bal - 500)
+        self.assertEqual(
+            rows("SELECT status, refunded FROM shop_purchase_operations "
+                 "WHERE item_id=?", (gold_item_id,)),
+            [("uncertain", 0)])
+        sent2 = (itx2.followup.send.await_args or
+                 itx2.response.send_message.await_args).kwargs
+        self.assertIn("Purchase needs a check", sent2["embed"].title)
+        self.assertIn("delivery could not be confirmed",
+                      sent2["embed"].description)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

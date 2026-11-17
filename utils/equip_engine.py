@@ -422,6 +422,9 @@ async def swap_and_record_equipped(bot: discord.Client | None,
                 return {"success": False, "previous": current,
                         "entry_key": entry_key, "role_id": int(role_id),
                         "uncertain": released["uncertain"],
+                        "previous_role_uncertain": (
+                            journal["discord_step"] != "none"
+                            and bool(released["uncertain"])),
                         "old_role": int(current["role_id"]),
                         "error": (released["error"] or
                                   "The previously equipped role could not be "
@@ -908,15 +911,20 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
             reason_text = swap.get("error") or (
                 "The previously equipped role could not be removed, so "
                 "nothing was changed.")
+            prev_uncertain = bool(swap.get("previous_role_uncertain"))
             return await _fail_after_role_step(
                 "previous_role",
                 f"the previously equipped role could not be released "
                 f"({reason_text})",
                 role_was_present=role_was_present,
                 clean_error=reason_text,
-                uncertain_error=(f"{reason_text} The role this equip added "
-                                 f"could not be taken back either; an admin "
-                                 f"may need to reconcile the roles."))
+                uncertain_error=(
+                    f"{reason_text} An admin may need to reconcile the roles."
+                    if prev_uncertain else
+                    f"{reason_text} The role this equip added could not be "
+                    f"taken back either; an admin may need to reconcile the "
+                    f"roles."),
+                force_uncertain=prev_uncertain)
 
         return {"success": True, "item_name": item_name,
                 "role_id": role_id, "role_name": role.name,

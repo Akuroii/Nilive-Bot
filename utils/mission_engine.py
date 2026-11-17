@@ -396,18 +396,9 @@ HELD_REWARD_NOTICE = ("Your mission is complete! Your reward is waiting for "
                       "delivery because of an item conflict.")
 
 
-async def _notify_held_reward(bot, guild_id: int, user_id: int,
-                              definition: dict, channel_id) -> bool:
-    """Tell the member their completed mission's reward is being held.
-
-    A direct message first (it concerns only them); if their DMs are closed,
-    the channel the completing activity happened in. Best effort: a failed
-    notice never affects the completion or the held reward, and the Inventory
-    keeps showing it either way.
-    """
-    text = (f"**{definition.get('name')}** — {HELD_REWARD_NOTICE} It will be "
-            f"delivered automatically once that is resolved; you do not need "
-            f"to do the mission again. See `/inventory`.")
+async def _send_member_notice(bot, guild_id: int, user_id: int, text: str,
+                              channel_id, *, kind: str) -> bool:
+    """DM first, activity channel fallback. Best effort: never fails the caller."""
     try:
         guild = bot.get_guild(int(guild_id)) if bot else None
         member = guild.get_member(int(user_id)) if guild else None
@@ -423,9 +414,28 @@ async def _notify_held_reward(bot, guild_id: int, user_id: int,
             await channel.send(f"<@{int(user_id)}> {text}")
             return True
     except Exception as exc:
-        print(f"[MISSIONS] could not send the held-reward notice to "
+        print(f"[MISSIONS] could not send the {kind} notice to "
               f"user={user_id} guild={guild_id}: {exc}")
     return False
+
+
+async def _notify_held_reward(bot, guild_id: int, user_id: int,
+                              definition: dict, channel_id) -> bool:
+    """Tell the member their completed mission's reward is being held."""
+    text = (f"**{definition.get('name')}** — {HELD_REWARD_NOTICE} It will be "
+            f"delivered automatically once that is resolved; you do not need "
+            f"to do the mission again. See `/inventory`.")
+    return await _send_member_notice(
+        bot, guild_id, user_id, text, channel_id, kind="held-reward")
+
+
+async def _notify_unequipped_reward(bot, guild_id: int, user_id: int,
+                                    definition: dict, warning: str,
+                                    channel_id) -> bool:
+    """Tell the member their earned permanent role is in /inventory, unequipped."""
+    text = f"**{definition.get('name')}** — {warning}"
+    return await _send_member_notice(
+        bot, guild_id, user_id, text, channel_id, kind="unequipped-reward")
 
 
 async def record_activities(bot, guild_id: int, user_id: int,
@@ -586,6 +596,9 @@ async def record_activities(bot, guild_id: int, user_id: int,
                 # Held, not lost (utils.pending_rewards). Said once, here: a
                 # later retry goes through give_reward only, never this loop.
                 await _notify_held_reward(bot, guild_id, user_id, d, channel_id)
+            elif result.get("keep_unequipped") and result.get("warning"):
+                await _notify_unequipped_reward(
+                    bot, guild_id, user_id, d, result["warning"], channel_id)
             if not result.get("success"):
                 print(f"[MISSIONS] Reward grant failed for mission "
                       f"{d['id']} ({d['name']}) guild={guild_id} "

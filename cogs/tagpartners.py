@@ -100,9 +100,14 @@ class TagPartners(commands.Cog):
 
         if held:
             return      # the welcome text may promise a reward not yet delivered
-        if welcome_message:
+        dm_text = (
+            result["warning"]
+            if result.get("keep_unequipped") and result.get("warning")
+            else welcome_message
+        )
+        if dm_text:
             try:
-                await member.send(welcome_message)
+                await member.send(dm_text)
             except discord.Forbidden:
                 pass  # DMs closed — reward is already granted regardless
 

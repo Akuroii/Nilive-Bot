@@ -676,14 +676,30 @@ async def give_reward(bot: discord.Client,
     else:
         raise RewardError(f"Unknown reward_type: {reward_type!r}")
 
-_SOURCE_REWARD_LABEL = {
-    "mission": "mission",
-    "event": "event",
-    "minigame": "minigame",
-    "tag_mission": "tag mission",
-    "tag_partner": "tag partner",
+_SOURCE_REWARD_ARTICLE_LABEL = {
+    "mission": "a mission",
+    "event": "an event",
+    "minigame": "a minigame",
+    "tag_mission": "a tag mission",
+    "tag_partner": "a tag partner",
     "system": None,
 }
+
+
+def reward_origin_phrase(*, purchased: bool, source: str | None) -> str:
+    """Origin phrase ('purchased' vs 'granted as ... reward') for an item."""
+    key = str(source or "").strip().lower()
+    if purchased or key == "shop":
+        return "purchased"
+    if key in _SOURCE_REWARD_ARTICLE_LABEL:
+        article_label = _SOURCE_REWARD_ARTICLE_LABEL[key]
+        return (f"granted as {article_label} reward"
+                if article_label else "granted as a reward")
+    if key:
+        clean = key.replace("_", " ")
+        article = "an" if clean[:1] in "aeiou" else "a"
+        return f"granted as {article} {clean} reward"
+    return "granted as a reward"
 
 
 def unequipped_warning(item_name: str, *, purchased: bool, source: str | None,
@@ -695,14 +711,9 @@ def unequipped_warning(item_name: str, *, purchased: bool, source: str | None,
     member their mission "was purchased" is wrong, and so is telling a buyer
     their purchase was "granted as a reward".
     """
-    if purchased:
-        opening = (f"**{item_name}** was purchased and is in your inventory, "
-                   f"but it is not equipped")
-    else:
-        label = _SOURCE_REWARD_LABEL.get(str(source or "").strip().lower())
-        granted_as = f"a {label} reward" if label else "a reward"
-        opening = (f"**{item_name}** was granted as {granted_as} and is in your "
-                   f"inventory, but it is not equipped")
+    origin = reward_origin_phrase(purchased=purchased, source=source)
+    opening = (f"**{item_name}** was {origin} and is in your inventory, "
+               f"but it is not equipped")
     return (f"{opening}: {error or 'the equip slot could not be updated'}. "
             f"Open it from `/inventory` to equip it.")
 

@@ -200,10 +200,10 @@ class ButtonRaceView(discord.ui.View):
         else:
             reward_str = "your reward"
 
-        await interaction.response.send_message(
-            f"🎉 You won {reward_str} "
-            f"({len(self.winners)}/{self.max_winners})",
-            ephemeral=True)
+        message = f"🎉 You won {reward_str} ({len(self.winners)}/{self.max_winners})"
+        if result.get("keep_unequipped") and result.get("warning"):
+            message += f"\n\n{result['warning']}"
+        await interaction.response.send_message(message, ephemeral=True)
 
         await self._finish_if_full(interaction)
 

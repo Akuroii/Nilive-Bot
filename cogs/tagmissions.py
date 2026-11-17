@@ -235,7 +235,11 @@ class TagMissions(commands.Cog):
                         )
                         if result.get("success"):
                             outcome = "rewarded"
-                            dm_text = success_message
+                            dm_text = (
+                                result["warning"]
+                                if result.get("keep_unequipped") and result.get("warning")
+                                else success_message
+                            )
                         elif result.get("pending"):
                             # Earned and kept (utils.pending_rewards): not the
                             # failure text, and no claim that it arrived.

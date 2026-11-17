@@ -3066,20 +3066,21 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
             if taken_back not in ("removed", "not_added"):
                 equip_uncertain = True
             # The wording must reflect what the member did: a Shop purchase is
-            # "purchased", a Mission/Event/Minigame grant is an earned reward.
+            # "purchased", a Mission/Event/Minigame/Tag grant is an earned reward.
             # Never tell a member who earned something that they bought it.
-            _source_name = str(source or "").strip()
-            if _source_name == "shop":
-                _origin = "purchased"
-            elif _source_name:
-                _origin = f"granted as a {_source_name} reward"
-            else:
-                _origin = "granted as a reward"
+            from utils.reward_engine import reward_origin_phrase
+            _origin = reward_origin_phrase(
+                purchased=bool(op_id), source=source)
+            _prev_clause = (
+                "Your previous equipped role could not be confirmed on Discord"
+                if swap.get("previous_role_uncertain")
+                else "Your previous equipped role was left as it was"
+            )
             equip_warning = (
                 f"**{item_name}** was {_origin} and is in your inventory, but "
                 f"it is not "
                 f"equipped: {swap.get('error') or 'the equip slot could not be updated'}. "
-                f"Your previous equipped role was left as it was"
+                f"{_prev_clause}"
                 + ("" if taken_back in ("removed", "not_added")
                    else "; the role of this item may also still be on you")
                 + ". Open it from `/inventory` to try again.")
