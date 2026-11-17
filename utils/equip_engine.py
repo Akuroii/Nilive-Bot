@@ -280,9 +280,10 @@ async def _release_role(bot, guild_id: int, user_id: int, slot: dict, *,
     so a cancellation the caller sees can be reported as "may have changed the
     member". Never raises: a cancellation is left to propagate.
     """
-    def back(action, *, uncertain=False, error=None, role=None, detail=None):
+    def back(action, *, uncertain=False, error=None, role=None, detail=None,
+             member=None):
         return {"action": action, "uncertain": bool(uncertain), "error": error,
-                "role": role, "detail": detail}
+                "role": role, "detail": detail, "member": member}
 
     try:
         role_id = int(slot["role_id"])
@@ -290,63 +291,104 @@ async def _release_role(bot, guild_id: int, user_id: int, slot: dict, *,
         return back("unresolved", uncertain=True,
                     error=f"Could not read the equipped role: {e}")
 
-    if guild is None or member is None:
+    if guild is None:
         return back("unresolved", uncertain=True,
                     error=(f"Could not check the member's current roles with "
                            f"Discord, so role {role_id} and its slot were left "
                            f"as they are."))
     role = guild.get_role(role_id)
-    if role is None or role not in (getattr(member, "roles", None) or ()):
-        # Gone from Discord: the slot is obsolete bookkeeping, nothing to
-        # remove. (The cache is the only witness here; a stale "absent" leaves
-        # an unrecorded role on the member — documented, and no worse than the
-        # old code, which also only looked at the cache.)
-        return back("absent", role=role)
+    if role is None:
+        # The role object itself is gone from the guild; nothing can be worn or
+        # removed on Discord, so the slot is obsolete bookkeeping.
+        return back("absent", role=None)
+
+    # Always verify the member's live roles via REST (`guild.fetch_member`)
+    # rather than trusting cached `member.roles` in either direction: a stale
+    # cache could hide a worn role (leaving it orphaned on Discord after the
+    # slot is cleared/replaced) or show a role that is already off Discord.
+    fetch = getattr(guild, "fetch_member", None)
+    if not callable(fetch):
+        print(f"[EQUIP] Guild {getattr(guild, 'id', '?')} cannot fetch member "
+              f"{user_id}; leaving role {role_id} and its slot as they are")
+        return back("unresolved", uncertain=True,
+                    error=(f"Could not check the member's current roles with "
+                           f"Discord, so role {role_id} and its slot were left "
+                           f"as they are."))
+    try:
+        verified_member = await fetch(user_id)
+    except Exception as e:
+        print(f"[EQUIP] Could not fetch member {user_id} in {guild_id} to "
+              f"verify role {role_id}; role and slot left as they are: {e}")
+        return back("unresolved", uncertain=True,
+                    error=(f"Could not check the member's current roles with "
+                           f"Discord, so role {role_id} and its slot were left "
+                           f"as they are."))
+    if verified_member is None:
+        return back("unresolved", uncertain=True,
+                    error=(f"Could not check the member's current roles with "
+                           f"Discord, so role {role_id} and its slot were left "
+                           f"as they are."))
+
+    if role not in (getattr(verified_member, "roles", None) or ()):
+        # Confirmed absent on Discord via fresh REST read: nothing to remove.
+        return back("absent", role=role, member=verified_member)
 
     state = observed_role_state(slot)
     if state is None:
         print(f"[EQUIP] Role {role_id} on {user_id} in {guild_id} has no usable "
               f"record of who added it (legacy or stale metadata); the role "
               f"and the slot are left alone.")
-        return back("unresolved", uncertain=True,
+        return back("unresolved", uncertain=True, member=verified_member,
                     error=(f"Nilive cannot confirm whether it added role "
                            f"{role_id}, so the role and the slot were left as "
                            f"they are. An admin can remove the role by hand; "
                            f"Unequip then clears the slot."))
     if state is False:
-        return back("kept", detail="observed already present before its equip")
+        return back("kept", detail="observed already present before its equip",
+                    member=verified_member)
 
     # The writing equip added it. Only an entitlement that does not rest on
     # wearing the role may keep it: the role itself must not vouch for itself
-    # (the Booster "already worn" rule), so it is asked as if not worn.
+    # (the Booster "already worn" rule), so it is asked as if not worn using
+    # the REST-verified member snapshot.
     from utils.timed_ownership import non_slot_role_entitlement
     try:
         entitled = await non_slot_role_entitlement(
             guild_id, user_id, role_id, bot=bot,
-            member=_MemberRoleView(member, role, worn=False))
+            member=_MemberRoleView(verified_member, role, worn=False))
     except Exception as e:
         print(f"[EQUIP] Could not verify other entitlements to role {role_id} "
               f"for {user_id} in {guild_id}; role and slot left as they are: "
               f"{e}")
-        return back("unresolved", uncertain=True,
+        return back("unresolved", uncertain=True, member=verified_member,
                     error=f"Could not verify role entitlements: {e}")
     if entitled:
-        return back("kept", detail=f"entitled by {entitled}")
+        return back("kept", detail=f"entitled by {entitled}",
+                    member=verified_member)
+
+    actor = (verified_member
+             if callable(getattr(verified_member, "remove_roles", None))
+             else member)
+    if actor is None or not callable(getattr(actor, "remove_roles", None)):
+        return back("unresolved", uncertain=True, member=verified_member,
+                    error=(f"Could not remove role {role_id} from member "
+                           f"{user_id}, so the role and its slot were left as "
+                           f"they are."))
 
     journal["discord_step"] = "removing"
     try:
-        await member.remove_roles(role, reason=reason)
+        await actor.remove_roles(role, reason=reason)
     except Exception as e:
-        uncertain = _removal_failure_is_uncertain(e, member, role)
+        uncertain = _removal_failure_is_uncertain(e, actor, role)
         print(f"[EQUIP] Failed to remove role {role_id} from {user_id} in "
               f"{guild_id}: {e}"
               + (" (it may or may not have been removed)" if uncertain else ""))
-        return back("unresolved", uncertain=uncertain,
+        return back("unresolved", uncertain=uncertain, member=actor,
                     error=(f"Discord error removing role: {e}"
                            + (" The role may or may not have been removed."
                               if uncertain else "")))
     journal["discord_step"] = "removed"
-    return back("removed", role=role)
+    return back("removed", role=role, member=actor)
 
 
 class _SlotWriteOutcomeUnknown(Exception):
@@ -400,7 +442,11 @@ async def swap_and_record_equipped(bot: discord.Client | None,
     if member is None and guild is not None:
         member = guild.get_member(user_id)
 
-    current = await get_equipped(guild_id, user_id)
+    try:
+        current = await get_equipped(guild_id, user_id)
+    except Exception as read_current_error:
+        setattr(read_current_error, "_previous_role_intact", True)
+        raise
     released = None
 
     if current:
@@ -462,11 +508,20 @@ async def swap_and_record_equipped(bot: discord.Client | None,
                   f"the new role and it is not removed.")
             raise
         if (released is not None and released["action"] == "removed"
-                and released["role"] is not None and member is not None):
+                and released["role"] is not None):
             # The old slot is still the durable record and its role is no
             # longer worn: put it back so the record and Discord agree.
+            restore_actor = released.get("member") or member
+            if restore_actor is None or not callable(
+                    getattr(restore_actor, "add_roles", None)):
+                print(f"[EQUIP][UNCERTAIN] operation=swap guild={guild_id} "
+                      f"user={user_id} item={item_name!r} role={role_id} "
+                      f"entry={entry_key} - the slot write failed and there "
+                      f"is no member actor to restore the previous role. "
+                      f"Nothing was retried.")
+                raise _SlotWriteOutcomeUnknown(save_error) from save_error
             try:
-                await member.add_roles(
+                await restore_actor.add_roles(
                     released["role"],
                     reason=f"{reason} — swap could not be saved, previous "
                            f"role restored")
@@ -478,6 +533,7 @@ async def swap_and_record_equipped(bot: discord.Client | None,
                       f"The old slot names a role the member may no longer "
                       f"wear. Nothing was retried.")
                 raise _SlotWriteOutcomeUnknown(save_error) from save_error
+        setattr(save_error, "_previous_role_intact", True)
         raise
     return {"success": True, "previous": current, "entry_key": entry_key,
             "role_id": int(role_id)}
@@ -1108,8 +1164,12 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
                               f"({read_exc!r}). Whether the role is still "
                               f"needed is unknown. Nothing was retried.")
                     if newer is not None and int(newer["role_id"]) == role_id:
+                        restore_actor = resolution.get("member") or member
                         try:
-                            await member.add_roles(
+                            if restore_actor is None or not callable(
+                                    getattr(restore_actor, "add_roles", None)):
+                                raise RuntimeError("member actor unavailable")
+                            await restore_actor.add_roles(
                                 role_taken_off,
                                 reason=("Equipped role changed during "
                                         "unequip - restored"))

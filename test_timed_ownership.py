@@ -10469,6 +10469,8 @@ class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
             get_role=lambda r: roles.get(int(r)),
             get_member=lambda uid: next((p for p, _ in people
                                          if p.id == uid), None),
+            fetch_member=AsyncMock(side_effect=lambda uid: next(
+                (p for p, _ in people if p.id == uid), None)),
             get_channel=lambda cid: None,
         )
         for p, _ in people:

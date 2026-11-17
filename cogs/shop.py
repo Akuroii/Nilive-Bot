@@ -880,6 +880,10 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
                 result["warning"] = granted.get("equip_warning") or (
                     "This item is in your inventory, but it could not be "
                     "equipped.")
+            elif granted.get("equip_warning"):
+                result["warning"] = granted["equip_warning"]
+            if granted.get("equip_uncertain"):
+                result["equip_uncertain"] = True
             return result
 
         from utils.reward_engine import give_reward
@@ -1051,6 +1055,10 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
                 result["warning"] = granted.get("equip_warning") or (
                     "This item is in your inventory, but it could not be "
                     "equipped.")
+            elif granted.get("equip_warning"):
+                result["warning"] = granted["equip_warning"]
+            if granted.get("equip_uncertain"):
+                result["equip_uncertain"] = True
             return result
 
         from utils.reward_engine import give_reward

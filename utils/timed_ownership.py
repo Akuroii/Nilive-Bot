@@ -3025,9 +3025,12 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
         # like a manual Equip, so a later Unequip can tell whether the role it
         # may remove is one this grant added.
         from utils.equip_engine import (
-            _take_back_unsaved_role, swap_and_record_equipped,
+            _SlotWriteOutcomeUnknown, _take_back_unsaved_role,
+            get_equipped, swap_and_record_equipped,
         )
         swap_failed = False
+        slot_recorded_new = False
+        slot_read_unknown = False
         try:
             swap = await swap_and_record_equipped(
                 bot, guild_id, user_id,
@@ -3037,53 +3040,121 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                 role_added=role_added)
         except Exception as exc:
             # The slot write raised after the previous role may already have
-            # been released. There is deliberately NO fallback write here: the
-            # old slot is either intact (it must not be overwritten) or names a
-            # role the member no longer has (overwriting it would hide that).
+            # been released. There is deliberately NO fallback write here:
+            # inspect what `equipped_roles` actually contains so we never strip
+            # a newly persisted slot's role, never claim the new item is
+            # unequipped when its slot row persisted, and never claim the
+            # previous role was left untouched unless that was confirmed.
+            slot_outcome_unknown = isinstance(exc, _SlotWriteOutcomeUnknown)
+            cause = exc.cause if slot_outcome_unknown else exc
+            prev_confirmed_intact = (
+                bool(getattr(exc, "_previous_role_intact", False))
+                and not slot_outcome_unknown
+            )
             print(f"[TIMED] equip swap/bookkeeping failed for {entry_key}: {exc}")
-            swap = {"success": False, "uncertain": True,
-                    "error": f"the equip slot could not be written ({exc})"}
+            try:
+                landed = await get_equipped(guild_id, user_id)
+                slot_recorded_new = (
+                    landed is not None
+                    and int(landed["role_id"]) == int(role_id)
+                    and landed.get("entry_key") == entry_key
+                )
+            except Exception as read_exc:
+                print(f"[TIMED] could not read equip slot after swap error for "
+                      f"{entry_key}: {read_exc}")
+                slot_read_unknown = True
+            swap = {
+                "success": False,
+                "uncertain": True,
+                "previous_role_uncertain": bool(
+                    not prev_confirmed_intact
+                    or slot_read_unknown
+                    or slot_recorded_new
+                ),
+                "error": f"the equip slot could not be written ({cause})",
+            }
             swap_failed = True
 
-        equipped = bool(swap.get("success"))
-        if not equipped:
-            # The purchase itself succeeded and the holding is owned. The
-            # previous slot was left in place, so the role this grant added is
-            # taken back where that is safe - it is worn by nobody else and
-            # not the role the slot records. A role this grant did NOT add (it
-            # was already worn) is never touched: taking it back would remove
-            # somebody else's grant. Nothing is retried.
-            equip_uncertain = bool(swap.get("uncertain")) or swap_failed
-            taken_back = "not_added"
-            if role_added:
-                try:
-                    taken_back = await _take_back_unsaved_role(
-                        bot, guild_id, user_id, member, role, int(role_id))
-                except Exception as exc:  # defensive: the helper does not raise
-                    print(f"[TIMED] could not take back role {role_id} of "
-                          f"{entry_key}: {exc}")
-                    taken_back = "left_on"
-            if taken_back not in ("removed", "not_added"):
-                equip_uncertain = True
-            # The wording must reflect what the member did: a Shop purchase is
-            # "purchased", a Mission/Event/Minigame/Tag grant is an earned reward.
-            # Never tell a member who earned something that they bought it.
+        if slot_recorded_new:
+            # `record_equipped` raised, yet the new `equipped_roles` row DID
+            # persist and the Discord role is on the member. Keep the outcome
+            # uncertain (`equip_uncertain=True`) rather than claiming a clean
+            # swap, leave the new role on Discord, and do NOT tell the member
+            # the item is unequipped or that the previous role was untouched.
+            equipped = True
+            equip_uncertain = True
             from utils.reward_engine import reward_origin_phrase
             _origin = reward_origin_phrase(
                 purchased=bool(op_id), source=source)
-            _prev_clause = (
-                "Your previous equipped role could not be confirmed on Discord"
-                if swap.get("previous_role_uncertain")
-                else "Your previous equipped role was left as it was"
-            )
             equip_warning = (
-                f"**{item_name}** was {_origin} and is in your inventory, but "
-                f"it is not "
-                f"equipped: {swap.get('error') or 'the equip slot could not be updated'}. "
-                f"{_prev_clause}"
-                + ("" if taken_back in ("removed", "not_added")
-                   else "; the role of this item may also still be on you")
-                + ". Open it from `/inventory` to try again.")
+                f"**{item_name}** was {_origin} and its equip record is saved, "
+                f"but an error occurred while finalizing the role swap "
+                f"({swap.get('error') or 'slot bookkeeping reported an error'}). "
+                f"Your previous equipped role could not be confirmed on Discord; "
+                f"check `/inventory` or ask an admin to verify your roles."
+            )
+        else:
+            equipped = bool(swap.get("success"))
+            if not equipped:
+                # The purchase itself succeeded and the holding is owned. Take
+                # back the role this grant added only where that is safe -
+                # never one the member already wore, and never one the slot
+                # actually records. Nothing is retried.
+                equip_uncertain = bool(swap.get("uncertain")) or swap_failed
+                taken_back = "not_added"
+                if role_added:
+                    try:
+                        taken_back = await _take_back_unsaved_role(
+                            bot, guild_id, user_id, member, role, int(role_id))
+                    except Exception as exc:  # defensive: the helper does not raise
+                        print(f"[TIMED] could not take back role {role_id} of "
+                              f"{entry_key}: {exc}")
+                        taken_back = "left_on"
+                if taken_back == "recorded":
+                    # A transient read error hid the slot row a moment ago,
+                    # and `_take_back_unsaved_role` confirmed the new slot row
+                    # is present and left the Discord role alone.
+                    equipped = True
+                    equip_uncertain = True
+                    from utils.reward_engine import reward_origin_phrase
+                    _origin = reward_origin_phrase(
+                        purchased=bool(op_id), source=source)
+                    equip_warning = (
+                        f"**{item_name}** was {_origin} and its equip record is "
+                        f"saved, but an error occurred while finalizing the role "
+                        f"swap ({swap.get('error') or 'slot bookkeeping reported an error'}). "
+                        f"Your previous equipped role could not be confirmed on "
+                        f"Discord; check `/inventory` or ask an admin to verify "
+                        f"your roles."
+                    )
+                else:
+                    if taken_back not in ("removed", "not_added"):
+                        equip_uncertain = True
+                    # The wording must reflect what the member did: a Shop
+                    # purchase is "purchased", a Mission/Event/Minigame/Tag
+                    # grant is an earned reward. Never tell a member who earned
+                    # something that they bought it.
+                    from utils.reward_engine import reward_origin_phrase
+                    _origin = reward_origin_phrase(
+                        purchased=bool(op_id), source=source)
+                    _prev_clause = (
+                        "Your previous equipped role could not be confirmed on Discord"
+                        if swap.get("previous_role_uncertain")
+                        else "Your previous equipped role was left as it was"
+                    )
+                    _state_clause = (
+                        "its equip state could not be confirmed"
+                        if slot_read_unknown
+                        else "it is not equipped"
+                    )
+                    equip_warning = (
+                        f"**{item_name}** was {_origin} and is in your inventory, "
+                        f"but {_state_clause}: "
+                        f"{swap.get('error') or 'the equip slot could not be updated'}. "
+                        f"{_prev_clause}"
+                        + ("" if taken_back in ("removed", "not_added")
+                           else "; the role of this item may also still be on you")
+                        + ". Open it from `/inventory` to try again.")
 
     return {"success": True, "entry_key": entry_key,
             "expires_at": expires_at, "role_added": role_added,

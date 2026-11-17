@@ -2872,11 +2872,12 @@ class FreshMemberCheckTests(AuditCase):
         self.assertFalse(result["role_added"])
         self.assertEqual(self.member.add_roles.await_count, 0)
         self.assertEqual(self.observation(), [(0, FLAME)])
-        # Unequip reads presence from the same cache, so it sees the role as
-        # absent and only clears the obsolete slot: the role is left on Discord
-        # (the documented stale-cache limit - Unequip does not fetch).
+        # Unequip also verifies presence via `guild.fetch_member`, so even with
+        # the stale empty cache it sees Flame worn with `role_added=0`, keeps
+        # the role on Discord, and clears the slot.
         result = await equip_engine.unequip_role(self.bot, GUILD, USER, "Flame")
         self.assertTrue(result["success"], result)
+        self.assertTrue(result["role_kept"], result)
         self.assertEqual(self.member.remove_roles.await_count, 0)
         self.assertEqual(slot(), [])
 
@@ -3088,6 +3089,289 @@ class EndToEndPermanentRoleShopPatch5Tests(AuditCase):
         self.assertIn("Purchase needs a check", sent2["embed"].title)
         self.assertIn("delivery could not be confirmed",
                       sent2["embed"].description)
+
+
+class ReleaseRoleFreshMemberVerificationTests(AuditCase):
+    """`_release_role` (Unequip + Swap) always verifies via `guild.fetch_member`
+    and uses the REST-fetched member rather than trusting cached `member.roles`
+    in either direction."""
+
+    async def _entry_keys(self):
+        entries = await inventory.get_inventory_entries(GUILD, USER)
+        flame_key = next(e["entry_key"] for e in entries if e["item_name"] == "Flame")
+        blue_key = next(e["entry_key"] for e in entries if e["item_name"] == "Blue")
+        return flame_key, blue_key
+
+    def _split_cached_and_rest_members(self, *, cached_roles, rest_roles,
+                                       cached_premium=None, rest_premium=None):
+        cached = SimpleNamespace(
+            id=USER, display_name="Tester", mention=f"<@{USER}>", bot=False,
+            roles=list(cached_roles), premium_since=cached_premium,
+            guild=self.guild)
+        rest = SimpleNamespace(
+            id=USER, display_name="Tester", mention=f"<@{USER}>", bot=False,
+            roles=list(rest_roles), premium_since=rest_premium,
+            guild=self.guild)
+
+        def _make_add(target):
+            async def _add(role, reason=None):
+                if role not in target.roles:
+                    target.roles.append(role)
+            return _add
+
+        def _make_remove(target):
+            async def _remove(role, reason=None):
+                if role in target.roles:
+                    target.roles.remove(role)
+            return _remove
+
+        cached.add_roles = AsyncMock(side_effect=_make_add(cached))
+        cached.remove_roles = AsyncMock(side_effect=_make_remove(cached))
+        rest.add_roles = AsyncMock(side_effect=_make_add(rest))
+        rest.remove_roles = AsyncMock(side_effect=_make_remove(rest))
+
+        self.guild.get_member = lambda uid: cached if int(uid) == USER else None
+        self.guild.fetch_member = AsyncMock(return_value=rest)
+        return cached, rest
+
+    async def test_unequip_when_role_absent_in_cache_but_present_via_rest(self):
+        await self.give_roles()
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame"))["success"])
+        flame_role = self.guild.get_role(FLAME)
+
+        # Stale cache says Flame is NOT worn; REST says Flame IS worn.
+        cached, rest = self._split_cached_and_rest_members(
+            cached_roles=[], rest_roles=[flame_role])
+
+        result = await equip_engine.unequip_role(self.bot, GUILD, USER, "Flame")
+        self.assertTrue(result["success"], result)
+        self.assertFalse(result["role_kept"], result)
+        self.assertEqual(self.guild.fetch_member.await_count, 1)
+        self.assertEqual(cached.remove_roles.await_count, 0)
+        self.assertEqual(rest.remove_roles.await_count, 1)
+        self.assertEqual(worn(rest), [])
+        self.assertEqual(slot(), [])
+
+    async def test_unequip_legacy_unknown_slot_absent_in_cache_present_via_rest_refuses(self):
+        await self.give_roles()
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame"))["success"])
+        execute("UPDATE equipped_roles SET role_added=NULL, role_added_role_id=NULL "
+                "WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        flame_role = self.guild.get_role(FLAME)
+
+        # Stale cache hides Flame; REST shows Flame is still worn on Discord.
+        # Must NOT clear the slot as "absent".
+        cached, rest = self._split_cached_and_rest_members(
+            cached_roles=[], rest_roles=[flame_role])
+
+        result = await equip_engine.unequip_role(self.bot, GUILD, USER, "Flame")
+        self.assertFalse(result["success"], result)
+        self.assertTrue(result["uncertain"], result)
+        self.assertTrue(result["role_kept"], result)
+        self.assertEqual(cached.remove_roles.await_count, 0)
+        self.assertEqual(rest.remove_roles.await_count, 0)
+        self.assertEqual(worn(rest), ["Flame"])
+        self.assertEqual(slot(), [("Flame", FLAME)])
+
+    async def test_unequip_when_role_present_in_cache_but_absent_via_rest(self):
+        await self.give_roles()
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame"))["success"])
+        flame_role = self.guild.get_role(FLAME)
+
+        # Stale cache still lists Flame; REST confirms Flame is already off Discord.
+        cached, rest = self._split_cached_and_rest_members(
+            cached_roles=[flame_role], rest_roles=[])
+
+        result = await equip_engine.unequip_role(self.bot, GUILD, USER, "Flame")
+        self.assertTrue(result["success"], result)
+        self.assertFalse(result["role_kept"], result)
+        self.assertEqual(self.guild.fetch_member.await_count, 1)
+        self.assertEqual(cached.remove_roles.await_count, 0)
+        self.assertEqual(rest.remove_roles.await_count, 0)
+        self.assertEqual(slot(), [])
+
+    async def test_swap_stale_cache_both_directions_and_rest_entitlement_decision(self):
+        await self.give_roles()
+        flame_key, blue_key = await self._entry_keys()
+        flame_role = self.guild.get_role(FLAME)
+        blue_role = self.guild.get_role(BLUE)
+
+        # Direction 1: Flame equipped (`role_added=1`), absent in cache, present via REST.
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame"))["success"])
+        cached, rest = self._split_cached_and_rest_members(
+            cached_roles=[blue_role], rest_roles=[flame_role, blue_role])
+        swap1 = await equip_engine.swap_and_record_equipped(
+            self.bot, GUILD, USER, item_name="Blue", role_id=BLUE,
+            entry_key=blue_key, guild=self.guild, member=cached,
+            reason="Swap test 1", role_added=True)
+        self.assertTrue(swap1["success"], swap1)
+        self.assertEqual(cached.remove_roles.await_count, 0)
+        self.assertEqual(rest.remove_roles.await_count, 1)
+        self.assertEqual(worn(rest), ["Blue"])
+        self.assertEqual(slot(), [("Blue", BLUE)])
+
+        # Direction 2: Blue equipped (`role_added=1`), present in cache, absent via REST.
+        cached2, rest2 = self._split_cached_and_rest_members(
+            cached_roles=[blue_role, flame_role], rest_roles=[flame_role])
+        swap2 = await equip_engine.swap_and_record_equipped(
+            self.bot, GUILD, USER, item_name="Flame", role_id=FLAME,
+            entry_key=flame_key, guild=self.guild, member=cached2,
+            reason="Swap test 2", role_added=True)
+        self.assertTrue(swap2["success"], swap2)
+        self.assertEqual(cached2.remove_roles.await_count, 0)
+        self.assertEqual(rest2.remove_roles.await_count, 0)
+        self.assertEqual(slot(), [("Flame", FLAME)])
+
+        # Keep/remove entitlement decision uses REST-fetched member state
+        # (cached_premium=None, rest_premium=active boost covering FLAME).
+        execute("INSERT OR REPLACE INTO boost_config "
+                "(guild_id, enabled, boost2_role_id) VALUES (?, 1, NULL)",
+                (GUILD,))
+        execute("INSERT INTO boost_color_roles "
+                "(guild_id, role_id, role_name, requires_boost_level) "
+                "VALUES (?, ?, 'Flame', 1)", (GUILD, FLAME))
+        self.addCleanup(self.booster_cleanup)
+        from datetime import datetime, timezone
+        cached3, rest3 = self._split_cached_and_rest_members(
+            cached_roles=[],
+            rest_roles=[flame_role, blue_role],
+            cached_premium=None,
+            rest_premium=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        rest3.premium_subscription_count = 1
+        swap3 = await equip_engine.swap_and_record_equipped(
+            self.bot, GUILD, USER, item_name="Blue", role_id=BLUE,
+            entry_key=blue_key, guild=self.guild, member=cached3,
+            reason="Swap test 3", role_added=True)
+        self.assertTrue(swap3["success"], swap3)
+        # REST member proved active boost entitlement, so Flame was kept!
+        self.assertEqual(rest3.remove_roles.await_count, 0)
+        self.assertIn("Flame", worn(rest3))
+        self.assertEqual(slot(), [("Blue", BLUE)])
+
+    async def test_failed_rest_verification_returns_unresolved_for_unequip_and_swap(self):
+        await self.give_roles()
+        _, blue_key = await self._entry_keys()
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame"))["success"])
+        flame_role = self.guild.get_role(FLAME)
+
+        # Even if cache claims Flame is absent, a failed REST fetch must return
+        # unresolved and leave both Discord roles and `equipped_roles` untouched.
+        cached, rest = self._split_cached_and_rest_members(
+            cached_roles=[], rest_roles=[flame_role])
+        self.guild.fetch_member = AsyncMock(
+            side_effect=RuntimeError("Discord REST unavailable"))
+
+        unequip_res = await equip_engine.unequip_role(
+            self.bot, GUILD, USER, "Flame")
+        self.assertFalse(unequip_res["success"], unequip_res)
+        self.assertTrue(unequip_res["uncertain"], unequip_res)
+        self.assertTrue(unequip_res["role_kept"], unequip_res)
+        self.assertEqual(cached.remove_roles.await_count, 0)
+        self.assertEqual(rest.remove_roles.await_count, 0)
+        self.assertEqual(slot(), [("Flame", FLAME)])
+
+        swap_res = await equip_engine.swap_and_record_equipped(
+            self.bot, GUILD, USER, item_name="Blue", role_id=BLUE,
+            entry_key=blue_key, guild=self.guild, member=cached,
+            reason="Swap under fetch failure", role_added=True)
+        self.assertFalse(swap_res["success"], swap_res)
+        self.assertTrue(swap_res["uncertain"], swap_res)
+        self.assertEqual(cached.remove_roles.await_count, 0)
+        self.assertEqual(rest.remove_roles.await_count, 0)
+        self.assertEqual(slot(), [("Flame", FLAME)])
+
+
+class TimedGrantUncertainSwapExceptionTests(AuditCase):
+    """Uncertain swap exceptions inside `timed_ownership.grant_timed_product`."""
+
+    async def test_slot_save_fails_after_removing_previous_role_and_restore_fails(self):
+        await self.give_roles()
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame"))["success"])
+        self.assertEqual((slot(), worn(self.member)),
+                         ([("Flame", FLAME)], ["Flame"]))
+
+        # Allow adding BLUE initially, then fail when swap compensation tries
+        # to restore FLAME after `record_equipped` fails.
+        async def add_blue_but_fail_flame_restore(role, reason=None):
+            if role.id == FLAME:
+                raise asyncio.TimeoutError("Discord timed out restoring Flame")
+            if role not in self.member.roles:
+                self.member.roles.append(role)
+
+        self.member.add_roles = AsyncMock(
+            side_effect=add_blue_but_fail_flame_restore)
+
+        with patch.object(equip_engine, "record_equipped", AsyncMock(
+                side_effect=sqlite3.OperationalError("database is locked"))):
+            result = await timed_ownership.grant_timed_product(
+                self.bot, GUILD, USER, item_name="Timed Blue", duration_hours=2,
+                item_type="temp_role", role_id=BLUE, source="shop",
+                op_id="op-swap-restore-fail")
+
+        self.assertTrue(result["success"], result)
+        self.assertFalse(result["equipped"], result)
+        self.assertTrue(result["equip_uncertain"], result)
+        self.assertIsNotNone(result["equip_warning"])
+        self.assertIn("Your previous equipped role could not be confirmed on Discord",
+                      result["equip_warning"])
+        self.assertNotIn("was left as it was", result["equip_warning"])
+        # Old slot row was not overwritten, Flame failed to restore on Discord,
+        # and newly added BLUE was safely taken back.
+        self.assertEqual(slot(), [("Flame", FLAME)])
+        self.assertEqual(worn(self.member), [])
+
+    async def test_new_slot_persisted_in_db_despite_exception_during_record_equipped(self):
+        from cogs.shop import _deliver_purchase_effects
+        await self.give_roles()
+        self.assertTrue((await equip_engine.equip_role(
+            self.bot, GUILD, USER, "Flame"))["success"])
+
+        real_record = equip_engine.record_equipped
+
+        async def write_then_raise(*args, **kwargs):
+            await real_record(*args, **kwargs)
+            raise sqlite3.OperationalError("connection lost after commit")
+
+        itx = shop_interaction(self.member, self.guild, self.bot)
+        with patch.object(equip_engine, "record_equipped",
+                          AsyncMock(side_effect=write_then_raise)):
+            result = await timed_ownership.grant_timed_product(
+                self.bot, GUILD, USER, item_name="Timed Blue", duration_hours=2,
+                item_type="temp_role", role_id=BLUE, source="shop",
+                op_id="op-persisted-slot")
+
+        # The new `equipped_roles` row IS written and the new Discord role stays worn.
+        self.assertTrue(result["success"], result)
+        self.assertTrue(result["equipped"], result)
+        self.assertTrue(result["equip_uncertain"], result)
+        self.assertIsNotNone(result["equip_warning"])
+        self.assertNotIn("not equipped", result["equip_warning"].lower())
+        self.assertNotIn("could not be equipped", result["equip_warning"].lower())
+        self.assertNotIn("was left as it was", result["equip_warning"])
+        self.assertEqual(
+            rows("SELECT item_name, role_id, entry_key FROM equipped_roles "
+                 "WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            [("Timed Blue", BLUE, result["entry_key"])])
+        self.assertEqual(worn(self.member), ["Blue"])
+
+        # Shop delivery wrapper also surfaces the uncertain swap warning rather
+        # than dropping it as a clean success or misreporting "not equipped".
+        with patch.object(timed_ownership, "grant_timed_product",
+                          AsyncMock(return_value=result)):
+            shop_res = await _deliver_purchase_effects(
+                itx, guild_id=GUILD, user_id=USER, itype="temp_role",
+                listing_type="temp_role", name="Timed Blue", role_id=BLUE,
+                duration_hours=2, source="shop", op_id="op-persisted-slot")
+        self.assertTrue(shop_res["success"], shop_res)
+        self.assertTrue(shop_res.get("equip_uncertain"), shop_res)
+        self.assertEqual(shop_res["warning"], result["equip_warning"])
+        self.assertNotIn("not equipped", shop_res["warning"].lower())
 
 
 if __name__ == "__main__":
