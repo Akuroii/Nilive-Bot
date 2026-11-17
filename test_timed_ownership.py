@@ -469,6 +469,151 @@ class ExpiryCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["kept"], 1, str(stats))
         self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(1,)])
 
+    async def test_uncached_guild_role_fetched_via_rest_is_still_removed_at_expiry(self):
+        """Real discord.py Guild.fetch_role returns an uncached Role, so
+        Member.roles omits it even when Member._roles contains the snowflake."""
+        import discord
+        from discord.state import ConnectionState
+
+        removed_calls = []
+
+        class _DummyHTTP:
+            async def get_member(self, guild_id, user_id):
+                return {
+                    "user": {"id": str(user_id), "username": "u", "discriminator": "0", "avatar": None},
+                    "roles": ["9601"],
+                    "flags": 0,
+                }
+
+            async def get_role(self, guild_id, role_id):
+                return {
+                    "id": str(role_id),
+                    "name": "UncachedVIP",
+                    "permissions": "0",
+                    "color": 0,
+                    "hoist": False,
+                    "managed": False,
+                    "mentionable": False,
+                    "position": 1,
+                }
+
+            async def remove_role(self, guild_id, user_id, role_id, reason=None):
+                removed_calls.append((int(guild_id), int(user_id), int(role_id), reason))
+
+        state = ConnectionState(
+            dispatch=lambda *a, **k: None,
+            handlers={},
+            hooks={},
+            http=_DummyHTTP(),
+            intents=discord.Intents.default(),
+        )
+        real_guild = discord.Guild(
+            data={
+                "id": str(GUILD),
+                "name": "RealGuild",
+                "roles": [{
+                    "id": str(GUILD),
+                    "name": "@everyone",
+                    "permissions": "0",
+                    "color": 0,
+                    "hoist": False,
+                    "managed": False,
+                    "mentionable": False,
+                    "position": 0,
+                }],
+            },
+            state=state,
+        )
+        cached_member = discord.Member(
+            data={
+                "user": {"id": str(USER), "username": "u", "discriminator": "0", "avatar": None},
+                "roles": [],
+                "flags": 0,
+            },
+            guild=real_guild,
+            state=state,
+        )
+        real_guild._add_member(cached_member)
+        bot = SimpleNamespace(get_guild=lambda gid: real_guild if int(gid) == GUILD else None)
+
+        self.assertIsNone(real_guild.get_role(9601))
+        self.assertEqual([r.id for r in cached_member.roles], [GUILD])
+
+        hid = await TO.grant_timed_holding(
+            GUILD, USER, "UncachedVIP", expires_at=iso_in(-1),
+            item_type="temp_role", role_id=9601, source="shop")
+        await EE.record_equipped(
+            GUILD, USER, "UncachedVIP", role_id=9601,
+            entry_key=f"h:{hid}", role_added=True)
+
+        stats = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats["removed"], 1, str(stats))
+        self.assertEqual(len(removed_calls), 1)
+        self.assertEqual(removed_calls[0][:3], (GUILD, USER, 9601))
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+        self.assertIsNone(await get_equipped(GUILD, USER))
+
+    async def test_unresolvable_role_or_unverified_member_keeps_holding_for_retry(self):
+        role = role_stub(9602)
+        _, person, bot, guild = purchase_ctx(granted_role=role, roles_held=(role,))
+        hid = await TO.grant_timed_holding(
+            GUILD, USER, "Flame", expires_at=iso_in(-1),
+            item_type="temp_role", role_id=9602, source="shop")
+
+        # 1) Member wears the role, but guild.get_role misses and no HTTP role
+        # fetch is available -> keep the holding rather than orphaning the role.
+        guild.get_role = lambda rid: None
+        stats_missing_role = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats_missing_role["removed"], 0, str(stats_missing_role))
+        self.assertEqual(stats_missing_role["kept"], 1, str(stats_missing_role))
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (hid,)), [(1,)])
+
+        # 2) Cached member shows role absent and fetch_member returns None ->
+        # unverified absence must keep the holding rather than retiring it.
+        guild.get_role = lambda rid: role if int(rid) == 9602 else None
+        person.roles = []
+        guild.fetch_member = AsyncMock(return_value=None)
+        stats_none_member = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats_none_member["removed"], 0, str(stats_none_member))
+        self.assertEqual(stats_none_member["kept"], 1, str(stats_none_member))
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (hid,)), [(1,)])
+
+    async def test_unknown_guild_404_keeps_holding_while_stale_cached_departure_retires(self):
+        import discord
+
+        role = role_stub(9603)
+        _, person, bot, guild = purchase_ctx(granted_role=role, roles_held=(role,))
+        hid = await TO.grant_timed_holding(
+            GUILD, USER, "Flame", expires_at=iso_in(-1),
+            item_type="temp_role", role_id=9603, source="shop")
+        await EE.record_equipped(
+            GUILD, USER, "Flame", role_id=9603,
+            entry_key=f"h:{hid}", role_added=True)
+
+        resp_404 = SimpleNamespace(status=404, reason="Not Found")
+        unknown_guild = discord.NotFound(
+            resp_404, {"code": 10004, "message": "Unknown Guild"})
+        unknown_member = discord.NotFound(
+            resp_404, {"code": 10007, "message": "Unknown Member"})
+
+        # 1) Unknown Guild (10004) on fetch_member is NOT member departure.
+        person.roles = []
+        guild.fetch_member = AsyncMock(side_effect=unknown_guild)
+        stats_10004 = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats_10004["removed"], 0, str(stats_10004))
+        self.assertEqual(stats_10004["kept"], 1, str(stats_10004))
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (hid,)), [(1,)])
+
+        # 2) Stale cached member still shows the role, while remove_roles hits
+        # Unknown Member (10007) because the user already left -> retire cleanly.
+        person.roles = [role]
+        person.remove_roles = AsyncMock(side_effect=unknown_member)
+        stats_10007 = await TO.cleanup_expired_holdings(bot)
+        self.assertEqual(stats_10007["removed"], 1, str(stats_10007))
+        self.assertEqual(stats_10007["kept"], 0, str(stats_10007))
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings WHERE id=?", (hid,)), [(0,)])
+        self.assertIsNone(await get_equipped(GUILD, USER))
+
 
 # ── 4. entry-key targeted equipping ─────────────────────────────────────────
 

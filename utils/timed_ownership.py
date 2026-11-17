@@ -2017,11 +2017,16 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
 
 
 def _is_member_not_found(exc: BaseException) -> bool:
-    """Return True only when Discord definitively reports the member is not in the guild (404 NotFound)."""
+    """Return True only when Discord definitively reports Unknown Member (404 NotFound, code 10007)."""
     try:
         import discord
         if isinstance(exc, discord.NotFound):
-            return True
+            code = getattr(exc, "code", None)
+            if code == 10007:
+                return True
+            if code in (None, 0):
+                text = str(getattr(exc, "text", "") or exc).lower()
+                return "10007" in text or "unknown member" in text
     except Exception:
         pass
     return False
@@ -2032,7 +2037,12 @@ def _is_role_not_found(exc: BaseException) -> bool:
     try:
         import discord
         if isinstance(exc, discord.NotFound):
-            return getattr(exc, "code", None) == 10011
+            code = getattr(exc, "code", None)
+            if code == 10011:
+                return True
+            if code in (None, 0):
+                text = str(getattr(exc, "text", "") or exc).lower()
+                return "10011" in text or "unknown role" in text
     except Exception:
         pass
     return False
@@ -2282,6 +2292,41 @@ async def _late_rollback_prereqs_complete(
     return True
 
 
+def _member_has_role_id(member, role_id: int) -> bool:
+    """True when `member` holds `role_id` via raw REST snowflakes or `.roles`.
+
+    `discord.Guild.fetch_role` returns a `Role` without inserting it into
+    `guild._roles`, and `discord.Member.roles` filters `member._roles` through
+    `guild.get_role(...)` — so an uncached guild role is present in
+    `member._roles` even while `role in member.roles` is False.
+    """
+    if member is None:
+        return False
+    target = int(role_id)
+    raw_roles = getattr(member, "_roles", None)
+    if raw_roles is not None:
+        has_fn = getattr(raw_roles, "has", None)
+        if callable(has_fn):
+            try:
+                if has_fn(target):
+                    return True
+            except Exception:
+                pass
+        else:
+            try:
+                if target in raw_roles:
+                    return True
+            except Exception:
+                pass
+    for r in (getattr(member, "roles", None) or ()):
+        try:
+            if int(getattr(r, "id", r)) == target:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _serialised_expiry(func):
     """Run one holding's expiry under that member's equip-slot lock.
 
@@ -2365,14 +2410,15 @@ async def expire_one(bot, holding: dict) -> dict:
             err = "inventory or equip rollback pending"
             return {"status": "kept", "reason": err, "error": err}
     if (member is not None and not is_late_rollback
-            and hasattr(guild, "fetch_member")
-            and not any(getattr(r, "id", r) == int(role_id)
-                        for r in (getattr(member, "roles", None) or ()))):
+            and not _member_has_role_id(member, int(role_id))):
         # The gateway cache only says what Discord last echoed. An "absent"
         # read from it would skip the removal below and still delete the
         # holding, leaving a role on the member that nothing records. Confirm
-        # the absence with a fresh read first; if that read fails the holding
-        # is kept so the sweep retries it.
+        # the absence with a fresh read first; if that read fails (or cannot
+        # run) the holding is kept so the sweep retries it.
+        if not callable(getattr(guild, "fetch_member", None)):
+            err = "member lookup unavailable to confirm role absence"
+            return {"status": "kept", "reason": err, "error": err}
         try:
             fresh_member = await guild.fetch_member(user_id)
         except Exception as exc:
@@ -2382,8 +2428,10 @@ async def expire_one(bot, holding: dict) -> dict:
                 err = f"member lookup failed: {exc}"
                 return {"status": "kept", "reason": err, "error": err}
         else:
-            if fresh_member is not None:
-                member = fresh_member
+            if fresh_member is None:
+                err = "member lookup returned None"
+                return {"status": "kept", "reason": err, "error": err}
+            member = fresh_member
     try:
         reason = await role_still_entitled(
             guild_id, user_id, role_id, exclude_entry_key=entry_key,
@@ -2415,31 +2463,55 @@ async def expire_one(bot, holding: dict) -> dict:
     role, role_deleted, role_lookup_err = await _resolve_guild_role(guild, int(role_id))
     if role_lookup_err is not None:
         return {"status": "kept", "reason": role_lookup_err, "error": role_lookup_err}
-    if is_late_rollback and not member_departed and not role_deleted and (
-        member is None or role is None or not hasattr(member, "remove_roles")
-    ):
-        err = "member or role unavailable for late role rollback"
-        return {"status": "kept", "reason": err, "error": err}
+    member_has_role = _member_has_role_id(member, int(role_id))
+    if not member_departed and not role_deleted:
+        if member is None:
+            err = (
+                "member or role unavailable for late role rollback"
+                if is_late_rollback
+                else "member unavailable for role expiry cleanup"
+            )
+            return {"status": "kept", "reason": err, "error": err}
+        if is_late_rollback or member_has_role:
+            if role is None or not callable(getattr(member, "remove_roles", None)):
+                err = (
+                    "member or role unavailable for late role rollback"
+                    if is_late_rollback
+                    else "member or role unavailable for role expiry cleanup"
+                )
+                return {"status": "kept", "reason": err, "error": err}
     if role_deleted and member is not None and isinstance(getattr(member, "roles", None), list):
         member.roles[:] = [
             r for r in member.roles
             if getattr(r, "id", None) != int(role_id)
         ]
-    member_roles = getattr(member, "roles", None) or ()
     if (
         not member_departed
         and not role_deleted
         and member is not None
         and role is not None
-        and (is_late_rollback or role in member_roles)
+        and (is_late_rollback or member_has_role)
     ):
         try:
             await member.remove_roles(role, reason="Timed entitlement expired")
-            if isinstance(getattr(member, "roles", None), list) and role in member.roles:
-                member.roles.remove(role)
+            if isinstance(getattr(member, "roles", None), list):
+                member.roles[:] = [
+                    r for r in member.roles
+                    if getattr(r, "id", r) != int(role_id)
+                ]
         except Exception as exc:
-            # Keep the row: it is the only marker that this removal is pending.
-            return {"status": "kept", "reason": f"Discord removal failed: {exc}"}
+            if _is_member_not_found(exc):
+                member_departed = True
+            elif _is_role_not_found(exc):
+                role_deleted = True
+                if isinstance(getattr(member, "roles", None), list):
+                    member.roles[:] = [
+                        r for r in member.roles
+                        if getattr(r, "id", None) != int(role_id)
+                    ]
+            else:
+                # Keep the row: it is the only marker that this removal is pending.
+                return {"status": "kept", "reason": f"Discord removal failed: {exc}"}
 
     # Bookkeeping BEFORE the row is deleted: `clear_equip_for_holding` is
     # idempotent, so a crash after this point simply retries, whereas deleting
@@ -6527,8 +6599,7 @@ async def _observe_role_presence(bot, guild_id: int, user_id: int,
         return "unknown", f"not found (code {getattr(exc, 'code', None)})"
     except Exception as exc:
         return "unknown", f"member fetch failed: {type(exc).__name__}: {exc}"
-    held = {int(getattr(r, "id", r)) for r in (getattr(member, "roles", None) or ())}
-    return ("present" if int(role_id) in held else "absent"), "fetched member"
+    return ("present" if _member_has_role_id(member, int(role_id)) else "absent"), "fetched member"
 
 
 async def reconcile_delivery_intents(
