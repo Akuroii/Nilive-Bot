@@ -131,7 +131,12 @@ class ShopOptionTests(unittest.TestCase):
         option = seed_item("Sword option", option_of_id=root)
         disabled = seed_item("Disabled root")
         execute("UPDATE shop_items SET enabled=0 WHERE id=?", (disabled,))
-        source = Path(__file__).resolve().parents[1] / "cogs/shop.py"
+        # The repository root, whether this file is run from the root or from a
+        # copy nested one level deeper (the path this check used to assume).
+        source = next(
+            parent / "cogs/shop.py"
+            for parent in Path(__file__).resolve().parents
+            if (parent / "cogs/shop.py").is_file())
         self.assertIn("AND option_of_id IS NULL", source.read_text())
         # Exercise the actual command callback, including both the listing
         # fields and its direct-buy button view.

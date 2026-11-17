@@ -872,6 +872,14 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
                           entry_key=granted.get("entry_key"),
                           role_added=bool(granted.get("role_added")),
                           detail=f"holding {granted.get('entry_key')}")
+            if granted.get("equipped") is False:
+                # Delivered but NOT worn: the previously equipped role could
+                # not be released, so the swap was refused and this role was
+                # taken back. The purchase succeeded - say what it actually
+                # bought instead of implying the role is equipped.
+                result["warning"] = granted.get("equip_warning") or (
+                    "This item is in your inventory, but it could not be "
+                    "equipped.")
             return result
 
         from utils.reward_engine import give_reward
@@ -1025,6 +1033,15 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
                           entry_key=granted.get("entry_key"),
                           role_added=bool(granted.get("role_added")),
                           detail=f"holding {granted.get('entry_key')}")
+            if granted.get("equipped") is False:
+                # Same contract as the role branch above. A custom timed
+                # product carries no role today (`grant_timed_product` is
+                # called without one), so this cannot fire yet; it is here so
+                # a role-bearing custom product could never be reported as
+                # equipped when it was delivered but not worn.
+                result["warning"] = granted.get("equip_warning") or (
+                    "This item is in your inventory, but it could not be "
+                    "equipped.")
             return result
 
         from utils.reward_engine import give_reward

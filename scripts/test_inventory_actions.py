@@ -96,6 +96,15 @@ def discord_stub(user_id=USER, guild_id=GUILD):
         if role in member.roles:
             member.roles.remove(role)
 
+    async def fetch_member(uid):
+        # The fresh Discord read `equip_role` makes before adding a role it
+        # saw absent in the cache. In this stub the member's `roles` IS the
+        # Discord state, so the fetch returns the same object; tests that need
+        # a stale cache replace it.
+        if uid != user_id:
+            raise LookupError("Unknown Member")
+        return member
+
     member.add_roles = AsyncMock(side_effect=add_roles)
     member.remove_roles = AsyncMock(side_effect=remove_roles)
     me = SimpleNamespace(
@@ -105,6 +114,7 @@ def discord_stub(user_id=USER, guild_id=GUILD):
         id=guild_id, name="Scratch", me=me, roles=roles,
         premium_subscriber_role=None,
         get_member=lambda uid: member if uid == user_id else None,
+        fetch_member=AsyncMock(side_effect=fetch_member),
         get_role=lambda rid: next((r for r in roles if r.id == int(rid)), None))
     member.guild = guild
     bot = SimpleNamespace(

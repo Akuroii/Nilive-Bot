@@ -102,12 +102,17 @@ async def _query(db, sql: str, args: tuple) -> list:
     Mission and Minigame tables are created by their own modules on the bot's
     first start, so a fresh database (or the dashboard alone) may lack them.
     A source with no table defines nothing.
+
+    A missing COLUMN is not the same thing: the table exists and its schema is
+    older than this code, so the definitions could not be read at all. Treating
+    that as "nothing is defined" would silently let a conflicting name through,
+    so it is raised as the schema error it is.
     """
     try:
         cursor = await db.execute(sql, args)
         return await cursor.fetchall()
     except aiosqlite.OperationalError as exc:
-        if "no such table" in str(exc) or "no such column" in str(exc):
+        if "no such table" in str(exc):
             return []
         raise
 

@@ -1757,6 +1757,47 @@ async def init_db():
                         "startup aborted to protect ownership identity"
                     ) from e
 
+        # Role-observation metadata for the equip slot: what the operation that
+        # wrote this row OBSERVED about the Discord role at that moment.
+        #
+        #   role_added           1 = the role was seen absent and an add-role
+        #                            request was issued and returned;
+        #                        0 = the role was already on the member, so no
+        #                            add was sent;
+        #                        NULL = unknown (rows written before this
+        #                            column, and writers that cannot establish
+        #                            it).
+        #   role_added_role_id   the Discord role that observation is about.
+        #
+        # It is NOT proof of ownership: someone else can grant the same role
+        # later and nothing on Discord records who did. It is bound to the role
+        # on purpose — a writer that only knows the old columns (an older
+        # `record_equipped`, a rollback deploy) updates `role_id` and leaves
+        # these two behind, and a value recorded for a DIFFERENT role must read
+        # as unknown rather than as permission to strip the new one. Only a row
+        # whose `role_added_role_id` equals its `role_id` is trusted; the same
+        # role under a new item/entry keeps the observation, because the
+        # Discord role itself never changed hands.
+        #
+        # Nullable with no default, so every pre-existing row is NULL ("unknown")
+        # and no historical ownership is invented. Nothing backfills it.
+        try:
+            await add_column_if_missing(db, 'equipped_roles', 'role_added',
+                                        'INTEGER')
+            await add_column_if_missing(db, 'equipped_roles',
+                                        'role_added_role_id', 'INTEGER')
+        except Exception as e:
+            # Same concurrent-init_db() race as entry_key above: the bot and
+            # the dashboard both migrate. add_column_if_missing() already
+            # tolerates a verified duplicate-column winner and re-raises
+            # everything else, so reaching here means the schema is not what
+            # the equip slot needs.
+            raise RuntimeError(
+                "Required migration equipped_roles.role_added / "
+                "role_added_role_id failed; startup aborted to protect role "
+                "ownership decisions"
+            ) from e
+
         # Wallet pass: equipped_titles is the Title equip slot. It is a
         # SEPARATE table from equipped_roles on purpose — the locked
         # project decision is that the Title slot is independent from

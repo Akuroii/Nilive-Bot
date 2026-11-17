@@ -2975,7 +2975,18 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
         if not can_assign:
             return {"success": False, "entry_key": None, "expires_at": None,
                     "error": warning, "uncertain": False}
-        if role not in member.roles:
+        # Same contract as equip_role: a cached "absent" is confirmed against
+        # Discord before the add, because the add is what the slot records as
+        # "this operation added the role". A failed fetch is a clean failure -
+        # nothing is added and no holding is written, so the purchase can be
+        # compensated without guessing at Discord state.
+        from utils.equip_engine import _role_presence_for_add
+        present, presence_failure = await _role_presence_for_add(
+            guild, member, role, int(user_id))
+        if presence_failure is not None:
+            return {"success": False, "entry_key": None, "expires_at": None,
+                    "error": presence_failure["error"], "uncertain": False}
+        if not present:
             try:
                 await member.add_roles(role, reason=reason)
                 role_added = True
@@ -3001,30 +3012,84 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                 "uncertain": role_added}
 
     entry_key = f"h:{holding_id}"
+    equipped = None
+    equip_warning = None
+    equip_uncertain = False
     if role_id is not None:
         # Perform the guarded single-slot Discord role swap and update
         # `equipped_roles`, keeping ownership of any previously worn role and
         # never stripping a role the member still holds through a non-slot
         # entitlement (Level claim, Prestige, Booster) or the same `role_id`.
+        #
+        # The observation this grant made travels with the slot write, exactly
+        # like a manual Equip, so a later Unequip can tell whether the role it
+        # may remove is one this grant added.
+        from utils.equip_engine import (
+            _take_back_unsaved_role, swap_and_record_equipped,
+        )
+        swap_failed = False
         try:
-            from utils.equip_engine import swap_and_record_equipped
-            await swap_and_record_equipped(
+            swap = await swap_and_record_equipped(
                 bot, guild_id, user_id,
                 item_name=item_name, role_id=int(role_id),
                 entry_key=entry_key, guild=guild, member=member,
-                reason=f"Replaced by timed role: {item_name}")
-        except Exception as exc:  # pragma: no cover - defensive
+                reason=f"Replaced by timed role: {item_name}",
+                role_added=role_added)
+        except Exception as exc:
+            # The slot write raised after the previous role may already have
+            # been released. There is deliberately NO fallback write here: the
+            # old slot is either intact (it must not be overwritten) or names a
+            # role the member no longer has (overwriting it would hide that).
             print(f"[TIMED] equip swap/bookkeeping failed for {entry_key}: {exc}")
-            try:
-                from utils.equip_engine import record_equipped
-                await record_equipped(guild_id, user_id, item_name,
-                                      role_id=int(role_id), entry_key=entry_key)
-            except Exception:
-                pass
+            swap = {"success": False, "uncertain": True,
+                    "error": f"the equip slot could not be written ({exc})"}
+            swap_failed = True
+
+        equipped = bool(swap.get("success"))
+        if not equipped:
+            # The purchase itself succeeded and the holding is owned. The
+            # previous slot was left in place, so the role this grant added is
+            # taken back where that is safe - it is worn by nobody else and
+            # not the role the slot records. A role this grant did NOT add (it
+            # was already worn) is never touched: taking it back would remove
+            # somebody else's grant. Nothing is retried.
+            equip_uncertain = bool(swap.get("uncertain")) or swap_failed
+            taken_back = "not_added"
+            if role_added:
+                try:
+                    taken_back = await _take_back_unsaved_role(
+                        bot, guild_id, user_id, member, role, int(role_id))
+                except Exception as exc:  # defensive: the helper does not raise
+                    print(f"[TIMED] could not take back role {role_id} of "
+                          f"{entry_key}: {exc}")
+                    taken_back = "left_on"
+            if taken_back not in ("removed", "not_added"):
+                equip_uncertain = True
+            # The wording must reflect what the member did: a Shop purchase is
+            # "purchased", a Mission/Event/Minigame grant is an earned reward.
+            # Never tell a member who earned something that they bought it.
+            _source_name = str(source or "").strip()
+            if _source_name == "shop":
+                _origin = "purchased"
+            elif _source_name:
+                _origin = f"granted as a {_source_name} reward"
+            else:
+                _origin = "granted as a reward"
+            equip_warning = (
+                f"**{item_name}** was {_origin} and is in your inventory, but "
+                f"it is not "
+                f"equipped: {swap.get('error') or 'the equip slot could not be updated'}. "
+                f"Your previous equipped role was left as it was"
+                + ("" if taken_back in ("removed", "not_added")
+                   else "; the role of this item may also still be on you")
+                + ". Open it from `/inventory` to try again.")
 
     return {"success": True, "entry_key": entry_key,
             "expires_at": expires_at, "role_added": role_added,
-            "error": None, "uncertain": False}
+            "error": None, "uncertain": False,
+            # None for grants with no role (nothing to equip).
+            "equipped": equipped, "equip_warning": equip_warning,
+            "equip_uncertain": equip_uncertain}
 
 
 async def claim_purchase_transition(op_id: str, *,

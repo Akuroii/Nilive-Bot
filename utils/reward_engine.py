@@ -434,6 +434,28 @@ async def give_reward(bot: discord.Client,
                 role_metadata["origin_op_id"] = str(op_id)
             role_metadata = await color_metadata(guild_id, role_id, role_metadata)
 
+            # DELIVERY TIME, not only creation time: the Inventory holds one
+            # stack per item name and equipping a role writes one, so a role
+            # whose name another KIND of item uses in this guild can never be
+            # granted - a Shop "Potion" blocks a role reward named "Potion" even
+            # if this member never bought it. A listing added after the reward
+            # was defined is exactly the case the creation-time check cannot
+            # see, and an earned reward must not be lost at delivery.
+            from utils.item_identity import (
+                KIND_ROLE, ItemNameConflict, find_name_conflict)
+            name_conflict = await find_name_conflict(
+                guild_id, display_name, KIND_ROLE)
+            if name_conflict:
+                return await _name_conflict_result(
+                    guild_id, user_id, reward_type,
+                    ItemNameConflict(name_conflict), op_id=op_id,
+                    park_on_conflict=park_on_conflict, source=source,
+                    reason=reason, payload={
+                        "role_id": role_id, "duration_hours": duration_hours,
+                        "item_name": item_name, "reason": reason,
+                        "source": source, "metadata_extra": metadata_extra,
+                        "idempotency_key": idempotency_key})
+
             role_was_present = role in member.roles
             prior_inv = None
             delivered_inv = None
@@ -490,7 +512,8 @@ async def give_reward(bot: discord.Client,
                     reason=reason, payload={
                         "role_id": role_id, "duration_hours": duration_hours,
                         "item_name": item_name, "reason": reason,
-                        "source": source, "metadata_extra": metadata_extra})
+                        "source": source, "metadata_extra": metadata_extra,
+                        "idempotency_key": idempotency_key})
             except Exception as exc:
                 return {"success": False, "reward_type": reward_type,
                         "error": f"Inventory error: {exc}", "uncertain": False}
@@ -616,7 +639,8 @@ async def give_reward(bot: discord.Client,
                 reason=reason, payload={
                     "amount": quantity, "item_name": item_name,
                     "item_type": item_type, "item_metadata": item_metadata,
-                    "reason": reason, "source": source})
+                    "reason": reason, "source": source,
+                    "idempotency_key": idempotency_key})
         except Exception as e:
             return {"success": False, "reward_type": "item",
                     "error": f"Inventory error: {e}", "uncertain": False}
@@ -658,9 +682,9 @@ async def _name_conflict_result(guild_id: int, user_id: int, reward_type: str,
           f"held as pending reward #{pending_id}: {exc}")
     result.update(
         pending=True, pending_id=pending_id,
-        error=(f"Reward held as pending reward #{pending_id}: the member "
-               f"already owns a different kind of item with this name. It is "
-               f"delivered automatically once that name is free."))
+        error=(f"Reward held as pending reward #{pending_id}: a different "
+               f"kind of item already uses this name, so it cannot be granted "
+               f"yet. It is delivered automatically once the name is free."))
     return result
 
 

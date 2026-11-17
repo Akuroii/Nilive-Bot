@@ -585,6 +585,28 @@ class OtherSourcesPreservationTests(RewardPreservationCase):
         self.assertEqual(rows("SELECT * FROM reward_grants"), [])
         self.assertEqual(stack("Tonic"), ("potion", 1))
 
+    async def test_re_running_the_same_reward_source_parks_one_copy(self):
+        """D: a stable source identity means one debt, however often it replays."""
+        await self.give_potion("Tonic", 1)                     # the name is taken
+        for _ in range(2):                                     # the same source twice
+            await reward_engine.give_reward(
+                self.bot, GUILD, USER, "item", item_name="Tonic", source="mission",
+                reason="Mission complete: Chatter",
+                idempotency_key="mission:8101:8201:7:2026-11")
+        self.assertEqual(len(pending()), 1)                    # D
+        # A different reward of the same source is a second, real debt.
+        await reward_engine.give_reward(
+            self.bot, GUILD, USER, "item", item_name="Tonic", source="mission",
+            reason="Mission complete: Chatter",
+            idempotency_key="mission:8101:8201:8:2026-11")
+        self.assertEqual(len(pending()), 2)
+        # Freeing the name pays each held reward exactly once.
+        execute("UPDATE inventory_items SET item_type='custom' "
+                "WHERE item_name='Tonic'")
+        await pending_rewards.retry(self.bot, GUILD, USER)
+        self.assertEqual(stack("Tonic"), ("custom", 3))
+        self.assertEqual([r[1] for r in pending()], ["delivered", "delivered"])
+
     async def test_a_failed_retry_never_parks_a_second_copy(self):
         await self.give_potion("Tonic", 1)
         await reward_engine.give_reward(
@@ -592,6 +614,84 @@ class OtherSourcesPreservationTests(RewardPreservationCase):
         for _ in range(3):
             await pending_rewards.retry(self.bot, GUILD, USER)
         self.assertEqual(pending(), [("item", "pending", 4, "mission")])
+
+
+class DeliveryNameConflictTests(RewardPreservationCase):
+    """C: a role reward is checked against the guild's definitions AT DELIVERY.
+
+    Creation-time checks cannot see a listing added after the reward was
+    defined, and "the member owns the other item" is not the rule: the rule is
+    that one name cannot mean two kinds of item in one guild.
+    """
+
+    async def test_a_role_reward_named_like_a_shop_product_is_held_not_granted(self):
+        shop_listing("Potion", "potion")          # the Shop defines the name
+        self.guild.get_role(FLAME).name = "Potion"
+        result = await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=FLAME, source="event",
+            reason="Event reward")
+        # Nothing of the reward was delivered: no role, no inventory row.
+        self.assertFalse(result["success"], result)
+        self.assertTrue(result["pending"], result)
+        self.assertTrue(result["name_conflict"], result)
+        self.assertEqual(self.member.add_roles.await_count, 0)
+        self.assertEqual(rows("SELECT * FROM inventory_items"), [])
+        self.assertEqual(rows("SELECT * FROM equipped_roles"), [])
+        self.assertEqual([(r[0], r[3]) for r in pending()], [("role", "event")])
+        self.assertIn("a different kind of item already uses this name",
+                      result["error"])
+        # The stored reason names the definition that holds the name.
+        held_reason = rows("SELECT last_error FROM pending_rewards")[0][0]
+        self.assertIn("already the name of a potion (Shop product #1)", held_reason)
+        # Once the name is free the earned reward is delivered, exactly once.
+        execute("DELETE FROM shop_items WHERE name='Potion'")
+        await pending_rewards.retry(self.bot, GUILD, USER)
+        self.assertEqual(self.member.add_roles.await_count, 1)
+        self.assertEqual(rows("SELECT item_name, item_type FROM inventory_items"),
+                         [("Potion", "role")])
+        self.assertEqual(pending(), [("role", "delivered", 2, "event")])
+
+    async def test_a_temp_role_reward_is_checked_too(self):
+        shop_listing("Potion", "potion")
+        self.guild.get_role(FLAME).name = "Potion"
+        result = await reward_engine.give_reward(
+            self.bot, GUILD, USER, "temp_role", role_id=FLAME, duration_hours=2,
+            source="mission", reason="Mission complete: Chatter")
+        self.assertFalse(result["success"], result)
+        self.assertTrue(result["pending"], result)
+        self.assertEqual(self.member.add_roles.await_count, 0)
+        self.assertEqual([(r[0], r[3]) for r in pending()],
+                         [("temp_role", "mission")])
+
+    async def test_a_role_reward_with_its_own_name_still_delivers(self):
+        shop_listing("Potion", "potion")
+        result = await reward_engine.give_reward(
+            self.bot, GUILD, USER, "role", role_id=FLAME, source="event",
+            reason="Event reward")
+        self.assertTrue(result["success"], result)
+        self.assertEqual(pending(), [])
+
+
+class DefinitionsSourceTests(unittest.IsolatedAsyncioTestCase):
+    """C: a missing table defines nothing; a missing column is a schema error."""
+
+    async def asyncSetUp(self):
+        reset_database()
+
+    async def test_a_missing_table_is_an_empty_source_and_a_missing_column_is_not(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            self.assertEqual(
+                await item_identity._query(db, "SELECT 1 FROM no_such_table_here", ()),
+                [])
+            await db.execute("CREATE TABLE IF NOT EXISTS schema_probe (id INTEGER)")
+            try:
+                with self.assertRaises(aiosqlite.OperationalError) as caught:
+                    await item_identity._query(
+                        db, "SELECT no_such_column FROM schema_probe", ())
+                self.assertIn("no such column", str(caught.exception))
+            finally:
+                await db.execute("DROP TABLE schema_probe")
+                await db.commit()
 
 
 class PermanentRoleGrantCollisionTests(RewardPreservationCase):

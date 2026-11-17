@@ -70,11 +70,20 @@ def purchase_context(roles_held=(), granted_role=None, guild_roles=()):
         rid = int(rid)
         return next((r for r in known if r.id == rid), None)
 
+    async def fetch_member(uid):
+        # The fresh Discord read `equip_role` makes before adding a role the
+        # cache says is absent. This fixture's `person.roles` IS the Discord
+        # state, so the fetch answers with the same object.
+        if uid != person.id:
+            raise LookupError("Unknown Member")
+        return person
+
     guild = SimpleNamespace(
         id=GUILD, owner_id=99,
         me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
         get_role=get_role,
         get_member=lambda uid: person if uid == person.id else None,
+        fetch_member=AsyncMock(side_effect=fetch_member),
     )
     bot = SimpleNamespace(get_guild=lambda gid: guild if gid == GUILD else None)
     itx = SimpleNamespace(

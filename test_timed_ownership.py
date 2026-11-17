@@ -87,6 +87,7 @@ def purchase_ctx(granted_role=None, roles_held=()):
         get_role=lambda rid: next(
             (r for r in known if r.id == int(rid)), None),
         get_member=lambda uid: person if uid == person.id else None,
+        fetch_member=AsyncMock(return_value=person),  # fresh Discord read
     )
     bot = SimpleNamespace(get_guild=lambda gid: guild if gid == GUILD else None)
     itx = SimpleNamespace(
@@ -893,9 +894,6 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
 
         await give_item(GUILD, USER, "OldCrimson", 1, item_type="role",
                         metadata={"role_id": 970, "category": "color"})
-        person.roles = [old_role]
-        eq_res = await equip_role(bot, GUILD, USER, "OldCrimson")
-        self.assertTrue(eq_res["success"], str(eq_res))
 
         async def _add_roles(r, reason=None):
             if r not in person.roles:
@@ -906,6 +904,18 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
 
         person.add_roles = AsyncMock(side_effect=_add_roles)
         person.remove_roles = AsyncMock(side_effect=_remove_roles)
+
+        # The Shop equip ADDS the role here (the member was not wearing it).
+        # That observation is what records it as "added by this equip", and a
+        # later swap may therefore take it off. A role observed as already
+        # present before the equip is deliberately preserved instead.
+        person.roles = []
+        eq_res = await equip_role(bot, GUILD, USER, "OldCrimson")
+        self.assertTrue(eq_res["success"], str(eq_res))
+        self.assertIn(old_role, person.roles)
+        # Count only the Discord calls the timed grant itself makes.
+        person.add_roles.reset_mock()
+        person.remove_roles.reset_mock()
 
         granted = await TO.grant_timed_product(
             bot, GUILD, USER, item_name="NewAzure", duration_hours=4,
@@ -1418,13 +1428,22 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_order, [], "re-equipping already worn role must not add/remove")
         self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
                          flame_entry["entry_key"])
+        # The re-equip saw the role already worn, so the upgraded row records
+        # that observation (0). A role recorded as already present is preserved
+        # by a later Unequip/swap instead of being stripped.
+        upgraded = await get_equipped(GUILD, USER)
+        self.assertEqual((upgraded["role_added"],
+                          upgraded["role_added_role_id"]), (0, 994))
+        self.assertIs(eq_mod.observed_role_state(upgraded), False)
 
         # Reset back to legacy NULL entry_key to test DB failure & swap order
         execute("UPDATE equipped_roles SET entry_key = NULL WHERE guild_id=? AND user_id=?",
                 (GUILD, USER))
 
-        # 2. If record_equipped fails with a DB error after add_roles(new),
-        # remove_roles(old) must NOT run (member never loses old_role!).
+        # 2. If record_equipped fails with a DB error, the member must never
+        # lose the old role: the slot is still the old one, so the role it
+        # records is preserved (here it was observed as already present, so it
+        # is not even a candidate for removal).
         with patch.object(eq_mod, "record_equipped",
                           AsyncMock(side_effect=RuntimeError("sqlite disk I/O error"))):
             res_dbfail = await equip_role(
@@ -1434,14 +1453,22 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(r_old, person.roles,
                       "old role must remain on Discord if DB write fails")
         self.assertEqual((await get_equipped(GUILD, USER))["role_id"], 994)
+        self.assertNotIn(("remove", 994), call_order,
+                         "the old slot records the role, so it must not be removed")
 
         # Remove r_new from person.roles to test clean swap call order
         if r_new in person.roles:
             person.roles.remove(r_new)
         call_order.clear()
 
-        # 3. Clean swap from LegacyFlame (994, entry_key=NULL) -> AzureWave (995):
-        # add_roles(995) MUST be called strictly BEFORE remove_roles(994).
+        # 3. Clean swap from LegacyFlame (994) -> AzureWave (995). Seed the row
+        # with the observation an equip that ADDED the role writes: that is the
+        # case in which the swap may take the old role off. add_roles(995) MUST
+        # be called strictly BEFORE remove_roles(994), and the slot is written
+        # only after the old role is resolved.
+        execute("DELETE FROM equipped_roles")
+        await eq_mod.record_equipped(GUILD, USER, "LegacyFlame", role_id=994,
+                                     entry_key=None, role_added=True)
         res_swap = await equip_role(
             bot, GUILD, USER, "AzureWave",
             entry_key=azure_entry["entry_key"])
@@ -1451,16 +1478,29 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(r_new, person.roles)
         self.assertNotIn(r_old, person.roles)
 
-        # 4. Legacy NULL entry_key row can be unequipped via permanent entry_key="i:<id>",
-        # but refuses a timed holding entry_key="h:<id>".
+        # 4. A LEGACY row (NULL entry_key AND no record of who added the role)
+        # is never acted on: the role and the slot stay, and the result says the
+        # outcome is uncertain. A timed holding entry_key is still refused for
+        # a legacy row.
         execute("""
             UPDATE equipped_roles
-            SET item_name='AzureWave', role_id=995, entry_key=NULL
+            SET item_name='AzureWave', role_id=995, entry_key=NULL,
+                role_added=NULL, role_added_role_id=NULL
             WHERE guild_id=? AND user_id=?
         """, (GUILD, USER))
         refuse_timed = await unequip_role(
             bot, GUILD, USER, "AzureWave", entry_key="h:999")
         self.assertFalse(refuse_timed["success"])
+        legacy_unequip = await unequip_role(
+            bot, GUILD, USER, "AzureWave", entry_key=azure_entry["entry_key"])
+        self.assertFalse(legacy_unequip["success"])
+        self.assertTrue(legacy_unequip["uncertain"])
+        self.assertIn(r_new, person.roles,
+                      "a legacy row must never remove a role it cannot account for")
+        self.assertEqual((await get_equipped(GUILD, USER))["role_id"], 995)
+        # Admin remediation: once the role is off Discord by hand, the same
+        # call clears the obsolete legacy slot through the documented predicate.
+        person.roles = [r for r in person.roles if r.id != r_new.id]
         ok_legacy_unequip = await unequip_role(
             bot, GUILD, USER, "AzureWave", entry_key=azure_entry["entry_key"])
         self.assertTrue(ok_legacy_unequip["success"])
@@ -2193,20 +2233,35 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(g1["success"])
         self.assertIn(r_first, person2.roles)
 
-        # Inject a transient Discord error on `remove_roles` during the second grant's swap
-        person2.remove_roles = AsyncMock(
-            side_effect=RuntimeError("Transient Discord 502 removing old role"))
+        # Inject a transient Discord error on `remove_roles` during the second
+        # grant's swap. The swap is REFUSED: the old slot is not overwritten
+        # (so the member never loses a role the slot still records), the role
+        # this grant added is taken back, and the holding stays owned but is
+        # reported as not equipped.
+        async def _fail_old_only(role_obj, reason=None):
+            # Only the OLD role's removal fails; the compensation for the role
+            # this grant added still works, so the test can tell the two apart.
+            if role_obj.id == r_first.id:
+                raise RuntimeError("Transient Discord 502 removing old role")
+            person2.roles = [r for r in person2.roles if r.id != role_obj.id]
+
+        person2.remove_roles = AsyncMock(side_effect=_fail_old_only)
         g2 = await TO.grant_timed_product(
             bot2, GUILD, USER, item_name="SecondTimedRole", duration_hours=24,
             item_type="temp_role", category=TO.CATEGORY_COLOR, role_id=966)
         self.assertTrue(g2["success"])
+        self.assertFalse(g2["equipped"], g2)
+        self.assertIsNotNone(g2["equip_warning"])
         self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
-                         g2["entry_key"])
+                         g1["entry_key"])
         self.assertIn(r_first, person2.roles)
-        self.assertIn(r_second, person2.roles)
+        self.assertNotIn(r_second, person2.roles)
+        # Ownership of the second purchase was never rolled back.
+        self.assertIsNotNone(await TO.get_timed_holding(g2["entry_key"]))
 
-        # When `g1` expires and the transient Discord error clears, `cleanup_expired_holdings`
-        # still removes `r_first` from Discord, keeps `g2` equipped, and deletes `g1`.
+        # When `g1` expires and the transient Discord error clears,
+        # `cleanup_expired_holdings` removes `r_first` from Discord and deletes
+        # `g1`; the un-equipped second holding is untouched.
         async def _clean_remove(role_obj, reason=None):
             person2.roles = [r for r in person2.roles if r.id != role_obj.id]
 
@@ -2215,9 +2270,8 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
         stats = await TO.cleanup_expired_holdings(bot2)
         self.assertEqual(stats, {"removed": 1, "kept": 0, "errors": []})
         self.assertNotIn(r_first, person2.roles)
-        self.assertIn(r_second, person2.roles)
-        self.assertEqual((await get_equipped(GUILD, USER))["entry_key"],
-                         g2["entry_key"])
+        self.assertIsNone(await get_equipped(GUILD, USER))
+        self.assertIsNotNone(await TO.get_timed_holding(g2["entry_key"]))
 
     async def test_f1_temp_role_cleanup_respects_entitlement_and_fails_safe(self):
         """Priority 1 (F1) regression:
@@ -8500,7 +8554,8 @@ class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self._same_role_pair(9631)
         role, person = ctx["role"], ctx["person"]
         await record_equipped(GUILD, USER, ctx["item_permanent"],
-                              role_id=9631, entry_key=ctx["permanent"])
+                              role_id=9631, entry_key=ctx["permanent"],
+                              role_added=True)
 
         window = {}
 
@@ -8554,7 +8609,8 @@ class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self._same_role_pair(9632)
         role, person = ctx["role"], ctx["person"]
         await record_equipped(GUILD, USER, ctx["item_permanent"],
-                              role_id=9632, entry_key=ctx["permanent"])
+                              role_id=9632, entry_key=ctx["permanent"],
+                              role_added=True)
 
         window = {}
 
@@ -8626,6 +8682,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         bot = SimpleNamespace(
             get_guild=lambda gid: guild if gid == GUILD else None)
@@ -8687,7 +8744,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         person, guild, bot, roles = self._world([9641], worn=[9641])
         _, owner_key = await self._holding(9641, "SlotOwner")
         await EE.record_equipped(GUILD, USER, "SlotOwner", role_id=9641,
-                              entry_key=owner_key)
+                              entry_key=owner_key, role_added=True)
         seen = {}
 
         async def gate(kind, target):
@@ -8722,7 +8779,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         person, guild, bot, roles = self._world([9661], worn=[9661])
         old_id, old_key = await self._holding(9661, "SlotExpired", expired=True)
         await EE.record_equipped(GUILD, USER, "SlotExpired", role_id=9661,
-                              entry_key=old_key)
+                              entry_key=old_key, role_added=True)
         seen = {}
 
         async def gate(kind, target):
@@ -8761,7 +8818,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         person, guild, bot, roles = self._world([9651, 9652, 9653],
                                                 worn=[9651])
         await EE.record_equipped(GUILD, USER, "SlotA", role_id=9651,
-                              entry_key="i:a")
+                              entry_key="i:a", role_added=True)
         perm = self._permanent(9652, "SlotB")
 
         async def _noop(kind, role):
@@ -8813,7 +8870,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         old_id, old_key = await self._holding(9671, "SlotExpiredPerm",
                                               expired=True)
         await EE.record_equipped(GUILD, USER, "SlotExpiredPerm", role_id=9671,
-                              entry_key=old_key)
+                              entry_key=old_key, role_added=True)
         seen = {}
 
         async def gate(kind, target):
@@ -8918,6 +8975,7 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         return SimpleNamespace(
             get_guild=lambda gid: guild if gid == GUILD else None)
@@ -8974,7 +9032,7 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             item_type="temp_role", metadata={"role_id": 9721},
             role_id=9721, source="shop")
         await EE.record_equipped(GUILD, USER, "CancelledRole", role_id=9721,
-                                 entry_key=f"h:{holding_id}")
+                                 entry_key=f"h:{holding_id}", role_added=True)
         holding = (await TO.expired_holdings(limit=None))[0]
 
         task = asyncio.create_task(TO.expire_one(bot, holding))
@@ -9023,6 +9081,7 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: role if int(rid) == 9731 else None,
             get_member=lambda uid: {USER: mine, other: theirs}.get(uid),
+            fetch_member=AsyncMock(side_effect=lambda uid: {USER: mine, other: theirs}[uid]),  # fresh Discord read
         )
         bot = SimpleNamespace(
             get_guild=lambda gid: guild if gid == GUILD else None)
@@ -9095,6 +9154,7 @@ class LateCompensationSlotTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: role if int(rid) == int(role_id) else None,
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         bot = SimpleNamespace(
             get_guild=lambda gid: guild if gid == GUILD else None)
@@ -9218,6 +9278,7 @@ class CrossSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         person.guild = guild
         bot = SimpleNamespace(
@@ -9487,6 +9548,7 @@ class UnequipWithSystemEntitlementTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda r: role if int(r) == rid else None,
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         person.guild = guild
         bot = SimpleNamespace(
@@ -9499,7 +9561,7 @@ class UnequipWithSystemEntitlementTests(unittest.IsolatedAsyncioTestCase):
                       " AND guild_id=? AND user_id=?", (GUILD, USER))[0][0]
         key = f"i:{inv_id}"
         await EE.record_equipped(GUILD, USER, "ShopRole", role_id=rid,
-                                 entry_key=key)
+                                 entry_key=key, role_added=True)
         return role, person, bot, key
 
     def _slot(self):
@@ -9605,6 +9667,7 @@ class SystemToSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         person.guild = guild
         bot = SimpleNamespace(
@@ -9953,6 +10016,7 @@ class GrantLevelExclusionTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         person.guild = guild
         bot = SimpleNamespace(
@@ -10220,6 +10284,7 @@ class BoosterColourSelectionTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         person.guild = guild
         bot = SimpleNamespace(get_guild=lambda gid: guild if gid == GUILD else None)
@@ -10406,7 +10471,7 @@ class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
             metadata={"role_id": int(rid)}, role_id=int(rid), source="shop")
         key = f"h:{holding_id}"
         await EE.record_equipped(GUILD, USER, name, role_id=int(rid),
-                                 entry_key=key)
+                                 entry_key=key, role_added=True)
         return key
 
     def _slot(self):
@@ -10938,7 +11003,7 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
             item_type="temp_role", metadata={"role_id": 9611}, role_id=9611)
         old_key = f"h:{old_id}"
         await record_equipped(GUILD, USER, "RaceOldRole", role_id=9611,
-                             entry_key=old_key)
+                             entry_key=old_key, role_added=True)
         self.assertEqual(
             rows("SELECT item_name, entry_key FROM equipped_roles"),
             [("RaceOldRole", old_key)])
@@ -10981,7 +11046,7 @@ class ReviewFindingsTests(unittest.IsolatedAsyncioTestCase):
         guild.get_role = lambda rid: roles.get(int(rid))
         person.roles = [old_role]
         await record_equipped(GUILD, USER, "LegacyRaceOld", role_id=9613,
-                              entry_key=None)
+                              entry_key=None, role_added=True)
 
         async def _racing_remove(role, reason=None):
             await record_equipped(GUILD, USER, "LegacyRaceNew", role_id=9614,
