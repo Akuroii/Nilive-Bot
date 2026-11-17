@@ -4,8 +4,9 @@ TIMED OWNERSHIP — separately identifiable temporary holdings.
 Why this module exists
 ----------------------
 `inventory_items` has UNIQUE(guild_id, user_id, item_name) and every write path
-(`give_item`, `set_quantity`) upserts on that key, overwriting `item_type` and
-`metadata`. That model cannot represent what the Shop now sells:
+(`give_item`, `set_quantity`) upserts on that key - one stack per name, whose
+`metadata` a later grant replaces. That model cannot represent what the Shop now
+sells:
 
   * a permanent "Golden Key" AND an 8-hour "Golden Key" at the same time,
   * several timed copies of one name with different expiry times.
@@ -2016,11 +2017,16 @@ async def reconcile_equip_for_expired_holding(guild_id: int, user_id: int,
 
 
 def _is_member_not_found(exc: BaseException) -> bool:
-    """Return True only when Discord definitively reports the member is not in the guild (404 NotFound)."""
+    """Return True only when Discord definitively reports Unknown Member (404 NotFound, code 10007)."""
     try:
         import discord
         if isinstance(exc, discord.NotFound):
-            return True
+            code = getattr(exc, "code", None)
+            if code == 10007:
+                return True
+            if code in (None, 0):
+                text = str(getattr(exc, "text", "") or exc).lower()
+                return "10007" in text or "unknown member" in text
     except Exception:
         pass
     return False
@@ -2031,7 +2037,12 @@ def _is_role_not_found(exc: BaseException) -> bool:
     try:
         import discord
         if isinstance(exc, discord.NotFound):
-            return getattr(exc, "code", None) == 10011
+            code = getattr(exc, "code", None)
+            if code == 10011:
+                return True
+            if code in (None, 0):
+                text = str(getattr(exc, "text", "") or exc).lower()
+                return "10011" in text or "unknown role" in text
     except Exception:
         pass
     return False
@@ -2281,6 +2292,41 @@ async def _late_rollback_prereqs_complete(
     return True
 
 
+def _member_has_role_id(member, role_id: int) -> bool:
+    """True when `member` holds `role_id` via raw REST snowflakes or `.roles`.
+
+    `discord.Guild.fetch_role` returns a `Role` without inserting it into
+    `guild._roles`, and `discord.Member.roles` filters `member._roles` through
+    `guild.get_role(...)` — so an uncached guild role is present in
+    `member._roles` even while `role in member.roles` is False.
+    """
+    if member is None:
+        return False
+    target = int(role_id)
+    raw_roles = getattr(member, "_roles", None)
+    if raw_roles is not None:
+        has_fn = getattr(raw_roles, "has", None)
+        if callable(has_fn):
+            try:
+                if has_fn(target):
+                    return True
+            except Exception:
+                pass
+        else:
+            try:
+                if target in raw_roles:
+                    return True
+            except Exception:
+                pass
+    for r in (getattr(member, "roles", None) or ()):
+        try:
+            if int(getattr(r, "id", r)) == target:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _serialised_expiry(func):
     """Run one holding's expiry under that member's equip-slot lock.
 
@@ -2304,7 +2350,7 @@ def _serialised_expiry(func):
 
 
 @_serialised_expiry
-async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dict:
+async def expire_one(bot, holding: dict) -> dict:
     """Retire ONE expired holding, reconciling Discord and bookkeeping.
 
     Idempotent by construction: every step reads current state first, and the
@@ -2320,15 +2366,9 @@ async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dic
     if (not current or int(current["guild_id"]) != guild_id or
             int(current["user_id"]) != user_id):
         return {"status": "skipped", "reason": "holding no longer owned"}
-    if drop_requested:
-        # The confirmation snapshots the exact selected holding. Do not turn a
-        # stale or already-expired button into a different ownership mutation.
-        fields = ("id", "item_name", "item_type", "quantity", "role_id", "expires_at", "metadata")
-        if is_expired(current.get("expires_at")) or any(current.get(k) != holding.get(k) for k in fields):
-            return {"status": "skipped", "reason": "holding changed or expired"}
-    elif not is_expired(current.get("expires_at")):
+    if not is_expired(current.get("expires_at")):
         return {"status": "skipped", "reason": "holding no longer expired"}
-    removal_event = "dropped" if drop_requested else "expired"
+    removal_event = "expired"
     holding = current
     role_id = holding.get("role_id")
 
@@ -2369,6 +2409,29 @@ async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dic
         if not await _late_rollback_prereqs_complete(linked_op_id, entry_key=entry_key):
             err = "inventory or equip rollback pending"
             return {"status": "kept", "reason": err, "error": err}
+    if (member is not None and not is_late_rollback
+            and not _member_has_role_id(member, int(role_id))):
+        # The gateway cache only says what Discord last echoed. An "absent"
+        # read from it would skip the removal below and still delete the
+        # holding, leaving a role on the member that nothing records. Confirm
+        # the absence with a fresh read first; if that read fails (or cannot
+        # run) the holding is kept so the sweep retries it.
+        if not callable(getattr(guild, "fetch_member", None)):
+            err = "member lookup unavailable to confirm role absence"
+            return {"status": "kept", "reason": err, "error": err}
+        try:
+            fresh_member = await guild.fetch_member(user_id)
+        except Exception as exc:
+            if _is_member_not_found(exc):
+                member, member_departed = None, True
+            else:
+                err = f"member lookup failed: {exc}"
+                return {"status": "kept", "reason": err, "error": err}
+        else:
+            if fresh_member is None:
+                err = "member lookup returned None"
+                return {"status": "kept", "reason": err, "error": err}
+            member = fresh_member
     try:
         reason = await role_still_entitled(
             guild_id, user_id, role_id, exclude_entry_key=entry_key,
@@ -2400,31 +2463,55 @@ async def expire_one(bot, holding: dict, *, drop_requested: bool = False) -> dic
     role, role_deleted, role_lookup_err = await _resolve_guild_role(guild, int(role_id))
     if role_lookup_err is not None:
         return {"status": "kept", "reason": role_lookup_err, "error": role_lookup_err}
-    if is_late_rollback and not member_departed and not role_deleted and (
-        member is None or role is None or not hasattr(member, "remove_roles")
-    ):
-        err = "member or role unavailable for late role rollback"
-        return {"status": "kept", "reason": err, "error": err}
+    member_has_role = _member_has_role_id(member, int(role_id))
+    if not member_departed and not role_deleted:
+        if member is None:
+            err = (
+                "member or role unavailable for late role rollback"
+                if is_late_rollback
+                else "member unavailable for role expiry cleanup"
+            )
+            return {"status": "kept", "reason": err, "error": err}
+        if is_late_rollback or member_has_role:
+            if role is None or not callable(getattr(member, "remove_roles", None)):
+                err = (
+                    "member or role unavailable for late role rollback"
+                    if is_late_rollback
+                    else "member or role unavailable for role expiry cleanup"
+                )
+                return {"status": "kept", "reason": err, "error": err}
     if role_deleted and member is not None and isinstance(getattr(member, "roles", None), list):
         member.roles[:] = [
             r for r in member.roles
             if getattr(r, "id", None) != int(role_id)
         ]
-    member_roles = getattr(member, "roles", None) or ()
     if (
         not member_departed
         and not role_deleted
         and member is not None
         and role is not None
-        and (is_late_rollback or role in member_roles)
+        and (is_late_rollback or member_has_role)
     ):
         try:
-            await member.remove_roles(role, reason="Inventory item dropped" if drop_requested else "Timed entitlement expired")
-            if isinstance(getattr(member, "roles", None), list) and role in member.roles:
-                member.roles.remove(role)
+            await member.remove_roles(role, reason="Timed entitlement expired")
+            if isinstance(getattr(member, "roles", None), list):
+                member.roles[:] = [
+                    r for r in member.roles
+                    if getattr(r, "id", r) != int(role_id)
+                ]
         except Exception as exc:
-            # Keep the row: it is the only marker that this removal is pending.
-            return {"status": "kept", "reason": f"Discord removal failed: {exc}"}
+            if _is_member_not_found(exc):
+                member_departed = True
+            elif _is_role_not_found(exc):
+                role_deleted = True
+                if isinstance(getattr(member, "roles", None), list):
+                    member.roles[:] = [
+                        r for r in member.roles
+                        if getattr(r, "id", None) != int(role_id)
+                    ]
+            else:
+                # Keep the row: it is the only marker that this removal is pending.
+                return {"status": "kept", "reason": f"Discord removal failed: {exc}"}
 
     # Bookkeeping BEFORE the row is deleted: `clear_equip_for_holding` is
     # idempotent, so a crash after this point simply retries, whereas deleting
@@ -2980,7 +3067,18 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
         if not can_assign:
             return {"success": False, "entry_key": None, "expires_at": None,
                     "error": warning, "uncertain": False}
-        if role not in member.roles:
+        # Same contract as equip_role: a cached "absent" is confirmed against
+        # Discord before the add, because the add is what the slot records as
+        # "this operation added the role". A failed fetch is a clean failure -
+        # nothing is added and no holding is written, so the purchase can be
+        # compensated without guessing at Discord state.
+        from utils.equip_engine import _role_presence_for_add
+        present, presence_failure = await _role_presence_for_add(
+            guild, member, role, int(user_id))
+        if presence_failure is not None:
+            return {"success": False, "entry_key": None, "expires_at": None,
+                    "error": presence_failure["error"], "uncertain": False}
+        if not present:
             try:
                 await member.add_roles(role, reason=reason)
                 role_added = True
@@ -3006,30 +3104,156 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                 "uncertain": role_added}
 
     entry_key = f"h:{holding_id}"
+    equipped = None
+    equip_warning = None
+    equip_uncertain = False
     if role_id is not None:
         # Perform the guarded single-slot Discord role swap and update
         # `equipped_roles`, keeping ownership of any previously worn role and
         # never stripping a role the member still holds through a non-slot
         # entitlement (Level claim, Prestige, Booster) or the same `role_id`.
+        #
+        # The observation this grant made travels with the slot write, exactly
+        # like a manual Equip, so a later Unequip can tell whether the role it
+        # may remove is one this grant added.
+        from utils.equip_engine import (
+            _SlotWriteOutcomeUnknown, _take_back_unsaved_role,
+            get_equipped, swap_and_record_equipped,
+        )
+        swap_failed = False
+        slot_recorded_new = False
+        slot_read_unknown = False
         try:
-            from utils.equip_engine import swap_and_record_equipped
-            await swap_and_record_equipped(
+            swap = await swap_and_record_equipped(
                 bot, guild_id, user_id,
                 item_name=item_name, role_id=int(role_id),
                 entry_key=entry_key, guild=guild, member=member,
-                reason=f"Replaced by timed role: {item_name}")
-        except Exception as exc:  # pragma: no cover - defensive
+                reason=f"Replaced by timed role: {item_name}",
+                role_added=role_added)
+        except Exception as exc:
+            # The slot write raised after the previous role may already have
+            # been released. There is deliberately NO fallback write here:
+            # inspect what `equipped_roles` actually contains so we never strip
+            # a newly persisted slot's role, never claim the new item is
+            # unequipped when its slot row persisted, and never claim the
+            # previous role was left untouched unless that was confirmed.
+            slot_outcome_unknown = isinstance(exc, _SlotWriteOutcomeUnknown)
+            cause = exc.cause if slot_outcome_unknown else exc
+            prev_confirmed_intact = (
+                bool(getattr(exc, "_previous_role_intact", False))
+                and not slot_outcome_unknown
+            )
             print(f"[TIMED] equip swap/bookkeeping failed for {entry_key}: {exc}")
             try:
-                from utils.equip_engine import record_equipped
-                await record_equipped(guild_id, user_id, item_name,
-                                      role_id=int(role_id), entry_key=entry_key)
-            except Exception:
-                pass
+                landed = await get_equipped(guild_id, user_id)
+                slot_recorded_new = (
+                    landed is not None
+                    and int(landed["role_id"]) == int(role_id)
+                    and landed.get("entry_key") == entry_key
+                )
+            except Exception as read_exc:
+                print(f"[TIMED] could not read equip slot after swap error for "
+                      f"{entry_key}: {read_exc}")
+                slot_read_unknown = True
+            swap = {
+                "success": False,
+                "uncertain": True,
+                "previous_role_uncertain": bool(
+                    not prev_confirmed_intact
+                    or slot_read_unknown
+                    or slot_recorded_new
+                ),
+                "error": f"the equip slot could not be written ({cause})",
+            }
+            swap_failed = True
+
+        if slot_recorded_new:
+            # `record_equipped` raised, yet the new `equipped_roles` row DID
+            # persist and the Discord role is on the member. Keep the outcome
+            # uncertain (`equip_uncertain=True`) rather than claiming a clean
+            # swap, leave the new role on Discord, and do NOT tell the member
+            # the item is unequipped or that the previous role was untouched.
+            equipped = True
+            equip_uncertain = True
+            from utils.reward_engine import reward_origin_phrase
+            _origin = reward_origin_phrase(
+                purchased=bool(op_id), source=source)
+            equip_warning = (
+                f"**{item_name}** was {_origin} and its equip record is saved, "
+                f"but an error occurred while finalizing the role swap "
+                f"({swap.get('error') or 'slot bookkeeping reported an error'}). "
+                f"Your previous equipped role could not be confirmed on Discord; "
+                f"check `/inventory` or ask an admin to verify your roles."
+            )
+        else:
+            equipped = bool(swap.get("success"))
+            if not equipped:
+                # The purchase itself succeeded and the holding is owned. Take
+                # back the role this grant added only where that is safe -
+                # never one the member already wore, and never one the slot
+                # actually records. Nothing is retried.
+                equip_uncertain = bool(swap.get("uncertain")) or swap_failed
+                taken_back = "not_added"
+                if role_added:
+                    try:
+                        taken_back = await _take_back_unsaved_role(
+                            bot, guild_id, user_id, member, role, int(role_id))
+                    except Exception as exc:  # defensive: the helper does not raise
+                        print(f"[TIMED] could not take back role {role_id} of "
+                              f"{entry_key}: {exc}")
+                        taken_back = "left_on"
+                if taken_back == "recorded":
+                    # A transient read error hid the slot row a moment ago,
+                    # and `_take_back_unsaved_role` confirmed the new slot row
+                    # is present and left the Discord role alone.
+                    equipped = True
+                    equip_uncertain = True
+                    from utils.reward_engine import reward_origin_phrase
+                    _origin = reward_origin_phrase(
+                        purchased=bool(op_id), source=source)
+                    equip_warning = (
+                        f"**{item_name}** was {_origin} and its equip record is "
+                        f"saved, but an error occurred while finalizing the role "
+                        f"swap ({swap.get('error') or 'slot bookkeeping reported an error'}). "
+                        f"Your previous equipped role could not be confirmed on "
+                        f"Discord; check `/inventory` or ask an admin to verify "
+                        f"your roles."
+                    )
+                else:
+                    if taken_back not in ("removed", "not_added"):
+                        equip_uncertain = True
+                    # The wording must reflect what the member did: a Shop
+                    # purchase is "purchased", a Mission/Event/Minigame/Tag
+                    # grant is an earned reward. Never tell a member who earned
+                    # something that they bought it.
+                    from utils.reward_engine import reward_origin_phrase
+                    _origin = reward_origin_phrase(
+                        purchased=bool(op_id), source=source)
+                    _prev_clause = (
+                        "Your previous equipped role could not be confirmed on Discord"
+                        if swap.get("previous_role_uncertain")
+                        else "Your previous equipped role was left as it was"
+                    )
+                    _state_clause = (
+                        "its equip state could not be confirmed"
+                        if slot_read_unknown
+                        else "it is not equipped"
+                    )
+                    equip_warning = (
+                        f"**{item_name}** was {_origin} and is in your inventory, "
+                        f"but {_state_clause}: "
+                        f"{swap.get('error') or 'the equip slot could not be updated'}. "
+                        f"{_prev_clause}"
+                        + ("" if taken_back in ("removed", "not_added")
+                           else "; the role of this item may also still be on you")
+                        + ". Open it from `/inventory` to try again.")
 
     return {"success": True, "entry_key": entry_key,
             "expires_at": expires_at, "role_added": role_added,
-            "error": None, "uncertain": False}
+            "error": None, "uncertain": False,
+            # None for grants with no role (nothing to equip).
+            "equipped": equipped, "equip_warning": equip_warning,
+            "equip_uncertain": equip_uncertain}
 
 
 async def claim_purchase_transition(op_id: str, *,
@@ -6375,8 +6599,7 @@ async def _observe_role_presence(bot, guild_id: int, user_id: int,
         return "unknown", f"not found (code {getattr(exc, 'code', None)})"
     except Exception as exc:
         return "unknown", f"member fetch failed: {type(exc).__name__}: {exc}"
-    held = {int(getattr(r, "id", r)) for r in (getattr(member, "roles", None) or ())}
-    return ("present" if int(role_id) in held else "absent"), "fetched member"
+    return ("present" if _member_has_role_id(member, int(role_id)) else "absent"), "fetched member"
 
 
 async def reconcile_delivery_intents(

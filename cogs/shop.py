@@ -872,6 +872,18 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
                           entry_key=granted.get("entry_key"),
                           role_added=bool(granted.get("role_added")),
                           detail=f"holding {granted.get('entry_key')}")
+            if granted.get("equipped") is False:
+                # Delivered but NOT worn: the previously equipped role could
+                # not be released, so the swap was refused and this role was
+                # taken back. The purchase succeeded - say what it actually
+                # bought instead of implying the role is equipped.
+                result["warning"] = granted.get("equip_warning") or (
+                    "This item is in your inventory, but it could not be "
+                    "equipped.")
+            elif granted.get("equip_warning"):
+                result["warning"] = granted["equip_warning"]
+            if granted.get("equip_uncertain"):
+                result["equip_uncertain"] = True
             return result
 
         from utils.reward_engine import give_reward
@@ -904,6 +916,15 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
             detail=(f"permanent role ({granted['entry_key']})"
                     if granted.get("entry_key") else "permanent role"),
         )
+        if granted.get("equipped") is False:
+            # PATCH 5 / E: delivered and owned, but not worn. The purchase
+            # stands - the caller must NOT refund it - and the wording is the
+            # PURCHASE one, never "granted as a reward".
+            result["keep_unequipped"] = bool(granted.get("keep_unequipped"))
+            result["warning"] = granted.get("warning") or (
+                f"**{result['item_name']}** was purchased and is in your "
+                f"inventory, but it could not be equipped. Open it from "
+                f"`/inventory` to equip it.")
         return result
 
     if itype == "xp_boost":
@@ -1025,6 +1046,19 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
                           entry_key=granted.get("entry_key"),
                           role_added=bool(granted.get("role_added")),
                           detail=f"holding {granted.get('entry_key')}")
+            if granted.get("equipped") is False:
+                # Same contract as the role branch above. A custom timed
+                # product carries no role today (`grant_timed_product` is
+                # called without one), so this cannot fire yet; it is here so
+                # a role-bearing custom product could never be reported as
+                # equipped when it was delivered but not worn.
+                result["warning"] = granted.get("equip_warning") or (
+                    "This item is in your inventory, but it could not be "
+                    "equipped.")
+            elif granted.get("equip_warning"):
+                result["warning"] = granted["equip_warning"]
+            if granted.get("equip_uncertain"):
+                result["equip_uncertain"] = True
             return result
 
         from utils.reward_engine import give_reward

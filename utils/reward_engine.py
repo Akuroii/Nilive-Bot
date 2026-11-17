@@ -13,6 +13,10 @@ class RewardError(Exception):
     pass
 
 
+class RewardNameConflict(RewardError):
+    """The member owns a different item under the name this reward would use."""
+
+
 async def _log_xp_ledger(guild_id: int, user_id: int, amount: int,
                           new_xp: int, reason: str, source: str):
     try:
@@ -41,8 +45,16 @@ async def give_reward(bot: discord.Client,
                        defer_retry_seconds: float | None = None,
                        idempotency_key: str | None = None,
                        op_id: str | None = None,
-                       metadata_extra: dict | None = None) -> dict:
+                       metadata_extra: dict | None = None,
+                       park_on_conflict: bool = True) -> dict:
     """...
+
+    An `item` / `role` / `temp_role` reward the Inventory refuses because the
+    member owns a different kind of item under the same name is never dropped:
+    it is parked in utils.pending_rewards and the result says so
+    (``pending=True``). The caller's completed work stands and a later retry
+    delivers it. Shop purchases (``op_id``) are refunded instead, and the retry
+    itself passes ``park_on_conflict=False``.
 
     ``idempotency_key`` marks a ONE-SHOT xp award - a mission, tag mission,
     minigame, event or tag-partner grant whose triggering work the caller has
@@ -422,6 +434,28 @@ async def give_reward(bot: discord.Client,
                 role_metadata["origin_op_id"] = str(op_id)
             role_metadata = await color_metadata(guild_id, role_id, role_metadata)
 
+            # DELIVERY TIME, not only creation time: the Inventory holds one
+            # stack per item name and equipping a role writes one, so a role
+            # whose name another KIND of item uses in this guild can never be
+            # granted - a Shop "Potion" blocks a role reward named "Potion" even
+            # if this member never bought it. A listing added after the reward
+            # was defined is exactly the case the creation-time check cannot
+            # see, and an earned reward must not be lost at delivery.
+            from utils.item_identity import (
+                KIND_ROLE, ItemNameConflict, find_name_conflict)
+            name_conflict = await find_name_conflict(
+                guild_id, display_name, KIND_ROLE)
+            if name_conflict:
+                return await _name_conflict_result(
+                    guild_id, user_id, reward_type,
+                    ItemNameConflict(name_conflict), op_id=op_id,
+                    park_on_conflict=park_on_conflict, source=source,
+                    reason=reason, payload={
+                        "role_id": role_id, "duration_hours": duration_hours,
+                        "item_name": item_name, "reason": reason,
+                        "source": source, "metadata_extra": metadata_extra,
+                        "idempotency_key": idempotency_key})
+
             role_was_present = role in member.roles
             prior_inv = None
             delivered_inv = None
@@ -447,9 +481,9 @@ async def give_reward(bot: discord.Client,
                                 previous_metadata = json.loads(prior_inv[4] or "{}")
                                 previous_role = int(previous_metadata.get("role_id"))
                             except (TypeError, ValueError, AttributeError):
-                                raise RewardError("Existing ownership has no verifiable role identity")
+                                raise RewardNameConflict("Existing ownership has no verifiable role identity")
                             if prior_inv[2] != reward_type or previous_role != int(role_id):
-                                raise RewardError("An unrelated item already uses this name")
+                                raise RewardNameConflict("An unrelated item already uses this name")
                             if op_id:
                                 raise RewardError("You already own this permanent role item")
                             # Do not shrink or overwrite an independent existing grant.
@@ -470,6 +504,16 @@ async def give_reward(bot: discord.Client,
                     except BaseException:
                         await db.rollback()
                         raise
+            except RewardNameConflict as exc:
+                # Nothing was written and the Discord role was not touched.
+                return await _name_conflict_result(
+                    guild_id, user_id, reward_type, exc, op_id=op_id,
+                    park_on_conflict=park_on_conflict, source=source,
+                    reason=reason, payload={
+                        "role_id": role_id, "duration_hours": duration_hours,
+                        "item_name": item_name, "reason": reason,
+                        "source": source, "metadata_extra": metadata_extra,
+                        "idempotency_key": idempotency_key})
             except Exception as exc:
                 return {"success": False, "reward_type": reward_type,
                         "error": f"Inventory error: {exc}", "uncertain": False}
@@ -496,6 +540,28 @@ async def give_reward(bot: discord.Client,
                 role_added = (bool(equip_result.get("role_added"))
                               or ((not role_was_present) and (role in member.roles)))
                 equip_uncertain = bool(equip_result.get("uncertain"))
+                if not role_added and not equip_uncertain and reward_type == "role":
+                    # PATCH 5 - permanent role ownership survives a refused
+                    # equip. The role is confirmed OFF the member and the slot
+                    # is settled (no uncertainty), but the ownership is real:
+                    # keep the role in the Inventory, unequipped, instead of
+                    # deleting what was just earned or bought. Nothing is
+                    # refunded and nothing is granted twice - this row IS the
+                    # member's item; /inventory equips it once the slot is free.
+                    warning = unequipped_warning(
+                        display_name,
+                        purchased=bool(op_id) or str(source or "").lower() == "shop",
+                        source=source, error=equip_result.get("error"))
+                    print(f"[REWARDS] {reward_type} {display_name!r} for "
+                          f"guild={guild_id} user={user_id} is owned but not "
+                          f"equipped; kept in the inventory (no rollback).")
+                    return {"success": True, "reward_type": reward_type,
+                            "role_id": role_id, "item_name": display_name,
+                            "entry_key": entry_key, "role_added": False,
+                            "equipped": False, "keep_unequipped": True,
+                            "warning": warning, "uncertain": False,
+                            "prior_inventory": prior_inv,
+                            "delivered_inventory": delivered_inv}
                 inv_restored = False
                 if not role_added and not equip_uncertain:
                     inv_restored = await _restore_prior_inventory()
@@ -547,7 +613,7 @@ async def give_reward(bot: discord.Client,
         prior_inv = None
         delivered_inv = None
         grant_id = None
-        from utils.inventory import give_item
+        from utils.inventory import give_item, ItemTypeConflict
         item_meta = dict(item_metadata) if item_metadata else None
         if op_id:
             item_meta = item_meta or {}
@@ -587,6 +653,16 @@ async def give_reward(bot: discord.Client,
                 except BaseException:
                     await db.rollback()
                     raise
+        except ItemTypeConflict as e:
+            # Rolled back: the owned stack is exactly as it was.
+            return await _name_conflict_result(
+                guild_id, user_id, "item", e, op_id=op_id,
+                park_on_conflict=park_on_conflict, source=source,
+                reason=reason, payload={
+                    "amount": quantity, "item_name": item_name,
+                    "item_type": item_type, "item_metadata": item_metadata,
+                    "reason": reason, "source": source,
+                    "idempotency_key": idempotency_key})
         except Exception as e:
             return {"success": False, "reward_type": "item",
                     "error": f"Inventory error: {e}", "uncertain": False}
@@ -599,6 +675,82 @@ async def give_reward(bot: discord.Client,
 
     else:
         raise RewardError(f"Unknown reward_type: {reward_type!r}")
+
+_SOURCE_REWARD_ARTICLE_LABEL = {
+    "mission": "a mission",
+    "event": "an event",
+    "minigame": "a minigame",
+    "tag_mission": "a tag mission",
+    "tag_partner": "a tag partner",
+    "system": None,
+}
+
+
+def reward_origin_phrase(*, purchased: bool, source: str | None) -> str:
+    """Origin phrase ('purchased' vs 'granted as ... reward') for an item."""
+    key = str(source or "").strip().lower()
+    if purchased or key == "shop":
+        return "purchased"
+    if key in _SOURCE_REWARD_ARTICLE_LABEL:
+        article_label = _SOURCE_REWARD_ARTICLE_LABEL[key]
+        return (f"granted as {article_label} reward"
+                if article_label else "granted as a reward")
+    if key:
+        clean = key.replace("_", " ")
+        article = "an" if clean[:1] in "aeiou" else "a"
+        return f"granted as {article} {clean} reward"
+    return "granted as a reward"
+
+
+def unequipped_warning(item_name: str, *, purchased: bool, source: str | None,
+                       error: str | None) -> str:
+    """The member-facing text for an item that is owned but not worn.
+
+    The wording follows the SOURCE, never an assumption: a Shop purchase was
+    purchased, a Mission / Event / Minigame / Tag reward was granted. Telling a
+    member their mission "was purchased" is wrong, and so is telling a buyer
+    their purchase was "granted as a reward".
+    """
+    origin = reward_origin_phrase(purchased=purchased, source=source)
+    opening = (f"**{item_name}** was {origin} and is in your inventory, "
+               f"but it is not equipped")
+    return (f"{opening}: {error or 'the equip slot could not be updated'}. "
+            f"Open it from `/inventory` to equip it.")
+
+
+async def _name_conflict_result(guild_id: int, user_id: int, reward_type: str,
+                                exc: Exception, *, op_id, park_on_conflict: bool,
+                                source: str | None, reason: str | None,
+                                payload: dict) -> dict:
+    """Result for a grant the Inventory refused over a name clash.
+
+    A Shop purchase (`op_id`) is a definite, refundable failure. Any other
+    reward was already earned and has no second chance, so it is parked for a
+    later retry instead of being dropped. If even parking fails the result is
+    still a plain failure - never a false success.
+    """
+    result = {"success": False, "reward_type": reward_type,
+              "error": f"Inventory error: {exc}", "uncertain": False,
+              "name_conflict": True, "pending": False}
+    if op_id or not park_on_conflict:
+        return result
+    try:
+        from utils.pending_rewards import park
+        pending_id = await park(guild_id, user_id, reward_type, payload,
+                                source=source, reason=reason, error=str(exc))
+    except Exception as park_error:
+        print(f"[REWARDS] could not park a refused {reward_type} reward for "
+              f"guild={guild_id} user={user_id}: {park_error}")
+        return result
+    print(f"[REWARDS] {reward_type} reward for guild={guild_id} user={user_id} "
+          f"held as pending reward #{pending_id}: {exc}")
+    result.update(
+        pending=True, pending_id=pending_id,
+        error=(f"Reward held as pending reward #{pending_id}: a different "
+               f"kind of item already uses this name, so it cannot be granted "
+               f"yet. It is delivered automatically once the name is free."))
+    return result
+
 
 async def rollback_role_inventory_grant(
     guild_id: int,

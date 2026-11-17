@@ -53,6 +53,9 @@ async def give_reward(bot: discord.Client,
             amount=1, item_name=reward_value, item_type="event_drop",
             reason=f"Event reward: {reward_value}",
             source="event",
+            # The item branch used to drop the key, so a held item reward could
+            # not be matched to this win. Every one-shot type carries it.
+            idempotency_key=idempotency_key,
         )
     else:
         result = await _engine_give_reward(
@@ -161,10 +164,21 @@ class ButtonRaceView(discord.ui.View):
             # refused with "You already claimed this reward" and a grant the
             # correction fence refused would never be retried. Keying it makes
             # the award durable instead of lost.
+            # Keyed for EVERY one-shot type, not just XP: the key is the
+            # winner's identity for this event, so a held role/item reward is
+            # one debt however often the claim path replays.
             idempotency_key=(f"event:{interaction.guild.id}:{self.event_id}:"
-                             f"{interaction.user.id}"
-                             if self.reward_type == "xp" else None))
+                             f"{interaction.user.id}"))
 
+        if result.get("pending"):
+            # Kept, not lost: utils.pending_rewards delivers it on a retry.
+            await interaction.response.send_message(
+                "You won! Your reward is being held because you already own a "
+                "different item with the same name. It arrives by itself once "
+                "that item is used up — see `/inventory`.",
+                ephemeral=True)
+            await self._finish_if_full(interaction)
+            return
         if not result.get("success"):
             await interaction.response.send_message(
                 "You won, but the reward could not be delivered. Please contact a moderator.",
@@ -186,10 +200,10 @@ class ButtonRaceView(discord.ui.View):
         else:
             reward_str = "your reward"
 
-        await interaction.response.send_message(
-            f"🎉 You won {reward_str} "
-            f"({len(self.winners)}/{self.max_winners})",
-            ephemeral=True)
+        message = f"🎉 You won {reward_str} ({len(self.winners)}/{self.max_winners})"
+        if result.get("keep_unequipped") and result.get("warning"):
+            message += f"\n\n{result['warning']}"
+        await interaction.response.send_message(message, ephemeral=True)
 
         await self._finish_if_full(interaction)
 
@@ -357,6 +371,16 @@ class Events(commands.Cog):
                 f"{', '.join(valid_types)}",
                 ephemeral=True)
             return
+
+        if reward_type == "item":
+            # The item lands in the winner's Inventory under this name, so it
+            # must not share it with a potion, title or role item.
+            from utils.item_identity import find_name_conflict, KIND_PLAIN
+            conflict = await find_name_conflict(
+                interaction.guild.id, reward_value, KIND_PLAIN)
+            if conflict:
+                await interaction.response.send_message(conflict, ephemeral=True)
+                return
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute("""

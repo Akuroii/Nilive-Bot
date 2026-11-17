@@ -250,9 +250,16 @@ def dashboard_edit(xp, *, coins=0, diamonds=None):
         session.update(user={"id": USER, "username": "Audit", "avatar": None},
                        guild_id=GUILD, expires_at=time.time() + 7200,
                        csrf_token="audit-csrf")
-    body = {"user_id": USER, "xp": xp, "coins": coins}
+    # The route requires the wallet the form was opened with for every
+    # currency it is asked to write (a stale or missing snapshot is refused).
+    held = rows("SELECT balance, diamonds FROM economy WHERE guild_id=? "
+                "AND user_id=?", (GUILD, USER))
+    held = held[0] if held else (0, 0)
+    body = {"user_id": USER, "xp": xp, "coins": coins,
+            "expected_coins": int(held[0] or 0)}
     if diamonds is not None:
         body["diamonds"] = diamonds
+        body["expected_diamonds"] = int(held[1] or 0)
     return client.post("/api/edit-member", json=body,
                        headers={"X-CSRF-Token": "audit-csrf"})
 

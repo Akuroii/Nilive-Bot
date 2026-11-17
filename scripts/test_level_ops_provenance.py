@@ -232,10 +232,10 @@ async def main():
     check("using the item consumes the OLDEST grant first, FIFO",
           [g[4] for g in grants(OTHER)] == [3, 3] and stack(OTHER) == 6,
           str(grants(OTHER)))
-    dropped = await inventory.drop_item(GUILD, OTHER, ITEM)
-    check("dropping the stack consumes every remaining attributable unit",
-          dropped.get("success") is not False
-          and [g[4] for g in grants(OTHER)] == [0, 0], str([dropped, grants(OTHER)]))
+    left = await inventory.remove_item(GUILD, OTHER, ITEM, stack(OTHER))
+    check("removing the rest of the stack consumes every remaining attributable unit",
+          left == 0 and [g[4] for g in grants(OTHER)] == [0, 0],
+          str([left, grants(OTHER)]))
 
     # An absolute quantity write cannot say which units it replaced, so it must
     # give up on provenance rather than leave a number nobody can trust.
@@ -576,11 +576,17 @@ async def main():
     async def owner(*args, **kwargs):
         return "owner"
     permissions._get_permission_level = owner
+    # The route requires the wallet the form was opened with for every
+    # currency it is asked to write (a stale or missing snapshot is refused).
+    held = rows("SELECT balance, diamonds FROM economy WHERE guild_id=? "
+                "AND user_id=?", (GUILD, OTHER))
+    held = held[0] if held else (0, 0)
     try:
         with dash.app.test_request_context(
                 "/api/edit-member", method="POST",
                 json={"user_id": OTHER, "xp": level_start_xp(9), "coins": 15,
-                      "diamonds": 2}):
+                      "diamonds": 2, "expected_coins": int(held[0] or 0),
+                      "expected_diamonds": int(held[1] or 0)}):
             flask.session["guild_id"] = GUILD
             flask.session["user"] = {"id": 777, "username": "owner"}
             flask.session["user_level"] = "owner"

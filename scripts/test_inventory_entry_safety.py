@@ -54,48 +54,6 @@ class InventorySafetyTests(unittest.IsolatedAsyncioTestCase):
             await wallet.open_inventory_panel(interaction, 1, 2, wallet.TAB_ITEMS)
             self.assertEqual(response.edit_message.await_count, 1)
 
-    async def test_failed_unequip_never_drops(self):
-        interaction = SimpleNamespace(client=object(), response=SimpleNamespace(send_message=AsyncMock()))
-        view = wallet.DropConfirmView(1, 2, wallet.TAB_ITEMS, 'role')
-        with patch.object(wallet, 'get_equipped', AsyncMock(return_value={'item_name': 'role'})), \
-             patch.object(wallet, 'unequip_role', AsyncMock(return_value={'success': False, 'error': 'denied'})), \
-             patch.object(wallet, 'drop_item', AsyncMock()) as drop:
-            await view.confirm_button.callback(interaction)
-            drop.assert_not_awaited()
-            self.assertIn('denied', interaction.response.send_message.await_args.args[0])
-
-    async def test_failed_title_unequip_never_drops(self):
-        interaction = SimpleNamespace(client=object(), response=SimpleNamespace(send_message=AsyncMock()))
-        view = wallet.DropConfirmView(1, 2, wallet.TAB_TITLES, 'title')
-        with patch.object(wallet, 'get_equipped_title', AsyncMock(return_value={'item_name': 'title'})), \
-             patch.object(wallet, 'unequip_title', AsyncMock(return_value={'success': False, 'error': 'stale'})), \
-             patch.object(wallet, 'drop_item', AsyncMock()) as drop:
-            await view.confirm_button.callback(interaction)
-            drop.assert_not_awaited()
-            self.assertIn('stale', interaction.response.send_message.await_args.args[0])
-
-    async def test_stale_timed_drop_confirmation_is_refused(self):
-        from utils import timed_ownership
-        interaction = SimpleNamespace(client=object(), response=SimpleNamespace(send_message=AsyncMock()))
-        view = wallet.DropConfirmView(1, 2, wallet.TAB_ITEMS, 'clock',
-                                      timed_holding={'entry_key': 'h:2'})
-        with patch.object(timed_ownership, 'expire_one', AsyncMock()) as expire, \
-             patch.object(wallet, 'drop_item', AsyncMock()) as drop:
-            await view.confirm_button.callback(interaction)
-            expire.assert_not_awaited()
-            drop.assert_not_awaited()
-            self.assertIn('cannot be dropped', interaction.response.send_message.await_args.args[0])
-        view.stop()
-
-    async def test_stale_timed_drop_button_cannot_open_confirmation(self):
-        item = {'id': 2, 'entry_key': 'h:2', 'item_name': 'clock',
-                'item_type': 'custom', 'quantity': 1, 'timed': True, 'metadata': {}}
-        interaction = SimpleNamespace(response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock()))
-        with patch.object(wallet, 'get_inventory_entries', AsyncMock(return_value=[item])):
-            await wallet.open_drop_confirm(interaction, 1, 2, wallet.TAB_ITEMS, 'h:2')
-        interaction.response.edit_message.assert_not_awaited()
-        self.assertIn('cannot be dropped', interaction.response.send_message.await_args.args[0])
-
     async def test_history_navigation_and_partial_coverage_label(self):
         from utils import inventory_activity
         response = SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock())
@@ -125,8 +83,7 @@ class InventorySafetyTests(unittest.IsolatedAsyncioTestCase):
     async def test_custom_item_does_not_offer_equip(self):
         view = wallet.ItemPanelView(1, 2, wallet.TAB_ITEMS,
                                     {'item_name': 'rock', 'item_type': 'custom'}, False)
-        self.assertNotIn('Equip', [child.label for child in view.children])
-        self.assertIn('Drop', [child.label for child in view.children])
+        self.assertEqual([child.label for child in view.children], ['Back'])
 
 
 if __name__ == '__main__':

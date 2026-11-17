@@ -70,16 +70,22 @@ class TagPartners(commands.Cog):
                 # award would normally be retried on the next join - which for a
                 # partner tag may never happen. Keying it makes the XP award
                 # durable instead of dependent on a repeat event.
+                # Guild + partner guild + member for every one-shot type, so a
+                # held role/item reward is paid exactly once too.
                 idempotency_key=(
                     f"tag_partner:{member.guild.id}:{partner_guild_id}:"
-                    f"{member.id}" if reward_type == "xp" else None),
+                    f"{member.id}"),
             )
         except RewardError as e:
             print(f"[TAGPARTNERS] reward config error guild={member.guild.id} "
                   f"partner={partner_guild_id}: {e}")
             return
 
-        if not result.get("success"):
+        # A reward held over an item-name clash (utils.pending_rewards) is
+        # owed and will be delivered by its own retry, so it is logged like a
+        # granted one: another join must not queue it a second time.
+        held = bool(result.get("pending"))
+        if not result.get("success") and not held:
             print(f"[TAGPARTNERS] reward failed guild={member.guild.id} "
                   f"user={member.id}: {result.get('error')}")
             return
@@ -92,9 +98,16 @@ class TagPartners(commands.Cog):
             """, (member.guild.id, partner_guild_id, member.id))
             await db.commit()
 
-        if welcome_message:
+        if held:
+            return      # the welcome text may promise a reward not yet delivered
+        dm_text = (
+            result["warning"]
+            if result.get("keep_unequipped") and result.get("warning")
+            else welcome_message
+        )
+        if dm_text:
             try:
-                await member.send(welcome_message)
+                await member.send(dm_text)
             except discord.Forbidden:
                 pass  # DMs closed — reward is already granted regardless
 

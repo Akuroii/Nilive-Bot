@@ -443,3 +443,37 @@ def api_rewards_user(user_id: int):
     } for r in rows]
 
     return jsonify({"guild_id": guild_id, "user_id": user_id, "rewards": rewards})
+
+
+# ── Held rewards (utils/pending_rewards.py) ─────────────────────────────────
+
+@api_bp.route("/pending-rewards/<int:reward_id>/<action>",
+              methods=["POST"])
+@require_api_permission(LEVEL_ADMIN)
+def resolve_pending_reward(reward_id: int, action: str):
+    """Staff decision on a reward whose delivery outcome is unknown.
+
+    Writes the `pending_rewards` row only - never the Inventory, which stays
+    read-only from the dashboard; a requeued reward is delivered by the bot.
+
+    `retry` puts it back in the queue (the bot delivers it within a minute);
+    `delivered` closes it. Only a reward in review can be decided: one that is
+    simply waiting is delivered by the bot itself once the name clash is gone.
+    """
+    if action not in ("retry", "delivered"):
+        return jsonify({"success": False, "error": "Unknown action."}), 400
+    guild_id = get_session_guild_id()
+    from utils.pending_rewards import resolve_review
+    actor = f"staff {current_user_id()}"
+    changed = run_async(resolve_review(guild_id, reward_id, action, actor=actor))
+    if not changed:
+        return jsonify({"success": False,
+                        "error": "This reward is not waiting for review "
+                                 "(already decided, delivered, or not in "
+                                 "this server)."}), 409
+    log_action(guild_id,
+               ("Pending reward #%d: retry requested" if action == "retry"
+                else "Pending reward #%d: marked as delivered") % reward_id,
+               "inventory")
+    return jsonify({"success": True})
+

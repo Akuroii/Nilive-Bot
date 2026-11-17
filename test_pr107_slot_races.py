@@ -86,7 +86,8 @@ class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self._same_role_pair(9631)
         role, person = ctx["role"], ctx["person"]
         await record_equipped(GUILD, USER, ctx["item_permanent"],
-                              role_id=9631, entry_key=ctx["permanent"])
+                              role_id=9631, entry_key=ctx["permanent"],
+                              role_added=True)
 
         window = {}
 
@@ -140,7 +141,8 @@ class SameRoleSlotRaceTests(unittest.IsolatedAsyncioTestCase):
         ctx = await self._same_role_pair(9632)
         role, person = ctx["role"], ctx["person"]
         await record_equipped(GUILD, USER, ctx["item_permanent"],
-                              role_id=9632, entry_key=ctx["permanent"])
+                              role_id=9632, entry_key=ctx["permanent"],
+                              role_added=True)
 
         window = {}
 
@@ -211,6 +213,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         bot = SimpleNamespace(
             get_guild=lambda gid: guild if gid == GUILD else None)
@@ -270,7 +273,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         person, guild, bot, roles = self._world([9640], worn=[9640])
         old_id, old_key = await self._holding(9640, "ExpiredReward", expired=True)
         await EE.record_equipped(GUILD, USER, "ExpiredReward", role_id=9640,
-                                 entry_key=old_key)
+                                 entry_key=old_key, role_added=True)
         seen = {}
 
         async def gate(kind, target):
@@ -298,7 +301,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         person, guild, bot, roles = self._world([9641], worn=[9641])
         _, owner_key = await self._holding(9641, "SlotOwner")
         await EE.record_equipped(GUILD, USER, "SlotOwner", role_id=9641,
-                              entry_key=owner_key)
+                              entry_key=owner_key, role_added=True)
         seen = {}
 
         async def gate(kind, target):
@@ -333,7 +336,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         person, guild, bot, roles = self._world([9661], worn=[9661])
         old_id, old_key = await self._holding(9661, "SlotExpired", expired=True)
         await EE.record_equipped(GUILD, USER, "SlotExpired", role_id=9661,
-                              entry_key=old_key)
+                              entry_key=old_key, role_added=True)
         seen = {}
 
         async def gate(kind, target):
@@ -372,7 +375,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         person, guild, bot, roles = self._world([9651, 9652, 9653],
                                                 worn=[9651])
         await EE.record_equipped(GUILD, USER, "SlotA", role_id=9651,
-                              entry_key="i:a")
+                              entry_key="i:a", role_added=True)
         perm = self._permanent(9652, "SlotB")
 
         async def _noop(kind, role):
@@ -424,7 +427,7 @@ class SlotConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         old_id, old_key = await self._holding(9671, "SlotExpiredPerm",
                                               expired=True)
         await EE.record_equipped(GUILD, USER, "SlotExpiredPerm", role_id=9671,
-                              entry_key=old_key)
+                              entry_key=old_key, role_added=True)
         seen = {}
 
         async def gate(kind, target):
@@ -528,6 +531,7 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: roles.get(int(rid)),
             get_member=lambda uid: person if uid == person.id else None,
+            fetch_member=AsyncMock(return_value=person),  # fresh Discord read
         )
         return SimpleNamespace(
             get_guild=lambda gid: guild if gid == GUILD else None)
@@ -584,7 +588,7 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             item_type="temp_role", metadata={"role_id": 9721},
             role_id=9721, source="shop")
         await EE.record_equipped(GUILD, USER, "CancelledRole", role_id=9721,
-                                 entry_key=f"h:{holding_id}")
+                                 entry_key=f"h:{holding_id}", role_added=True)
         holding = (await TO.expired_holdings(limit=None))[0]
 
         task = asyncio.create_task(TO.expire_one(bot, holding))
@@ -633,6 +637,7 @@ class SlotLockLifecycleTests(unittest.IsolatedAsyncioTestCase):
             me=SimpleNamespace(top_role=SimpleNamespace(position=10)),
             get_role=lambda rid: role if int(rid) == 9731 else None,
             get_member=lambda uid: {USER: mine, other: theirs}.get(uid),
+            fetch_member=AsyncMock(side_effect=lambda uid: {USER: mine, other: theirs}[uid]),  # fresh Discord read
         )
         bot = SimpleNamespace(
             get_guild=lambda gid: guild if gid == GUILD else None)

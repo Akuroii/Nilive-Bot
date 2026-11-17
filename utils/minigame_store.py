@@ -396,6 +396,7 @@ async def save_config(guild_id: int, **fields) -> dict:
             cols.append(key)
             values.append(fields[key])
     if "global_default_rewards" in fields:
+        await _check_item_reward_names(guild_id, fields["global_default_rewards"])
         cols.append("global_default_rewards_json")
         values.append(_dump(fields["global_default_rewards"]))
     if not cols:
@@ -464,6 +465,7 @@ async def create_category(guild_id: int, name: str, parent_id: int | None = None
         parent = await get_category(guild_id, parent_id)
         if not parent:
             raise ValueError("parent category not found")
+    await _check_item_reward_names(guild_id, default_rewards)
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM minigame_categories "
@@ -624,6 +626,7 @@ async def update_category(guild_id: int, category_id: int,
     if "color" in fields:
         sets.append("color = ?"); args.append(fields["color"])
     if "default_rewards" in fields:
+        await _check_item_reward_names(guild_id, fields["default_rewards"])
         sets.append("default_rewards_json = ?")
         args.append(_dump(fields["default_rewards"] or []))
     if "enabled" in fields:
@@ -680,6 +683,18 @@ async def delete_category(guild_id: int, category_id: int) -> tuple[bool, str]:
 
 # ── TEMPLATES ───────────────────────────────────────────────────────────
 
+async def _check_item_reward_names(guild_id: int, rewards) -> None:
+    """Refuse an `item` reward whose name belongs to a different kind of item.
+
+    The item lands in the winner's Inventory under that name, where it cannot
+    coexist with a potion, title or role item of the same name. Raises
+    ValueError (utils.item_identity.ItemNameConflict) with an admin-facing
+    message, like every other invariant in this module.
+    """
+    from utils.item_identity import ensure_item_rewards_available
+    await ensure_item_rewards_available(guild_id, rewards)
+
+
 async def _insert_rewards(db, template_id: int, rewards: list | None):
     """Insert reward rows (empty list is valid — D11). Raises ValueError
     on an invalid reward_type (data integrity; user-facing validation is
@@ -721,6 +736,7 @@ async def create_template(guild_id: int, category_id: int, name: str,
         raise ValueError(f"game_type must be one of: {', '.join(VALID_GAME_TYPES)}")
     if not await get_category(guild_id, category_id):
         raise ValueError("category not found")
+    await _check_item_reward_names(guild_id, rewards)
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             INSERT INTO minigame_templates
@@ -825,6 +841,8 @@ async def update_template(guild_id: int, template_id: int,
     if "category_id" in fields and fields["category_id"] is not None:
         if not await get_category(guild_id, fields["category_id"]):
             raise ValueError("category not found")
+    if "rewards" in fields:
+        await _check_item_reward_names(guild_id, fields["rewards"])
 
     sets, args = [], []
     if "name" in fields:

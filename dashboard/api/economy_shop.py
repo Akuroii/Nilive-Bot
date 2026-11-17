@@ -474,6 +474,14 @@ def add_shop_item():
             return jsonify({"success": False,
                             "error": "Option parent must be a root product in this guild."}), 400
 
+    # A product is delivered into the Inventory under its name, where it
+    # cannot coexist with a different kind of item of the same name.
+    from utils.item_identity import find_name_conflict, kind_of_shop_type
+    name_conflict = run_async(find_name_conflict(
+        guild_id, data["name"], kind_of_shop_type(data.get("type", "role"))))
+    if name_conflict:
+        return jsonify({"success": False, "error": name_conflict}), 400
+
     max_stock_val = data["max_stock"]
     current_stock_val = max_stock_val
     price_diamonds_val = data["price_diamonds"]
@@ -783,6 +791,15 @@ def update_shop_item(item_id: int):
     price_val = data["price"]
     price_diamonds_val = data["price_diamonds"]
     new_name = data["name"]
+    # Only a RENAME can introduce a name clash (the type is immutable), so a
+    # listing that already clashes stays editable in every other field.
+    if new_name != existing["name"]:
+        from utils.item_identity import find_name_conflict, kind_of_shop_type
+        name_conflict = run_async(find_name_conflict(
+            guild_id, new_name, kind_of_shop_type(existing["type"]),
+            exclude_shop_item_id=item_id))
+        if name_conflict:
+            return jsonify({"success": False, "error": name_conflict}), 400
     from utils.item_catalog import is_valid_rarity, upsert_catalog_entry
     rarity = (data.get("rarity") or "common").strip().lower()
     if not is_valid_rarity(rarity):

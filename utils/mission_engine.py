@@ -274,6 +274,12 @@ async def create_definition(guild_id: int, *, name: str, mtype: str,
         raise ValueError(
             f"description must be {MAX_DESCRIPTION_LENGTH} characters or fewer")
 
+    if reward_type == "item":
+        # An item reward lands in the Inventory under this name, so it must
+        # not share it with a potion, title or role item (ValueError).
+        from utils.item_identity import ensure_name_available, KIND_PLAIN
+        await ensure_name_available(guild_id, reward_value, KIND_PLAIN)
+
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             INSERT INTO missions_definitions
@@ -384,6 +390,52 @@ async def record_activity(bot, guild_id: int, user_id: int,
     definitions query and one connection."""
     return await record_activities(
         bot, guild_id, user_id, {mtype: amount}, channel_id=channel_id)
+
+
+HELD_REWARD_NOTICE = ("Your mission is complete! Your reward is waiting for "
+                      "delivery because of an item conflict.")
+
+
+async def _send_member_notice(bot, guild_id: int, user_id: int, text: str,
+                              channel_id, *, kind: str) -> bool:
+    """DM first, activity channel fallback. Best effort: never fails the caller."""
+    try:
+        guild = bot.get_guild(int(guild_id)) if bot else None
+        member = guild.get_member(int(user_id)) if guild else None
+        if member is not None:
+            try:
+                await member.send(text)
+                return True
+            except Exception:
+                pass                          # DMs closed: fall back below
+        channel = (guild.get_channel(int(channel_id))
+                   if guild and channel_id else None)
+        if channel is not None:
+            await channel.send(f"<@{int(user_id)}> {text}")
+            return True
+    except Exception as exc:
+        print(f"[MISSIONS] could not send the {kind} notice to "
+              f"user={user_id} guild={guild_id}: {exc}")
+    return False
+
+
+async def _notify_held_reward(bot, guild_id: int, user_id: int,
+                              definition: dict, channel_id) -> bool:
+    """Tell the member their completed mission's reward is being held."""
+    text = (f"**{definition.get('name')}** — {HELD_REWARD_NOTICE} It will be "
+            f"delivered automatically once that is resolved; you do not need "
+            f"to do the mission again. See `/inventory`.")
+    return await _send_member_notice(
+        bot, guild_id, user_id, text, channel_id, kind="held-reward")
+
+
+async def _notify_unequipped_reward(bot, guild_id: int, user_id: int,
+                                    definition: dict, warning: str,
+                                    channel_id) -> bool:
+    """Tell the member their earned permanent role is in /inventory, unequipped."""
+    text = f"**{definition.get('name')}** — {warning}"
+    return await _send_member_notice(
+        bot, guild_id, user_id, text, channel_id, kind="unequipped-reward")
 
 
 async def record_activities(bot, guild_id: int, user_id: int,
@@ -525,10 +577,11 @@ async def record_activities(bot, guild_id: int, user_id: int,
             # award refused by a correction's fence would be gone for good.
             # `idempotency_key` queues it and retries until it lands, and makes
             # a repeat of this same completion pay nothing.
-            idem = None
-            if d["reward_type"] == "xp":
-                idem = (f"mission:{guild_id}:{user_id}:{d['id']}:"
-                        f"{period_keys.get(d['id'])}")
+            # Mission + period + member, for EVERY one-shot type: a role or
+            # item reward the Inventory holds is the same single debt as an XP
+            # award, and a replay of this completion must not park it twice.
+            idem = (f"mission:{guild_id}:{user_id}:{d['id']}:"
+                    f"{period_keys.get(d['id'])}")
             result = await give_reward(
                 bot, guild_id, user_id, d["reward_type"],
                 amount=d["reward_value"] if d["reward_type"] in ("coins", "diamonds", "xp") else None,
@@ -539,6 +592,13 @@ async def record_activities(bot, guild_id: int, user_id: int,
                 source="mission",
                 idempotency_key=idem,
             )
+            if result.get("pending"):
+                # Held, not lost (utils.pending_rewards). Said once, here: a
+                # later retry goes through give_reward only, never this loop.
+                await _notify_held_reward(bot, guild_id, user_id, d, channel_id)
+            elif result.get("keep_unequipped") and result.get("warning"):
+                await _notify_unequipped_reward(
+                    bot, guild_id, user_id, d, result["warning"], channel_id)
             if not result.get("success"):
                 print(f"[MISSIONS] Reward grant failed for mission "
                       f"{d['id']} ({d['name']}) guild={guild_id} "

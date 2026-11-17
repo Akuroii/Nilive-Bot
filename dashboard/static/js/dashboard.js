@@ -706,9 +706,15 @@ function showConfirm(message, onConfirm) {
 
 // ── EDIT MEMBER MODAL ─────────────────────────────────────────
 let _editUid = null;
+// The balance the modal was opened with. The server REQUIRES it whenever
+// coins are written and refuses the save if the member spent or earned in the
+// meantime, instead of overwriting. Coins are only sent when this form
+// actually changed them, so an XP-only edit never touches the wallet.
+let _editCoins = null;
 
 function openEditModal(uid, xp, coins) {
     _editUid = uid;
+    _editCoins = Number.isFinite(Number(coins)) ? Number(coins) : null;
     document.getElementById('edit-uid-label').textContent = uid;
     document.getElementById('edit-xp').value    = xp;
     document.getElementById('edit-coins').value  = coins;
@@ -724,7 +730,12 @@ async function saveEditModal() {
     const xp    = parseInt(document.getElementById('edit-xp').value);
     const coins = parseInt(document.getElementById('edit-coins').value);
     const btn   = document.querySelector('#edit-modal .btn-primary');
-    const data  = await ajaxSave('/api/edit-member', { user_id: _editUid, xp, coins }, btn, 'Member updated!');
+    const body  = { user_id: _editUid, xp };
+    if (!Number.isNaN(coins) && coins !== _editCoins) {
+        body.coins = coins;
+        body.expected_coins = _editCoins;
+    }
+    const data  = await ajaxSave('/api/edit-member', body, btn, 'Member updated!');
     if (data && data.success) {
         closeEditModal();
         setTimeout(() => location.reload(), 600);

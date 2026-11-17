@@ -7,6 +7,16 @@ class InsufficientItems(Exception):
     pass
 
 
+class ItemTypeConflict(Exception):
+    """A grant named an owned stack of a different kind. Message is user-facing."""
+
+
+# Types whose Inventory behaviour depends on the type itself: a potion is
+# activated, a title or role is equipped. Every other type (custom,
+# shop_custom, event_drop, ...) is a plain collectible with no action.
+FUNCTIONAL_ITEM_TYPES = frozenset({"potion", "title", "role", "temp_role"})
+
+
 async def _consume_provenance(db, guild_id: int, user_id: int, item_name: str,
                               quantity: int) -> None:
     """Take units off attributable level-reward grants, FIFO. Fails closed.
@@ -20,7 +30,7 @@ async def _consume_provenance(db, guild_id: int, user_id: int, item_name: str,
     unrelated-asset loss this provenance exists to prevent.
 
     Every caller runs this inside the same `BEGIN IMMEDIATE` transaction as the
-    quantity change, so raising rolls BOTH back: the purchase/potion/drop/trade
+    quantity change, so raising rolls BOTH back: the purchase/potion/trade
     does not happen, and no stale attribution survives. That is deliberately the
     opposite of "never break a purchase": a refused action the member can retry is
     recoverable; a silently wrong attribution is not.
@@ -44,19 +54,53 @@ async def _invalidate_provenance(db, guild_id: int, user_id: int,
 
 
 async def give_item(guild_id: int, user_id: int, item_name: str,
-                     quantity: int = 1, item_type: str = "custom",
+                     quantity: int = 1, item_type: str | None = None,
                      metadata: dict = None, source: str = "system",
                      db: aiosqlite.Connection | None = None) -> int:
     """Add inventory quantity. An optional caller-owned transaction is not committed.
 
     Existing callers keep the standalone connection/commit behavior.
     A passed connection joins that transaction, matching safe_credit(..., db=).
+
+    A stack is one row per (guild, user, item_name), so a grant can meet an
+    owned stack of the same name. It never changes that stack's type:
+      * `item_type=None` (a restore that only knows the name) keeps the
+        stored type, or creates a plain `custom` stack;
+      * the same type stacks;
+      * two plain collectible types stack and the stored type stays;
+      * anything else - a potion, title or role meeting a different kind -
+        raises ItemTypeConflict and writes nothing.
+    A row left at quantity 0 is not owned, so a typed grant may reuse it.
     """
     if quantity <= 0:
         raise ValueError("quantity must be positive")
     meta_json = json.dumps(metadata) if metadata else None
 
     async def apply(connection):
+        nonlocal item_type
+        cursor = await connection.execute("""
+            SELECT item_type, quantity FROM inventory_items
+            WHERE guild_id=? AND user_id=? AND item_name=?
+        """, (guild_id, user_id, item_name))
+        existing = await cursor.fetchone()
+        stored_type = (existing[0] or "custom") if existing else None
+        owned = bool(existing) and int(existing[1] or 0) > 0
+        if item_type is None:
+            item_type = stored_type or "custom"
+        elif owned and item_type != stored_type:
+            if (item_type in FUNCTIONAL_ITEM_TYPES
+                    or stored_type in FUNCTIONAL_ITEM_TYPES):
+                raise ItemTypeConflict(
+                    "An unrelated item already uses this name")
+            item_type = stored_type
+        if existing and not owned and item_type != stored_type:
+            # Reusing an emptied row for a different kind of item: the old
+            # kind's metadata (a potion's effect, a role id) must not carry
+            # over to it.
+            await connection.execute("""
+                UPDATE inventory_items SET item_type=?, metadata=NULL
+                WHERE guild_id=? AND user_id=? AND item_name=?
+            """, (item_type, guild_id, user_id, item_name))
         await connection.execute("""
             INSERT INTO inventory_items
                 (guild_id, user_id, item_name, item_type,
@@ -64,7 +108,6 @@ async def give_item(guild_id: int, user_id: int, item_name: str,
             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(guild_id, user_id, item_name) DO UPDATE SET
                 quantity   = quantity + ?,
-                item_type  = excluded.item_type,
                 metadata   = COALESCE(excluded.metadata, inventory_items.metadata),
                 updated_at = CURRENT_TIMESTAMP
         """, (guild_id, user_id, item_name, item_type,
@@ -205,79 +248,6 @@ async def set_quantity(guild_id: int, user_id: int, item_name: str,
             return result
         except BaseException:
             await connection.rollback()
-            raise
-
-
-async def drop_item(guild_id: int, user_id: int, item_name: str,
-                    *, expected_id: int | None = None,
-                    expected_type: str | None = None,
-                    expected_quantity: int | None = None,
-                    expected_metadata: dict | None = None,
-                    prevent_equipped: bool = False) -> dict:
-    """
-    Remove ALL copies of an owned item, regardless of quantity. Used
-    by Wallet → Item → Drop after the user has confirmed. Returns the
-    quantity that was removed, or {"success": False, ...} if the item
-    isn't owned. Does NOT touch Discord roles or equipped_* tables —
-    the Wallet layer is responsible for that cleanup (equip_engine /
-    title_engine / potion_engine) so this helper stays type-agnostic.
-    """
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("""
-                SELECT quantity, item_type, id, metadata FROM inventory_items
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (guild_id, user_id, item_name))
-            row = await cursor.fetchone()
-            if expected_id is not None and (not row or row[2] != expected_id):
-                await db.execute("ROLLBACK")
-                return {"success": False, "error": "That inventory entry has changed. Open it again."}
-            if not row or (row[0] or 0) <= 0:
-                await db.execute("ROLLBACK")
-                return {"success": False,
-                        "error": f"You do not own **{item_name}**."}
-            if expected_type is not None and row[1] != expected_type:
-                await db.rollback()
-                return {"success": False, "error": "That entry has changed type."}
-            if expected_quantity is not None and row[0] != expected_quantity:
-                await db.rollback()
-                return {"success": False, "error": "That stack has changed. Open it again."}
-            if expected_metadata is not None:
-                try:
-                    metadata = json.loads(row[3]) if row[3] else {}
-                except (TypeError, ValueError):
-                    metadata = None
-                if metadata != expected_metadata:
-                    await db.rollback()
-                    return {"success": False, "error": "That entry has changed. Open it again."}
-            if prevent_equipped:
-                cursor = await db.execute(
-                    "SELECT 1 FROM equipped_titles WHERE guild_id=? AND user_id=? AND item_name=? "
-                    "UNION ALL SELECT 1 FROM equipped_roles WHERE guild_id=? AND user_id=? "
-                    "AND item_name=? AND (entry_key IS NULL OR entry_key='' OR entry_key=?) LIMIT 1",
-                    (guild_id, user_id, item_name, guild_id, user_id, item_name, f"i:{row[2]}"))
-                if await cursor.fetchone():
-                    await db.rollback()
-                    return {"success": False, "error": "That entry is equipped. Unequip it first."}
-            dropped_qty = int(row[0] or 0)
-            dropped_type = row[1]
-            await db.execute("""
-                DELETE FROM inventory_items
-                WHERE guild_id=? AND user_id=? AND item_name=?
-            """, (guild_id, user_id, item_name))
-            await _consume_provenance(db, guild_id, user_id, item_name,
-                                      dropped_qty)
-            from utils.inventory_activity import record_activity
-            await record_activity(db, guild_id=guild_id, user_id=user_id,
-                                  event_type="dropped", item_name=item_name,
-                                  item_type=dropped_type, quantity=dropped_qty,
-                                  source="inventory")
-            await db.commit()
-            return {"success": True, "item_name": item_name,
-                    "quantity": dropped_qty, "item_type": dropped_type}
-        except Exception:
-            await db.execute("ROLLBACK")
             raise
 
 

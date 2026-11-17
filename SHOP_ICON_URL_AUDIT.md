@@ -1,5 +1,7 @@
 # Shop Icon URL investigation and repair
 
+> Note (2026-11-13): the member Drop action and its confirmation panel referenced below were removed afterwards; those passages describe the code as it was when this audit was written.
+
 Date: 2026-11-06 (UTC)
 Repository: `Akuroii/Nilive-Bot`
 Session branch: `arena/3ae570ab-nilive-bot`

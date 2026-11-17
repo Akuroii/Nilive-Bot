@@ -296,15 +296,11 @@ class ShopIconResolutionTests(unittest.IsolatedAsyncioTestCase):
             emoji_id = (await self._token(i)).rsplit(":", 1)[1][:-1]
             self.assertIn(f"https://cdn.discordapp.com/emojis/{emoji_id}.png", requested)
 
-    async def test_item_detail_and_drop_confirm_prefer_interaction_application_identity(self):
+    async def test_item_detail_prefers_interaction_application_identity(self):
         os.environ.pop("DISCORD_CLIENT_ID", None)
         interaction, _ = self._interaction()
         interaction.client.application_id = int(OTHER_APP)
         await wallet.open_item_panel(interaction, GUILD, USER, wallet.TAB_ITEMS, NAMES[0])
-        kwargs = interaction.response.edit_message.await_args.kwargs
-        self.assertIn(await self._token(0), kwargs["embed"].title)
-        kwargs["view"].stop()
-        await wallet.open_drop_confirm(interaction, GUILD, USER, wallet.TAB_ITEMS, NAMES[0])
         kwargs = interaction.response.edit_message.await_args.kwargs
         self.assertIn(await self._token(0), kwargs["embed"].title)
         kwargs["view"].stop()
@@ -319,10 +315,6 @@ class ShopIconResolutionTests(unittest.IsolatedAsyncioTestCase):
         for i, name in enumerate(NAMES):
             self.assertIn(f"{await self._token(i)} • ` 1 ` • ` {name} `", kwargs["embed"].description)
         await wallet.open_item_panel(interaction, GUILD, USER, wallet.TAB_ITEMS, NAMES[0])
-        kwargs = interaction.response.edit_message.await_args.kwargs
-        self.assertIn(await self._token(0), kwargs["embed"].title)
-        kwargs["view"].stop()
-        await wallet.open_drop_confirm(interaction, GUILD, USER, wallet.TAB_ITEMS, NAMES[0])
         kwargs = interaction.response.edit_message.await_args.kwargs
         self.assertIn(await self._token(0), kwargs["embed"].title)
         kwargs["view"].stop()

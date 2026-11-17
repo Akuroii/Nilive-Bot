@@ -228,13 +228,26 @@ class TagMissions(commands.Cog):
                             # 'completed' status are written below regardless of
                             # delivery, so a refused award is never retried.
                             # Keying it makes the XP award durable.
+                            # Mission + member for every one-shot type, so a
+                            # held role/item reward is paid exactly once too.
                             idempotency_key=(
-                                f"tag_mission:{guild_id}:{mission_id}:{user_id}"
-                                if reward_type == "xp" else None),
+                                f"tag_mission:{guild_id}:{mission_id}:{user_id}"),
                         )
                         if result.get("success"):
                             outcome = "rewarded"
-                            dm_text = success_message
+                            dm_text = (
+                                result["warning"]
+                                if result.get("keep_unequipped") and result.get("warning")
+                                else success_message
+                            )
+                        elif result.get("pending"):
+                            # Earned and kept (utils.pending_rewards): not the
+                            # failure text, and no claim that it arrived.
+                            outcome = "rewarded"
+                            dm_text = ("You completed the mission! Your reward "
+                                       "is waiting for delivery because of an "
+                                       "item conflict. It will be delivered "
+                                       "automatically once that is resolved.")
                         else:
                             print(f"[TAGMISSIONS] mission {mission_id} reward "
                                   f"failed user={user_id}: {result.get('error')}")
