@@ -1207,11 +1207,14 @@ async def mvp_role_entitled(guild_id: int, user_id: int,
                 return None
             if row[1] is not None and int(row[1]) == 0:
                 return None
+            # Every winner of the most recent settled cycle (ties and several
+            # ranks share one cycle_end) holds the role.
             cursor = await db.execute(
-                "SELECT user_id FROM mvp_history WHERE guild_id=?"
-                " ORDER BY created_at DESC, id DESC LIMIT 1", (guild_id,))
-            latest = await cursor.fetchone()
-            if latest and latest[0] is not None and int(latest[0]) == uid:
+                "SELECT 1 FROM mvp_history WHERE guild_id=? AND user_id=?"
+                " AND cycle_end=(SELECT cycle_end FROM mvp_history WHERE guild_id=?"
+                " ORDER BY created_at DESC, id DESC LIMIT 1) LIMIT 1",
+                (guild_id, uid, guild_id))
+            if await cursor.fetchone():
                 return "the current MVP cycle award"
     except aiosqlite.OperationalError as exc:
         if _missing_table(exc):

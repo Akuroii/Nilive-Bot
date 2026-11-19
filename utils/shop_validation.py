@@ -40,10 +40,19 @@ def text(value, field, *, required=False):
 
 
 def prestige_terms(price, tier, diamonds=None):
-    """I–V retain positive Coin pricing; VI is explicitly free, never paid."""
+    """I is Free (0 allowed), II-V need a positive Coin price, VI is exactly 0.
+
+    The price is the minimum Coin balance required; every I-V purchase resets
+    Coins to 0, so a free Tier I is still a deliberate, confirmed reset.
+    """
     tier = integer(tier, "Prestige tier", minimum=1, maximum=6)
-    price = integer(price, "Prestige VI price (Free)" if tier == 6 else "Prestige price",
-                    minimum=0 if tier == 6 else 1, maximum=0 if tier == 6 else 2**63 - 1)
+    if tier == 6:
+        label, low, high = "Prestige VI price (Free)", 0, 0
+    elif tier == 1:
+        label, low, high = "Prestige I price (0 = Free)", 0, 2**63 - 1
+    else:
+        label, low, high = "Prestige price", 1, 2**63 - 1
+    price = integer(price, label, minimum=low, maximum=high)
     if diamonds not in (None, ""):
         diamonds = integer(diamonds, "Diamond price")
         if diamonds:
@@ -153,8 +162,8 @@ def shop_input(data):
     # already stores. Nothing to reject here: `integer(..., "Price")` above
     # already refuses None/missing, negative, fractional, boolean and
     # malformed input, and a price_diamonds > 0 still makes the item paid in
-    # Diamonds (precedence unchanged). Prestige keeps its own terms: I–V stay
-    # >= 1, VI stays exactly 0 via prestige_terms().
+    # Diamonds (precedence unchanged). Prestige keeps its own terms: I may be 0,
+    # II–V stay >= 1, VI stays exactly 0 via prestige_terms().
     multiplier = data.get("xp_boost_multiplier")
     if multiplier in (None, ""):
         multiplier = None

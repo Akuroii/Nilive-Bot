@@ -1,0 +1,49 @@
+Base commit: ee89aa438e873a9c0184a3ecbb668d181fce2157 (ee89aa4)
+HEAD commit: ee89aa438e873a9c0184a3ecbb668d181fce2157
+Branch: work/streak-prestige-mvp
+Source: current working tree (staged + unstaged + untracked), compared with the base commit.
+Counts: added=13 modified=24 deleted=0
+
+ADDED:
+  A assets/streak/streak_2.gif
+  A assets/streak/streak_3.gif
+  A assets/streak/streak_4.gif
+  A assets/streak/streak_5.gif
+  A assets/streak/streak_6.gif
+  A assets/streak/streak_7.gif
+  A tests/test_mvp_phase3.py
+  A tests/test_prestige_multiplier_audit.py
+  A tests/test_prestige_phase2.py
+  A tests/test_streak_v2_prototype.py
+  A utils/mvp_engine.py
+  A utils/streak_notifications.py
+  A utils/streak_settings.py
+
+MODIFIED:
+  M cogs/mvp.py
+  M cogs/scheduler.py
+  M cogs/shop.py
+  M cogs/wallet.py
+  M dashboard/api/economy_shop.py
+  M dashboard/api/mvp.py
+  M dashboard/static/js/nero-select.js
+  M dashboard/templates/systems/economy.html
+  M dashboard/templates/systems/mvp.html
+  M database.py
+  M scripts/test_prestige.py
+  M scripts/test_vi_lifecycle.py
+  M scripts/test_wallet_phase2.py
+  M test_prestige.py
+  M test_timed_ownership.py
+  M test_vi_lifecycle.py
+  M test_wallet_phase2.py
+  M utils/daily_engine.py
+  M utils/level_ops.py
+  M utils/mission_engine.py
+  M utils/prestige.py
+  M utils/reward_engine.py
+  M utils/shop_validation.py
+  M utils/timed_ownership.py
+
+DELETED:
+  (none)

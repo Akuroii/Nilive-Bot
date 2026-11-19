@@ -9851,7 +9851,8 @@ class SystemToSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
                       "temp_roles", "level_reward_claims", "leveling_rewards",
                       "prestige_roles", "prestige_config", "boost_config",
                       "boost_color_roles", "reaction_roles", "twitch_config",
-                      "mvp_config", "mvp_scores", "mvp_history"):
+                      "mvp_config", "mvp_scores", "mvp_history",
+                      "mvp_cycle_state", "mvp_cycle_scores", "mvp_payouts"):
             execute(f"DELETE FROM {table}")
         from utils.level_claims import ensure_tables
         await ensure_tables()
@@ -10075,9 +10076,14 @@ class SystemToSystemRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 " announce_channel_id, cycle_hours, chat_word_weight,"
                 " voice_minute_weight, enabled) VALUES (?,?,NULL,6,1.0,2.0,1)",
                 (GUILD, int(role_id)))
-        execute("INSERT INTO mvp_scores (guild_id, user_id, date, message_score,"
-                " voice_minutes, total_score) VALUES (?,?,?,0,0,?)",
-                (GUILD, winner.id, get_cairo_daily_key(now), 100))
+        # MVP now ranks the OPEN CYCLE's own scores (mvp_cycle_*), not the
+        # Cairo-day table: open a cycle that began 7h ago (6h long = due).
+        _start = (now - timedelta(hours=7)).isoformat()
+        execute("INSERT INTO mvp_cycle_state (guild_id, cycle_start, cycle_hours)"
+                " VALUES (?,?,6)", (GUILD, _start))
+        execute("INSERT INTO mvp_cycle_scores (guild_id, cycle_start, user_id,"
+                " message_score, voice_minutes, total_score) VALUES (?,?,?,0,0,?)",
+                (GUILD, _start, winner.id, 100))
         execute("INSERT INTO mvp_history (guild_id, user_id, user_display_name,"
                 " cycle_start, cycle_end, score) VALUES (?,?,?,?,?,?)",
                 (GUILD, previous.id, "Previous",
@@ -10204,7 +10210,8 @@ class GrantLevelExclusionTests(unittest.IsolatedAsyncioTestCase):
                       "temp_roles", "level_reward_claims", "leveling_rewards",
                       "prestige_roles", "prestige_config", "boost_config",
                       "boost_color_roles", "reaction_roles", "twitch_config",
-                      "mvp_config", "mvp_scores", "mvp_history"):
+                      "mvp_config", "mvp_scores", "mvp_history",
+                      "mvp_cycle_state", "mvp_cycle_scores", "mvp_payouts"):
             execute(f"DELETE FROM {table}")
         from utils.level_claims import ensure_tables
         await ensure_tables()
@@ -10463,7 +10470,8 @@ class BoosterColourSelectionTests(unittest.IsolatedAsyncioTestCase):
                       "temp_roles", "level_reward_claims", "leveling_rewards",
                       "prestige_roles", "prestige_config", "boost_config",
                       "boost_color_roles", "reaction_roles", "twitch_config",
-                      "mvp_config", "mvp_scores", "mvp_history"):
+                      "mvp_config", "mvp_scores", "mvp_history",
+                      "mvp_cycle_state", "mvp_cycle_scores", "mvp_payouts"):
             execute(f"DELETE FROM {table}")
         from utils.level_claims import ensure_tables
         await ensure_tables()
@@ -10637,6 +10645,7 @@ class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
                       "temp_roles", "level_reward_claims", "prestige_roles",
                       "boost_config", "boost_color_roles", "twitch_config",
                       "mvp_config", "mvp_scores", "mvp_history",
+                      "mvp_cycle_state", "mvp_cycle_scores", "mvp_payouts",
                       "reaction_roles"):
             execute(f"DELETE FROM {table}")
         from utils.level_claims import ensure_tables
@@ -10774,9 +10783,14 @@ class TwitchAndMvpRoleOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 " announce_channel_id, cycle_hours, chat_word_weight,"
                 " voice_minute_weight, enabled) VALUES (?,?,NULL,6,1.0,2.0,1)",
                 (GUILD, int(role_id)))
-        execute("INSERT INTO mvp_scores (guild_id, user_id, date,"
+        # MVP now ranks the OPEN CYCLE's own scores (mvp_cycle_*), not the
+        # Cairo-day table: open a cycle that began 7h ago (6h long = due).
+        _start = (now - timedelta(hours=7)).isoformat()
+        execute("INSERT INTO mvp_cycle_state (guild_id, cycle_start, cycle_hours)"
+                " VALUES (?,?,6)", (GUILD, _start))
+        execute("INSERT INTO mvp_cycle_scores (guild_id, cycle_start, user_id,"
                 " message_score, voice_minutes, total_score) VALUES (?,?,?,0,0,?)",
-                (GUILD, winner.id, get_cairo_daily_key(now), 100))
+                (GUILD, _start, winner.id, 100))
         execute("INSERT INTO mvp_history (guild_id, user_id, user_display_name,"
                 " cycle_start, cycle_end, score) VALUES (?,?,?,?,?,?)",
                 (GUILD, previous.id, "Previous",

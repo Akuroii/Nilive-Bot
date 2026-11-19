@@ -1,16 +1,28 @@
 {% extends "base.html" %}
 {% from "macros/user_identity.html" import user_identity %}
 {% block title %}Economy{% endblock %}
+{% block extra_head %}
+<style>
+.streak-preview-mobile-hint { display: none; }
+@media (max-width: 600px) {
+    .streak-preview-mobile-hint { display: block; }
+}
+</style>
+{% endblock %}
 {% block content %}
 <span data-page-title="Economy"></span>
 
-<div style="display:flex;gap:4px;margin-bottom:20px;
+<div role="tablist" aria-label="Economy settings sections"
+     style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:20px;
             border-bottom:1px solid var(--border);padding-bottom:0;">
     {% for tab, label in [('coins', currency_icon(currency.coins.emoji) ~ ' ' ~ currency.coins.name),
                           ('diamonds', currency_icon(currency.diamonds.emoji) ~ ' ' ~ currency.diamonds.name),
                           ('currency','Currency'),
-                          ('exchange','Exchange Rate')] %}
-    <button onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
+                          ('exchange','Exchange Rate'),
+                          ('streak','Streak Rewards')] %}
+    <button type="button" role="tab" aria-selected="false"
+        aria-controls="tab-content-{{ tab }}" tabindex="-1"
+        onclick="switchTab('{{ tab }}')" id="tab-{{ tab }}"
         style="padding:10px 18px;border:none;background:transparent;
                color:var(--text2);font-size:13px;font-weight:500;
                cursor:pointer;border-bottom:2px solid transparent;
@@ -20,7 +32,7 @@
 </div>
 
 <!-- COINS TAB -->
-<div id="tab-content-coins" class="tab-content">
+<div id="tab-content-coins" class="tab-content" role="tabpanel" aria-labelledby="tab-coins" tabindex="0">
     <div class="card">
         <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Richest {{ currency.coins.name }} Holders</div>
         <div class="table-wrap">
@@ -50,7 +62,7 @@
 </div>
 
 <!-- DIAMONDS TAB -->
-<div id="tab-content-diamonds" class="tab-content" style="display:none;">
+<div id="tab-content-diamonds" class="tab-content" role="tabpanel" aria-labelledby="tab-diamonds" tabindex="0" style="display:none;">
     <div class="card">
         <div class="card-title">{{ currency_icon(currency.diamonds.emoji) }} {{ currency.diamonds.name }} Holders</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
@@ -85,7 +97,7 @@
 </div>
 
 <!-- CURRENCY TAB -->
-<div id="tab-content-currency" class="tab-content" style="display:none;">
+<div id="tab-content-currency" class="tab-content" role="tabpanel" aria-labelledby="tab-currency" tabindex="0" style="display:none;">
     <div class="card">
         <div class="card-title">{{ currency_icon(currency.coins.emoji) }} Currency Names &amp; Icons</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
@@ -168,7 +180,7 @@
 </div>
 
 <!-- EXCHANGE RATE TAB -->
-<div id="tab-content-exchange" class="tab-content" style="display:none;">
+<div id="tab-content-exchange" class="tab-content" role="tabpanel" aria-labelledby="tab-exchange" tabindex="0" style="display:none;">
     <div class="card">
         <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-sliders"></use></svg> {{ currency.coins.name }} ↔ {{ currency.diamonds.name }} Exchange Rate</div>
         <p class="text-muted text-sm" style="margin-bottom:16px;">
@@ -190,6 +202,97 @@
     </div>
 </div>
 
+<!-- DAILY / STREAK CONFIGURATION TAB -->
+<div id="tab-content-streak" class="tab-content" role="tabpanel" aria-labelledby="tab-streak" tabindex="0" style="display:none;">
+    <div class="card">
+        <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-calendar"></use></svg> Daily &amp; Streak Rewards</div>
+        <p class="text-muted text-sm" style="margin-bottom:16px;">
+            Daily and Streak are one reward. Days 1–5 pay a fixed amount each; from day 6 onward the
+            reward is a random amount between the Day 6+ minimum and maximum, every day, with no cycle reset.
+            The existing Prestige multiplier is applied once to that stage reward. A missed day returns the
+            next claim to day 1; changes affect the next successful claim and never reset streaks.
+            Leave all six reward fields blank to keep this server on the legacy Daily range and flat bonus.
+        </p>
+        <p id="streak-config-scope" class="text-muted text-sm" role="status" aria-live="polite" style="margin-bottom:16px;"></p>
+        <form id="streak-settings-form" data-ux-track-dirty
+              style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;">
+            <div class="form-group">
+                <label class="form-label" for="streak-stage-1">Day 1 reward</label>
+                <input class="form-input streak-reward-input" id="streak-stage-1" type="number" min="1" max="1000000000" step="1" placeholder="Not configured">
+                <div class="form-hint">Fixed whole primary-currency amount, before Prestige.</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="streak-stage-2">Day 2 reward</label>
+                <input class="form-input streak-reward-input" id="streak-stage-2" type="number" min="1" max="1000000000" step="1" placeholder="Not configured">
+                
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="streak-stage-3">Day 3 reward</label>
+                <input class="form-input streak-reward-input" id="streak-stage-3" type="number" min="1" max="1000000000" step="1" placeholder="Not configured">
+                
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="streak-stage-4">Day 4 reward</label>
+                <input class="form-input streak-reward-input" id="streak-stage-4" type="number" min="1" max="1000000000" step="1" placeholder="Not configured">
+                
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="streak-stage-5">Day 5 reward</label>
+                <input class="form-input streak-reward-input" id="streak-stage-5" type="number" min="1" max="1000000000" step="1" placeholder="Not configured">
+                
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="streak-stage6-min">Day 6+ minimum</label>
+                <input class="form-input streak-reward-input" id="streak-stage6-min" type="number" min="1" max="1000000000" step="1" placeholder="Not configured">
+                <div class="form-hint">Inclusive. Applies on day 6 and every day after.</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="streak-stage6-max">Day 6+ maximum</label>
+                <input class="form-input streak-reward-input" id="streak-stage6-max" type="number" min="1" max="1000000000" step="1" placeholder="Not configured">
+                <div class="form-hint">One random amount is rolled per successful claim.</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label" for="streak-receipt-mode">Receipt visibility</label>
+                <select class="form-input" id="streak-receipt-mode">
+                    <option value="private">Private — member only</option>
+                    <option value="public">Public — configured channel</option>
+                    <option value="both">Both — private and public</option>
+                </select>
+                <div class="form-hint">Wallet itself always stays private. Missing channel access never blocks a reward.</div>
+            </div>
+            <div class="form-group" id="streak-channel-wrap">
+                <label class="form-label" for="streak-receipt-channel">Public receipt channel</label>
+                <select class="form-input nero-channel-picker" id="streak-receipt-channel"
+                        data-value="" data-allowed-channel-types="0,5">
+                    <option value=""></option>
+                </select>
+                <div class="form-hint">Optional for Public or Both; only text and announcement channels are listed. The bot needs send permission. If unset or unavailable, no alternate channel is used and the reward still succeeds.</div>
+            </div>
+            <div style="grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <button type="button" class="btn btn-primary" id="streak-settings-save"
+                        onclick="saveStreakSettings(this)">Save Daily &amp; Streak Settings</button>
+                <span id="streak-settings-status" class="form-save-state" data-ux-save-state aria-live="polite" style="font-size:13px;"></span>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Six-stage reward preview</div>
+        <p class="text-muted text-sm" style="margin-bottom:14px;">
+            Pre-Prestige reward for each stage as currently typed. Prestige multiplies this amount once at claim time.
+        </p>
+        <div class="table-wrap" role="region" tabindex="0" aria-label="Six-stage reward preview">
+            <table class="table streak-preview-table">
+                <thead><tr><th>Stage</th><th>Reward before Prestige</th></tr></thead>
+                <tbody id="streak-preview-rows">
+                    <tr><td colspan="2" class="empty">Loading settings…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div id="streak-legacy-note" class="form-hint" style="margin-top:12px;"></div>
+    </div>
+</div>
+
 <script>
 (function () {
 // Re-published for the markup's inline handlers (onclick/onchange) and for
@@ -206,6 +309,8 @@ __neroGlobal.updateCurrencyPreviewText = updateCurrencyPreviewText;
 __neroGlobal.currentCurrencyPayload = currentCurrencyPayload;
 __neroGlobal.saveCurrency = saveCurrency;
 __neroGlobal.resetCurrency = resetCurrency;
+__neroGlobal.saveStreakSettings = saveStreakSettings;
+__neroGlobal.updateStreakPreview = updateStreakPreview;
 
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
@@ -213,12 +318,29 @@ function switchTab(name) {
     document.querySelectorAll('.tab-btn').forEach(btn => {
         btn.style.borderBottomColor = 'transparent';
         btn.style.color = 'var(--text2)';
+        btn.setAttribute('aria-selected', 'false');
+        btn.tabIndex = -1;
     });
     const active = document.getElementById('tab-' + name);
     active.style.borderBottomColor = 'var(--accent)';
     active.style.color = 'var(--text)';
+    active.setAttribute('aria-selected', 'true');
+    active.tabIndex = 0;
 }
 switchTab('coins');
+document.querySelectorAll('.tab-btn').forEach((btn, index, all) => {
+    btn.addEventListener('keydown', event => {
+        let next = index;
+        if (event.key === 'ArrowRight') next = (index + 1) % all.length;
+        else if (event.key === 'ArrowLeft') next = (index + all.length - 1) % all.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = all.length - 1;
+        else return;
+        event.preventDefault();
+        all[next].focus();
+        all[next].click();
+    });
+});
 
 async function saveExchangeRate() {
     const rate = parseInt(document.getElementById('exchange-rate-input').value);
@@ -342,6 +464,143 @@ function resetCurrency() {
 renderCurrencyPreview('cur-coin-emoji', 'cur-coin-preview', CUR_DEFAULTS.coin_emoji);
 renderCurrencyPreview('cur-diamond-emoji', 'cur-diamond-preview', CUR_DEFAULTS.diamond_emoji);
 updateCurrencyPreviewText();
+
+// ── Per-guild Daily / Streak V2 settings ───────────────────────────────
+const STREAK_REWARD_IDS = ['streak-stage-1','streak-stage-2','streak-stage-3','streak-stage-4',
+                           'streak-stage-5','streak-stage6-min','streak-stage6-max'];
+
+function _streakRaw(id) {
+    return String(document.getElementById(id).value || '').trim();
+}
+
+// Returns {error} | {blank:true} | {stages:[5], min, max}
+function _readStreakRewards() {
+    const raws = STREAK_REWARD_IDS.map(_streakRaw);
+    if (raws.every(v => v === '')) return { blank: true };
+    if (raws.some(v => v === '')) return { error: 'Fill all six reward stages, or leave all of them blank.' };
+    const nums = raws.map(Number);
+    if (!nums.every(n => Number.isInteger(n) && n >= 1 && n <= 1000000000)) {
+        return { error: 'Rewards must be whole numbers from 1 to 1,000,000,000.' };
+    }
+    if (nums[6] < nums[5]) return { error: 'Day 6+ maximum must be greater than or equal to the minimum.' };
+    return { stages: nums.slice(0, 5), min: nums[5], max: nums[6] };
+}
+
+function updateStreakPreview() {
+    const rows = document.getElementById('streak-preview-rows');
+    const note = document.getElementById('streak-legacy-note');
+    const fmt = value => Number(value).toLocaleString();
+    const r = _readStreakRewards();
+    if (r.blank) {
+        rows.innerHTML = '<tr><td colspan="2" class="empty">No reward table configured.</td></tr>';
+        note.textContent = 'All reward fields are blank: this server keeps the legacy Daily range and flat streak bonus.';
+        return;
+    }
+    if (r.error) {
+        rows.innerHTML = `<tr><td colspan="2" class="empty">${r.error}</td></tr>`;
+        note.textContent = '';
+        return;
+    }
+    let html = '';
+    r.stages.forEach((amount, i) => {
+        html += `<tr><td><strong>Day ${i + 1}</strong></td><td>${fmt(amount)}</td></tr>`;
+    });
+    html += `<tr><td><strong>Day 6 and later</strong></td><td>${fmt(r.min)} – ${fmt(r.max)} (random each day)</td></tr>`;
+    rows.innerHTML = html;
+    note.textContent = 'Applies to the next successful claim. Current streaks are not reset.';
+}
+
+function updateStreakChannelMode() {
+    const mode = document.getElementById('streak-receipt-mode').value;
+    document.getElementById('streak-receipt-channel').disabled = (mode === 'private');
+}
+
+function setSavedStreakSettings(settings) {
+    const scopeNotes = [];
+    scopeNotes.push(settings.reward_table
+        ? 'A reward table is saved specifically for this server.'
+        : 'No reward table is saved for this server: it currently uses the legacy global Daily range and flat streak bonus.');
+    scopeNotes.push(settings.receipt_mode_source === 'guild'
+        ? 'Receipt visibility is saved specifically for this guild.'
+        : 'No guild-specific receipt setting is saved; the current effective mode is Private.');
+    document.getElementById('streak-config-scope').textContent = scopeNotes.join(' ');
+    const table = settings.reward_table;
+    STREAK_REWARD_IDS.forEach((id, i) => {
+        document.getElementById(id).value = !table ? ''
+            : (i < 5 ? table.stages[i] : (i === 5 ? table.stage6_min : table.stage6_max));
+    });
+    document.getElementById('streak-receipt-mode').value = settings.receipt_visibility || 'private';
+    const picker = document.getElementById('streak-receipt-channel');
+    const channelId = settings.receipt_channel_id == null ? '' : String(settings.receipt_channel_id);
+    picker.dataset.value = channelId;
+    if (channelId && Array.from(picker.options).some(opt => opt.value === channelId)) {
+        picker.value = channelId;
+        if (window.jQuery) window.jQuery(picker).trigger('change.select2');
+    }
+    updateStreakChannelMode();
+    updateStreakPreview();
+}
+
+async function loadStreakSettings() {
+    try {
+        const res = await fetch('/api/economy/streak-settings');
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Could not load Streak settings');
+        setSavedStreakSettings(data.settings);
+        const picker = document.getElementById('streak-receipt-channel');
+        if (window.NeroSelect && !window.NeroSelect.isReady(picker)) {
+            await window.NeroSelect.initOne(picker, 'channel');
+        }
+        const id = data.settings.receipt_channel_id && String(data.settings.receipt_channel_id);
+        if (id) {
+            const picker = document.getElementById('streak-receipt-channel');
+            const deadline = Date.now() + 5000;
+            while (Date.now() < deadline && !Array.from(picker.options).some(opt => opt.value === id)) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            if (Array.from(picker.options).some(opt => opt.value === id)) {
+                picker.value = id;
+                if (window.jQuery) window.jQuery(picker).trigger('change.select2');
+            } else {
+                document.getElementById('streak-settings-status').textContent =
+                    'The saved receipt channel is unavailable or unsupported. Choose a text/announcement channel, or leave it blank to disable the public copy; the reward still succeeds.';
+            }
+        }
+    } catch (error) {
+        document.getElementById('streak-settings-status').textContent = error.message;
+    }
+}
+
+async function saveStreakSettings(btn) {
+    const form = document.getElementById('streak-settings-form');
+    const status = document.getElementById('streak-settings-status');
+    if (!form.reportValidity()) return;
+    const rewards = _readStreakRewards();
+    if (rewards.error) {
+        status.textContent = rewards.error;
+        status.dataset.state = 'error';
+        return;
+    }
+    delete status.dataset.state;
+    const payload = {
+        stages: rewards.blank ? ['', '', '', '', ''] : rewards.stages,
+        stage6_min: rewards.blank ? '' : rewards.min,
+        stage6_max: rewards.blank ? '' : rewards.max,
+        receipt_visibility: document.getElementById('streak-receipt-mode').value,
+        receipt_channel_id: document.getElementById('streak-receipt-channel').value,
+    };
+    const data = await ajaxSave('/api/economy/streak-settings', payload, btn,
+                                'Daily & Streak settings saved!');
+    if (data && data.success && data.settings) setSavedStreakSettings(data.settings);
+}
+
+STREAK_REWARD_IDS.forEach(id => {
+    document.getElementById(id).addEventListener('input', updateStreakPreview);
+});
+document.getElementById('streak-receipt-mode').addEventListener('change', updateStreakChannelMode);
+document.getElementById('streak-receipt-channel').dataset.value = '';
+updateStreakPreview();
+loadStreakSettings();
 
 })();
 </script>

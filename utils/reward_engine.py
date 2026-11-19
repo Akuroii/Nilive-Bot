@@ -45,9 +45,14 @@ async def give_reward(bot: discord.Client,
                        defer_retry_seconds: float | None = None,
                        idempotency_key: str | None = None,
                        op_id: str | None = None,
+                       db: aiosqlite.Connection | None = None,
                        metadata_extra: dict | None = None,
                        park_on_conflict: bool = True) -> dict:
     """...
+
+    ``db`` (coins/diamonds credits only) joins the caller's open transaction so a
+    credit, its ledger row and the caller's own bookkeeping commit or roll back
+    together; the caller commits. The Prestige multiplier is still applied here.
 
     An `item` / `role` / `temp_role` reward the Inventory refuses because the
     member owns a different kind of item under the same name is never dropped:
@@ -96,8 +101,11 @@ async def give_reward(bot: discord.Client,
                 if final_amount == 0 and amount > 0:
                     final_amount = amount
                 await safe_credit(guild_id, user_id, final_amount,
-                                   currency=currency, reason=reason, source=source)
+                                   currency=currency, reason=reason, source=source,
+                                   db=db)
             else:
+                if db is not None:
+                    raise RewardError("a caller-owned transaction only supports credits")
                 final_amount = amount
                 await safe_deduct(guild_id, user_id, -amount,
                                    currency=currency, reason=reason, source=source)
@@ -105,11 +113,17 @@ async def give_reward(bot: discord.Client,
             return {"success": False, "reward_type": reward_type,
                     "error": "Insufficient balance for this deduction"}
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
+        if db is not None:
+            # Read inside the caller's transaction: its credit is uncommitted.
+            row = await (await db.execute(
                 f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
-                (guild_id, user_id))
-            row = await cursor.fetchone()
+                (guild_id, user_id))).fetchone()
+        else:
+            async with aiosqlite.connect(DB_PATH) as read_db:
+                cursor = await read_db.execute(
+                    f"SELECT {currency} FROM economy WHERE guild_id=? AND user_id=?",
+                    (guild_id, user_id))
+                row = await cursor.fetchone()
         return {"success": True, "reward_type": reward_type,
                 "amount": final_amount, "new_balance": row[0] if row else 0}
 
@@ -179,7 +193,7 @@ async def give_reward(bot: discord.Client,
         drained = None
         try:
             from utils import level_ops as ops
-            drained = await ops.drain_xp_grants(guild_id, user_id)
+            drained = await ops.drain_xp_grants(guild_id, user_id, bot=bot)
         except Exception as exc:
             # A drain failure must never cost the award being granted now.
             print(f"[XP] pending-grant drain failed (guild={guild_id} "
@@ -248,7 +262,8 @@ async def give_reward(bot: discord.Client,
             blocked = None
             while True:
                 out = await ops.drain_xp_grants(guild_id, user_id,
-                                                idem_key=idempotency_key)
+                                                idem_key=idempotency_key,
+                                                bot=bot)
                 if out["applied"]:
                     granted = out["applied"][0]
                     new_xp = int(granted["new_xp"])

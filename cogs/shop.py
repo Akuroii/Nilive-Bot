@@ -100,6 +100,92 @@ async def process_purchase(interaction: discord.Interaction,
         return await _process_purchase(interaction, item_id)
 
 
+async def _complete_prestige_purchase(interaction: discord.Interaction, *,
+                                      guild_id: int, user_id: int, item_id: int,
+                                      item_name: str, tier: int, price: int):
+    """Runs the confirmed I-V purchase and answers the Confirm-button click."""
+    from utils.prestige import (
+        purchase_prestige, PrestigeError, tier_label, sync_prestige_roles,
+    )
+    try:
+        result = await purchase_prestige(
+            guild_id, user_id, tier, price,
+            item_name=item_name, item_id=item_id,
+            display_name=interaction.user.display_name,
+        )
+    except PrestigeError as e:
+        await interaction.response.edit_message(content=str(e), embed=None, view=None)
+        return
+
+    # Sync the cosmetic roles to the member's TRUE effective tier
+    # (sync_prestige_roles computes it from permanent + booster status), so an
+    # active Booster keeps wearing their tier-VI role even after buying a
+    # permanent tier. Roles are representation only.
+    try:
+        await sync_prestige_roles(
+            interaction.client, interaction.guild, interaction.user)
+    except Exception as e:
+        print(f"[SHOP] Prestige role sync failed: {e}")
+
+    cur = await get_currency_config(guild_id)
+    cc = cur["coins"]
+    embed = discord.Embed(
+        title="⭐ Prestige Unlocked",
+        description=(
+            f"{interaction.user.mention} is now **Prestige "
+            f"{tier_label(result['new_tier'])}**."),
+        color=0xFFD700)
+    embed.add_field(
+        name=f"{cc['name']} reset",
+        value=f"Your {cc['emoji']} **{cc['name']}** were reset to **0**.",
+        inline=False)
+    embed.add_field(
+        name=f"Level / XP / {cur['diamonds']['name']}",
+        value=(f"**Untouched** — your level, XP and "
+               f"{cur['diamonds']['emoji']} {cur['diamonds']['name']} are safe."),
+        inline=False)
+    await interaction.response.edit_message(content=None, embed=embed, view=None)
+
+
+class PrestigeConfirmView(discord.ui.View):
+    """Confirm/Cancel for Prestige I-V. Only the buyer can press it."""
+
+    def __init__(self, user_id: int, guild_id: int, item_id: int,
+                 item_name: str, tier: int, price: int):
+        super().__init__(timeout=60)
+        self.user_id, self.guild_id = user_id, guild_id
+        self.item_id, self.item_name = item_id, item_name
+        self.tier, self.price = tier, price
+        self._used = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This confirmation belongs to someone else.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm & reset Coins", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._used:
+            await interaction.response.send_message(
+                "Already processed.", ephemeral=True)
+            return
+        self._used = True
+        self.stop()
+        await _complete_prestige_purchase(
+            interaction, guild_id=self.guild_id, user_id=self.user_id,
+            item_id=self.item_id, item_name=self.item_name,
+            tier=self.tier, price=self.price)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._used = True
+        self.stop()
+        await interaction.response.edit_message(
+            content="Purchase cancelled. Nothing was changed.", embed=None, view=None)
+
+
 async def _process_purchase(interaction: discord.Interaction,
                             item_id: int):
     guild_id = interaction.guild.id
@@ -273,48 +359,33 @@ async def _process_purchase(interaction: discord.Interaction,
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
 
-        from utils.prestige import (
-            purchase_prestige, PrestigeError, tier_label,
-            sync_prestige_roles,
-        )
-        try:
-            result = await purchase_prestige(
-                guild_id, user_id, int(prestige_tier), price,
-                item_name=name, item_id=iid,
-                display_name=interaction.user.display_name,
-            )
-        except PrestigeError as e:
-            await interaction.response.send_message(str(e), ephemeral=True)
-            return
-
-        # Sync the cosmetic roles to the member's TRUE effective tier
-        # (sync_prestige_roles computes it from permanent + booster status),
-        # so an active Booster keeps wearing their tier-VI role even after
-        # buying a permanent tier. Roles are representation only.
-        try:
-            await sync_prestige_roles(
-                interaction.client, interaction.guild, interaction.user)
-        except Exception as e:
-            print(f"[SHOP] Prestige role sync failed: {e}")
-
+        # I-V reset Coins, so the member must confirm first. Nothing is
+        # written until the Confirm button; the backend still enforces
+        # sequence/no-rebuy/balance when it runs.
+        from utils.prestige import tier_label
         cur = await get_currency_config(guild_id)
         cc = cur["coins"]
-        embed = discord.Embed(
-            title="⭐ Prestige Unlocked",
+        async with aiosqlite.connect(DB_PATH) as db:
+            row = await (await db.execute(
+                "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id))).fetchone()
+        balance = int(row[0]) if row and row[0] else 0
+        warning = discord.Embed(
+            title=f"⚠️ Confirm Prestige {tier_label(int(prestige_tier))}",
             description=(
-                f"{interaction.user.mention} is now **Prestige "
-                f"{tier_label(result['new_tier'])}**."),
-            color=0xFFD700)
-        embed.add_field(
-            name=f"{cc['name']} reset",
-            value=f"Your {cc['emoji']} **{cc['name']}** were reset to **0**.",
+                f"Buying **Prestige {tier_label(int(prestige_tier))}** will reset your "
+                f"{cc['emoji']} **{cc['name']}** to **0**.\n"
+                f"You currently have **{balance:,}** {cc['name']}."),
+            color=0xE67E22)
+        warning.add_field(
+            name="Not affected",
+            value=(f"Your level, XP, {cur['diamonds']['emoji']} "
+                   f"{cur['diamonds']['name']}, Streak and daily claims stay as they are."),
             inline=False)
-        embed.add_field(
-            name=f"Level / XP / {cur['diamonds']['name']}",
-            value=(f"**Untouched** — your level, XP and "
-                   f"{cur['diamonds']['emoji']} {cur['diamonds']['name']} are safe."),
-            inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        warning.set_footer(text="This cannot be undone. Confirm within 60 seconds.")
+        await interaction.response.send_message(
+            embed=warning, ephemeral=True,
+            view=PrestigeConfirmView(user_id, guild_id, iid, name, int(prestige_tier), price))
         return
 
     async with aiosqlite.connect(DB_PATH) as db:

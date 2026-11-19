@@ -1,4 +1,5 @@
 import discord
+from pathlib import Path
 from discord.ext import commands
 from discord import app_commands
 
@@ -446,99 +447,190 @@ async def render_hub(interaction: discord.Interaction, guild_id: int,
 
 # ─── Streak ─────────────────────────────────────────────────────────────
 
-def build_streak_embed(preview: dict, currency: dict) -> discord.Embed:
-    """
-    Streak panel. Two states:
+STREAK_STAGE_FILENAMES = {
+    1: "streak_2.gif",
+    2: "streak_3.gif",
+    3: "streak_4.gif",
+    4: "streak_5.gif",
+    5: "streak_6.gif",
+    6: "streak_7.gif",
+}
+STREAK_ASSET_DIR = Path(__file__).resolve().parents[1] / "assets" / "streak"
 
-    NOT claimed yet:
-        Daily Reward  · Up to <max> <coin>
-        Streak        · Day <next_streak>
-        Bonus         · +<bonus> <coin>
-        (No Cooldown field — Claim button is the call to action.)
 
-    Already claimed today:
-        Daily Reward  · Already claimed
-        Streak        · Day <streak>
-        Cooldown      · <remaining>
-        (No Bonus field — bonus was already paid.)
+def streak_stage_path(stage: int, asset_dir: Path | None = None) -> Path | None:
+    stage = min(6, max(1, int(stage)))
+    path = (asset_dir or STREAK_ASSET_DIR) / STREAK_STAGE_FILENAMES[stage]
+    return path if path.is_file() and path.stat().st_size > 0 else None
 
-    The post-claim state (build_claim_embed) renders the mock exactly:
-    Daily Reward as the actual earned amount, Bonus as the awarded
-    bonus, Streak Day N, Cooldown. Pre-claim we cannot show an exact
-    coin number because the roll is random — "Up to <max>" is a
-    single, honest ceiling rather than a fake or averaged number.
-    """
+
+def _apply_stage_image(embed: discord.Embed, stage: int) -> None:
+    filename = STREAK_STAGE_FILENAMES[min(6, max(1, int(stage)))]
+    if streak_stage_path(stage):
+        embed.set_image(url=f"attachment://{filename}")
+
+
+def build_streak_embed(preview: dict, currency: dict,
+                       member_name: str | None = None) -> discord.Embed:
+    """Private current-state/next-claim panel with the active stage GIF."""
     cc = currency["coins"]
+    stage = int(preview.get("stage") or min(6, max(1, preview.get("next_streak", 1))))
     embed = discord.Embed(title="🔥 STREAK", color=STREAK_COLOR)
+    if member_name:
+        embed.set_author(name=f"{member_name} · Streak")
+    _apply_stage_image(embed, stage)
 
-    if preview["claimed_today"]:
-        embed.add_field(
-            name="Daily Reward",
-            value="Already claimed",
-            inline=True)
-        embed.add_field(
-            name="Streak",
-            value=f"Day **{preview['streak']}**",
-            inline=True)
-        embed.add_field(
-            name="Cooldown",
-            value=f"**{format_remaining(preview['seconds_remaining'])}**",
-            inline=True)
+    if preview.get("broken"):
+        last_date = preview.get("last_claim_date") or "Unknown"
+        elapsed = preview.get("days_since_last_claim")
+        elapsed_text = f"{elapsed} Cairo calendar days" if elapsed is not None else "unknown"
+        embed.description = (
+            "Your Streak is **broken** because a full Cairo calendar day was missed. "
+            "Your next successful claim starts at **Stage 1**."
+        )
+        embed.add_field(name="Current Streak", value="**0 days**", inline=True)
+        embed.add_field(name="Last successful claim", value=last_date, inline=True)
+        embed.add_field(name="Days since last claim", value=elapsed_text, inline=True)
         return embed
 
-    # Pre-claim: max possible = daily_max + next_bonus (ignoring
-    # prestige multiplier, which is user-specific and cannot be
-    # predicted without reading booster state here — kept simple).
-    bonus = int(preview.get("next_bonus") or 0)
-    hi = int(preview.get("daily_max") or 0)
-    max_possible = hi + bonus
+    if preview["claimed_today"]:
+        embed.add_field(name="Current Streak",
+                        value=f"**{preview['streak']} days** · Stage **{stage}**", inline=True)
+        embed.add_field(name="Daily Reward", value="Already claimed today", inline=True)
+        embed.add_field(name="Next claim", value=f"**{format_remaining(preview['seconds_remaining'])}**", inline=True)
+        return embed
+
+    daily_low = int(preview.get("daily_min", 0))
+    daily_high = int(preview.get("daily_max", 0))
+    total_low = int(preview.get("next_total_min", daily_low))
+    total_high = int(preview.get("next_total_max", daily_high))
+    bonus_low = int(preview.get("next_bonus_min", preview.get("next_bonus", 0)) or 0)
+    bonus_high = int(preview.get("next_bonus_max", preview.get("next_bonus", 0)) or 0)
     embed.add_field(
-        name="Daily Reward",
-        value=f"Up to **{max_possible:,}** {cc['emoji']} {cc['name']}"
-              if max_possible > 0 else f"Claim to receive {cc['emoji']} {cc['name']}",
+        name="Current Streak",
+        value=f"**{preview['streak']} days**" if preview["streak"] else "**0 days**",
         inline=True)
     embed.add_field(
-        name="Streak",
-        value=f"Day **{preview['next_streak']}**",
+        name="Next Claim",
+        value=f"Day **{preview['next_streak']}** · Stage **{stage}**",
+        inline=True)
+    if preview.get("v2_enabled"):
+        reward_text = (f"{daily_low:,}–{daily_high:,}" if daily_low != daily_high
+                       else f"{daily_high:,}")
+        embed.add_field(
+            name=f"Stage {stage} Reward · before Prestige",
+            value=f"{cc['emoji']} **{reward_text}** {cc['name']}",
+            inline=True)
+        if preview.get("last_claim_date"):
+            embed.set_footer(text=f"Last successful claim: {preview['last_claim_date']} · Africa/Cairo")
+        return embed
+    embed.add_field(
+        name="Daily Rewards · Base roll",
+        value=f"{cc['emoji']} **{daily_low:,}–{daily_high:,}** {cc['name']}",
+        inline=True)
+    bonus_text = (f"{bonus_low:,}–{bonus_high:,}" if bonus_low != bonus_high
+                  else f"{bonus_high:,}")
+    embed.add_field(
+        name="Current legacy Streak bonus",
+        value=f"+**{bonus_text}** {cc['name']} · before Prestige",
         inline=True)
     embed.add_field(
-        name="Bonus",
-        value=f"+**{bonus:,}** {cc['name']}" if bonus > 0 else "—",
+        name="Estimated total · pre-Prestige",
+        value=f"{cc['emoji']} **{total_low:,}–{total_high:,}** {cc['name']}",
         inline=True)
+    if preview.get("last_claim_date"):
+        embed.set_footer(text=f"Last successful claim: {preview['last_claim_date']} · Africa/Cairo")
     return embed
 
 
-def build_claim_embed(result: dict, currency: dict) -> discord.Embed:
-    """
-    Post-claim receipt — matches the spec's mock exactly:
-       Daily Reward   132 Coins
-       Streak         Day 7
-       Bonus          +32 Coins
-       Cooldown       2h 15m
-    The prestige multiplier is folded into the awarded amount rather
-    than shown as a separate line (it is already accounted for in the
-    number the member receives, and surfacing it as a math line adds
-    internal noise).
-    """
+def build_claim_embed(result: dict, currency: dict,
+                      member_name: str | None = None,
+                      public_copy_sent: bool | None = None) -> discord.Embed:
+    """Claim receipt whose pre-Prestige breakdown exactly reconciles to credit."""
     cc = currency["coins"]
-    embed = discord.Embed(title="🔥 STREAK", color=STREAK_COLOR)
-    embed.add_field(
-        name="Daily Reward",
-        value=f"{cc['emoji']} **{result['amount']:,}** {cc['name']}",
-        inline=True)
-    embed.add_field(
-        name="Streak",
-        value=f"Day **{result['streak']}**",
-        inline=True)
+    credited = int(result.get("credited_total", result["amount"]))
+    base = int(result["base"])
     bonus = int(result.get("streak_bonus") or 0)
+    subtotal = int(result.get("pre_prestige_total", base + bonus))
+    multiplier = float(result.get("multiplier", 1.0))
+    name = member_name or result.get("member_name") or "Member"
+    mention = (f"<@{int(result['user_id'])}>" if result.get("user_id") else "")
+    identity = f"{name} · {mention}" if mention else name
+    embed = discord.Embed(
+        title="🔥 Daily Streak Reward",
+        description=f"{identity} claimed their daily Streak reward.",
+        color=STREAK_COLOR,
+    )
+    if result.get("v2_enabled"):
+        embed.add_field(
+            name=f"Stage {result['stage']} Reward",
+            value=f"{cc['emoji']} **{base:,}** {cc['name']} · before Prestige",
+            inline=True,
+        )
+        embed.add_field(
+            name="Reward calculation",
+            value=(f"Stage reward {base:,} × Prestige ×{multiplier:g} → "
+                   f"**{credited:,} {cc['name']} credited**"),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Daily Rewards",
+            value=f"{cc['emoji']} **{base:,}** {cc['name']} (base roll)",
+            inline=True,
+        )
+        embed.add_field(
+            name=f"Streak Bonus · Stage {result['stage']}",
+            value=f"+**{bonus:,}** {cc['name']}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Reward calculation",
+            value=(f"({base:,} + {bonus:,}) = {subtotal:,} before Prestige\n"
+                   f"Prestige ×{multiplier:g} → **{credited:,} {cc['name']} credited**"),
+            inline=False,
+        )
     embed.add_field(
-        name="Bonus",
-        value=f"+**{bonus:,}** {cc['name']}" if bonus > 0 else "—",
-        inline=True)
+        name="Current Streak",
+        value=f"Day **{result['streak']}** · Stage **{result['stage']}**",
+        inline=True,
+    )
     embed.add_field(
-        name="Cooldown",
+        name="Next claim",
         value=f"**{format_remaining(result['next_reset_seconds'])}**",
-        inline=True)
+        inline=True,
+    )
+    if public_copy_sent is False:
+        embed.add_field(
+            name="Public receipt",
+            value="The configured channel was unavailable; your reward is still credited.",
+            inline=False,
+        )
+    _apply_stage_image(embed, int(result["stage"]))
+    return embed
+
+
+def build_public_only_ack_embed(result: dict, public_copy_sent: bool,
+                                currency: dict) -> discord.Embed:
+    """Private Wallet-panel acknowledgement when the guild selected Public only."""
+    cc = currency["coins"]
+    credited = int(result.get("credited_total", result["amount"]))
+    embed = discord.Embed(title="🔥 Streak claim complete", color=STREAK_COLOR)
+    if public_copy_sent:
+        embed.description = (
+            f"**{credited:,} {cc['name']}** credited. The full receipt was posted "
+            "in the configured channel."
+        )
+    else:
+        embed.description = (
+            f"**{credited:,} {cc['name']}** credited, but the configured receipt "
+            "channel could not be reached. No alternate channel was used."
+        )
+    embed.add_field(name="Current Streak",
+                    value=f"Day **{result['streak']}** · Stage **{result['stage']}**", inline=True)
+    embed.add_field(name="Next claim",
+                    value=f"**{format_remaining(result['next_reset_seconds'])}**", inline=True)
+    _apply_stage_image(embed, int(result["stage"]))
     return embed
 
 
@@ -546,24 +638,50 @@ def build_streak_already_claimed_embed(seconds_remaining: int,
                                        preview: dict,
                                        currency: dict) -> discord.Embed:
     """Rendered if Claim loses a race (e.g. claimed from another entry point)."""
-    cc = currency["coins"]
     embed = discord.Embed(
         title="🔥 STREAK",
         description="Already claimed today.",
         color=STREAK_COLOR)
-    embed.add_field(
-        name="Daily Reward",
-        value=f"{cc['emoji']} Already claimed",
-        inline=True)
-    embed.add_field(
-        name="Streak",
-        value=f"Day **{preview['streak']}**",
-        inline=True)
-    embed.add_field(
-        name="Cooldown",
-        value=f"**{format_remaining(seconds_remaining)}**",
-        inline=True)
+    embed.add_field(name="Current Streak",
+                    value=f"Day **{preview['streak']}** · Stage **{preview.get('stage', 1)}**", inline=True)
+    embed.add_field(name="Next claim",
+                    value=f"**{format_remaining(seconds_remaining)}**", inline=True)
+    _apply_stage_image(embed, int(preview.get("stage") or 1))
     return embed
+
+
+def _stage_file(stage: int) -> discord.File | None:
+    path = streak_stage_path(stage)
+    if path is None:
+        return None
+    try:
+        return discord.File(str(path), filename=STREAK_STAGE_FILENAMES[min(6, max(1, int(stage)))])
+    except (OSError, ValueError):
+        return None
+
+
+async def send_public_claim_receipt(bot, result: dict, currency: dict) -> bool:
+    """Render a separate public copy of the already-calculated claim result."""
+    channel_id = result.get("receipt_channel_id")
+    if not result.get("receipt_public") or not channel_id:
+        return False
+    try:
+        channel = bot.get_channel(int(channel_id))
+        if channel is None:
+            channel = await bot.fetch_channel(int(channel_id))
+        guild = getattr(channel, "guild", None)
+        if guild is None or int(guild.id) != int(result.get("guild_id", 0)):
+            return False
+        embed = build_claim_embed(result, currency)
+        file = _stage_file(int(result["stage"]))
+        kwargs = {"embed": embed, "allowed_mentions": discord.AllowedMentions.none()}
+        if file is not None:
+            kwargs["file"] = file
+        await channel.send(**kwargs)
+        return True
+    except Exception as exc:
+        print(f"[STREAK] public receipt failed; claim remains credited: {exc}")
+        return False
 
 
 class StreakPanelView(WalletBaseView):
@@ -575,29 +693,59 @@ class StreakPanelView(WalletBaseView):
                        style=discord.ButtonStyle.success)
     async def claim_button(self, interaction: discord.Interaction,
                            button: discord.ui.Button):
+        # Acknowledge the component before DB/Prestige work; the original
+        # Wallet/Streak message is already private and remains private.
+        await interaction.response.defer()
         currency = await get_currency_config(self.guild_id)
         try:
             result = await perform_streak_claim(
                 interaction.client, self.guild_id, self.user_id,
                 member=interaction.user)
         except DailyAlreadyClaimed as e:
-            # Lost a race against another entry point. Disable all
-            # controls and re-render as a quiet "already claimed"
-            # receipt rather than leaving Claim clickable.
             for child in self.children:
                 child.disabled = True
             preview = await get_streak_preview(self.guild_id, self.user_id)
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 embed=build_streak_already_claimed_embed(
                     e.seconds_remaining, preview, currency),
-                view=self)
+                view=self,
+                attachments=list(getattr(interaction.message, "attachments", [])),
+            )
+            return
+        except Exception as exc:
+            # The reward transaction rolls back on a failed credit. Keep the
+            # button available so the member can retry after the problem clears.
+            print(f"[STREAK] claim failed and rolled back (guild={self.guild_id} user={self.user_id}): {exc}")
+            await interaction.edit_original_response(
+                embed=discord.Embed(
+                    title="Streak claim not completed",
+                    description="The reward could not be processed. No claim was recorded; please try again.",
+                    color=0xE74C3C),
+                view=self,
+                attachments=list(getattr(interaction.message, "attachments", [])),
+            )
             return
 
-        # Successful claim — every button retires.
+        result["guild_id"] = self.guild_id
+        public_sent = None
+        if result.get("receipt_public"):
+            public_sent = await send_public_claim_receipt(
+                interaction.client, result, currency)
+
         for child in self.children:
             child.disabled = True
-        await interaction.response.edit_message(
-            embed=build_claim_embed(result, currency), view=self)
+        if result.get("receipt_private"):
+            receipt = build_claim_embed(
+                result, currency, member_name=interaction.user.display_name,
+                public_copy_sent=public_sent)
+        else:
+            receipt = build_public_only_ack_embed(
+                result, public_copy_sent=bool(public_sent), currency=currency)
+        await interaction.edit_original_response(
+            embed=receipt,
+            view=self,
+            attachments=list(getattr(interaction.message, "attachments", [])),
+        )
 
     @discord.ui.button(label="Back", emoji="◀",
                        style=discord.ButtonStyle.secondary)
@@ -620,13 +768,24 @@ async def open_streak_panel(interaction: discord.Interaction,
     currency = await get_currency_config(guild_id)
     view = StreakPanelView(
         guild_id, user_id, can_claim=not preview["claimed_today"])
-    embed = build_streak_embed(preview, currency)
+    member_name = getattr(interaction.user, "display_name", None)
+    embed = build_streak_embed(preview, currency, member_name=member_name)
+    stage = int(preview.get("stage") or 1)
+    file = _stage_file(stage)
     if first:
-        await interaction.response.send_message(
-            embed=embed, view=view, ephemeral=True)
+        kwargs = {"embed": embed, "view": view, "ephemeral": True}
+        if file is not None:
+            kwargs["file"] = file
+        await interaction.response.send_message(**kwargs)
         view.message = await interaction.original_response()
     else:
-        await interaction.response.edit_message(embed=embed, view=view)
+        prior = [
+            attachment for attachment in getattr(interaction.message, "attachments", [])
+            if attachment.filename not in set(STREAK_STAGE_FILENAMES.values())
+        ]
+        attachments = prior + ([file] if file is not None else [])
+        await interaction.response.edit_message(
+            embed=embed, view=view, attachments=attachments)
         view.message = interaction.message
 
 

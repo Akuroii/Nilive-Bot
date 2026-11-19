@@ -979,3 +979,44 @@ def shop_temp_roles():
             f"</tr>"
         )
     return html or "<tr><td colspan='4' class='empty'>No active temp roles</td></tr>"
+
+
+@api_bp.route("/economy/streak-settings", methods=["GET", "POST"])
+@require_api_permission(LEVEL_ADMIN)
+def economy_streak_settings():
+    """Per-guild Streak configuration in the existing Economy settings surface."""
+    guild_id = get_session_guild_id()
+    if not guild_id:
+        return jsonify({"success": False, "error": "Select a server first."}), 400
+
+    from utils.streak_settings import get_streak_settings, save_streak_settings
+
+    if request.method == "GET":
+        current = run_async(get_streak_settings(guild_id))
+        return jsonify({"success": True, "settings": current})
+
+    data = request.get_json(silent=True) or {}
+    try:
+        saved = run_async(save_streak_settings(guild_id, {
+            "stages": data.get("stages"),
+            "stage6_min": data.get("stage6_min"),
+            "stage6_max": data.get("stage6_max"),
+            "receipt_visibility": data.get("receipt_visibility", "private"),
+            "receipt_channel_id": data.get("receipt_channel_id"),
+        }))
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+    except Exception as exc:
+        print(f"[DASHBOARD] could not save streak settings for guild {guild_id}: {exc}")
+        return jsonify({"success": False, "error": "Could not save Streak settings."}), 500
+
+    table = saved["reward_table"]
+    log_action(
+        guild_id,
+        "Updated Daily/Streak reward and receipt settings",
+        "economy",
+        details=((f"stages={table['stages']}; day6+={table['stage6_min']}..{table['stage6_max']}; "
+                  if table else "stages=legacy; ")
+                 + f"receipts={saved['receipt_visibility']}"),
+    )
+    return jsonify({"success": True, "settings": saved})

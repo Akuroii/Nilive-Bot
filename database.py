@@ -1243,6 +1243,33 @@ async def init_db():
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_daily_claims_last_date
+            ON daily_claims(last_claim_date)
+        """)
+        # Durable DM-only break-notification outbox. The prior claim date is
+        # the episode key, so the scheduler and a claim racing it can enqueue
+        # only one notice for the same broken streak.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS streak_break_notifications (
+                guild_id          INTEGER NOT NULL,
+                user_id           INTEGER NOT NULL,
+                break_after_date  TEXT NOT NULL,
+                streak_count      INTEGER NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'pending',
+                attempts          INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_attempt_at   TIMESTAMP,
+                sent_at           TIMESTAMP,
+                last_error        TEXT,
+                created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id, break_after_date)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_streak_break_notifications_due
+            ON streak_break_notifications(status, next_attempt_at)
+        """)
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS leveling_bonus_roles (
@@ -1389,6 +1416,46 @@ async def init_db():
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_mvph_guild
             ON mvp_history(guild_id)
+        """)
+
+        # MVP v2 (additive only): per-guild ranks/rewards/threshold, a
+        # per-cycle score table (mvp_scores is untouched), the open-cycle
+        # pointer, and the payout ledger that makes payouts idempotent.
+        await add_column_if_missing(db, 'mvp_config', 'winner_ranks', 'INTEGER NOT NULL DEFAULT 1')
+        await add_column_if_missing(db, 'mvp_config', 'rank_rewards', "TEXT NOT NULL DEFAULT '[]'")
+        await add_column_if_missing(db, 'mvp_config', 'min_activity_words', 'REAL NOT NULL DEFAULT 0')
+        await add_column_if_missing(db, 'mvp_history', 'rank', 'INTEGER')
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS mvp_cycle_state (
+                guild_id    INTEGER PRIMARY KEY,
+                cycle_start TEXT NOT NULL,
+                cycle_hours INTEGER NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS mvp_cycle_scores (
+                guild_id         INTEGER NOT NULL,
+                cycle_start      TEXT NOT NULL,
+                user_id          INTEGER NOT NULL,
+                message_score    REAL NOT NULL DEFAULT 0,
+                voice_minutes    REAL NOT NULL DEFAULT 0,
+                total_score      REAL NOT NULL DEFAULT 0,
+                last_activity_at TEXT,
+                PRIMARY KEY (guild_id, cycle_start, user_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS mvp_payouts (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id       INTEGER NOT NULL,
+                cycle_end      TEXT NOT NULL,
+                rank           INTEGER NOT NULL,
+                user_id        INTEGER NOT NULL,
+                coins_base     INTEGER NOT NULL DEFAULT 0,
+                coins_credited INTEGER NOT NULL DEFAULT 0,
+                created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (guild_id, cycle_end, rank, user_id)
+            )
         """)
 
         await db.execute("""

@@ -465,7 +465,7 @@ async def record_activities(bot, guild_id: int, user_id: int,
     # a fresh activity can settle it. Cheap when nothing is queued.
     try:
         from utils.level_ops import drain_xp_grants
-        await drain_xp_grants(guild_id, user_id)
+        await drain_xp_grants(guild_id, user_id, bot=bot)
     except Exception as e:
         # A drain failure must never stop progress being recorded.
         print(f"[MISSIONS] pending XP drain failed (guild={guild_id} "

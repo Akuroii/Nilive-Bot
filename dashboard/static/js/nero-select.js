@@ -265,7 +265,7 @@ window.NeroSelect = (function () {
         if (!el || (el.dataset.nsInit === '1' && el.dataset.nsDegraded !== '1') || el.dataset.nsFetching === '1') return;
         const wasInit = el.dataset.nsInit === '1';
         el.dataset.nsFetching = '1';
-        const { results, ok, botStatus } = await fetchOptions(kind);
+        let { results, ok, botStatus } = await fetchOptions(kind);
         delete el.dataset.nsFetching;
         if (!ok) return;
         el.dataset.nsInit = '1';
@@ -273,6 +273,17 @@ window.NeroSelect = (function () {
             el.dataset.nsDegraded = '1';
         } else {
             delete el.dataset.nsDegraded;
+        }
+
+        // Individual channel pickers may restrict the list to channel types
+        // that support their feature (e.g. Streak receipts need text/news
+        // destinations, not voice channels or categories). Unset preserves
+        // the historical all-channel behavior for existing pickers.
+        if (kind === 'channel' && el.dataset.allowedChannelTypes) {
+            const allowed = new Set(el.dataset.allowedChannelTypes
+                .split(',').map(value => Number(value.trim()))
+                .filter(value => Number.isInteger(value)));
+            results = results.filter(channel => allowed.has(Number(channel.raw_type)));
         }
 
         const liveVal = wasInit

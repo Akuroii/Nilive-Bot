@@ -9,9 +9,9 @@ Covers the locked product rules end-to-end against a scratch SQLite DB:
   3. Re-buying an already-owned tier is rejected.
   4. Valid purchase sets Coins to 0.
   5. XP / Level / Diamonds remain unchanged after a purchase.
-  6. Permanent V gives a 1.1× Coins earn multiplier.
+  6. Permanent V gives a 1.2× Coins / 1.1× Diamonds earn multiplier.
   7. A Booster with a valid Shop activation gets effective Prestige VI.
-  8. VI gives a 1.1× Coins + 1.2× Diamonds earn multiplier.
+  8. VI gives a 1.3× Coins + 1.2× Diamonds earn multiplier.
   9. Losing Booster returns effective Prestige to the permanent tier.
   10. Manual Prestige role assignment does NOT grant Prestige/multiplier.
   11. Transfer / conversion / admin currency grants are NOT multiplied.
@@ -132,8 +132,9 @@ async def main():
     check(cfg["enabled"] == 1, "prestige enabled by default")
     check(set(cfg["tiers"].keys()) == {1, 2, 3, 4, 5, 6},
           "6 tiers present", str(sorted(cfg["tiers"].keys())))
-    check(abs(cfg["tiers"][5]["coins"] - 1.1) < 1e-9, "V coins default 1.1x")
-    check(abs(cfg["tiers"][6]["coins"] - 1.1) < 1e-9, "VI coins default 1.1x")
+    check(abs(cfg["tiers"][5]["coins"] - 1.2) < 1e-9, "V coins default 1.2x")
+    check(abs(cfg["tiers"][5]["diamonds"] - 1.1) < 1e-9, "V diamonds default 1.1x")
+    check(abs(cfg["tiers"][6]["coins"] - 1.3) < 1e-9, "VI coins default 1.3x")
     check(abs(cfg["tiers"][6]["diamonds"] - 1.2) < 1e-9, "VI diamonds default 1.2x")
 
     section("1) I → II purchase succeeds (sequential)")
@@ -190,12 +191,12 @@ async def main():
     check(ec and ec[0][0] == 0, "coins reset to 0")
     check(ec and ec[0][1] == 9, "diamonds unchanged", str(ec))
 
-    section("6) Permanent V gives 1.1x Coins")
+    section("6) Permanent V gives 1.2x Coins + 1.1x Diamonds")
     reset_user(level_xp=20000, level=50, coins=100, diamonds=1, prestige_val=5)
     mult = await get_prestige_earn_multiplier(G, U, "balance", bot=vi_bot(boosting=False))
-    check(abs(mult - 1.1) < 1e-9, "V coins multiplier 1.1x", str(mult))
+    check(abs(mult - 1.2) < 1e-9, "V coins multiplier 1.2x", str(mult))
     dm = await get_prestige_earn_multiplier(G, U, "diamonds", bot=vi_bot(boosting=False))
-    check(abs(dm - 1.0) < 1e-9, "V diamonds multiplier 1.0x", str(dm))
+    check(abs(dm - 1.1) < 1e-9, "V diamonds multiplier 1.1x", str(dm))
 
     section("7) Booster-only VI: boost alone no longer grants VI")
     reset_user(level_xp=20000, level=50, coins=100, diamonds=1, prestige_val=1)
@@ -204,7 +205,7 @@ async def main():
     check(eff == 1, "booster WITHOUT shop activation → permanent I", str(eff))
     check(not await has_vi_activation(G, U), "no activation row present")
 
-    section("8) Activated booster gets VI: 1.1x Coins + 1.2x Diamonds")
+    section("8) Activated booster gets VI: 1.3x Coins + 1.2x Diamonds")
     reset_user(level_xp=20000, level=50, coins=100, diamonds=1, prestige_val=0)
     act = await activate_booster_prestige(G, U, 0, item_id=vi_listing(0), bot=vi_bot())
     check(act.get("success"), "free canonical VI activation succeeds")
@@ -213,7 +214,7 @@ async def main():
     check(eff == BOOSTER_TIER, "activated booster → effective VI", str(eff))
     mult_c = await get_prestige_earn_multiplier(G, U, "balance", bot=vi_bot())
     mult_d = await get_prestige_earn_multiplier(G, U, "diamonds", bot=vi_bot())
-    check(abs(mult_c - 1.1) < 1e-9, "VI coins multiplier 1.1x", str(mult_c))
+    check(abs(mult_c - 1.3) < 1e-9, "VI coins multiplier 1.3x", str(mult_c))
     check(abs(mult_d - 1.2) < 1e-9, "VI diamonds multiplier 1.2x", str(mult_d))
 
     section("9) Losing Booster returns effective to permanent tier")
@@ -358,16 +359,16 @@ async def main():
         def get_guild(self, guild_id):
             return self._guild
 
-    # Permanent V, not a booster → 1.1x coins.
+    # Permanent V, not a booster → 1.2x coins.
     reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=5)
     res = await give_reward(None, G, U, "coins", amount=100,
                             reason="test", source="test")
     check(res.get("success"), "reward_engine coins grant succeeds")
-    check(res.get("amount") == 110, "reward_engine applies 1.1x on coins",
+    check(res.get("amount") == 120, "reward_engine applies 1.2x on coins",
           str(res.get("amount")))
     row = sql_query(
         "SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (G, U))
-    check(row and row[0][0] == 110, "coins balance actually 110",
+    check(row and row[0][0] == 120, "coins balance actually 120",
           str(row))
 
     # Booster WITHOUT activation → raw amounts (no VI multiplier).
@@ -381,7 +382,7 @@ async def main():
     check(row and row[0][0] == 100, "booster w/o activation coins 100 (1.0x)",
           str(row))
 
-    # Permanent I, booster + VI activation → 1.1x coins + 1.2x diamonds.
+    # Permanent I, booster + VI activation → 1.3x coins + 1.2x diamonds.
     reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=1)
     await activate_booster_prestige(G, U, 0, item_id=vi_listing(0), bot=vi_bot())
     await give_reward(bot, G, U, "coins", amount=100, reason="test",
@@ -391,16 +392,16 @@ async def main():
     row = sql_query(
         "SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
         (G, U))
-    check(row and row[0][0] == 110, "booster coins 110 (1.1x)", str(row))
+    check(row and row[0][0] == 130, "booster coins 130 (1.3x)", str(row))
     check(row and row[0][1] == 120, "booster diamonds 120 (1.2x)", str(row))
 
-    # Loss of booster → permanent V (non-booster) → only 1.1x coins, 1.0x dia.
+    # Loss of booster → permanent V (non-booster) → 1.2x coins, 1.1x diamonds.
     reset_user(level_xp=20000, level=50, coins=0, diamonds=0, prestige_val=5)
     await give_reward(None, G, U, "diamonds", amount=100, reason="test",
                       source="test")
     row = sql_query(
         "SELECT diamonds FROM economy WHERE guild_id=? AND user_id=?", (G, U))
-    check(row and row[0][0] == 100, "non-booster diamonds 100 (1.0x)",
+    check(row and row[0][0] == 110, "non-booster diamonds 110 (1.1x)",
           str(row))
 
     section("15) Legacy levels.prestige > 5 clamps for rank sort (Issue 1)")
@@ -503,7 +504,7 @@ async def main():
     row = sql_query(
         "SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
         (G, U))
-    check(row[0][0] == 110, "uncached booster coins 110 (1.1x)", str(row[0][0]))
+    check(row[0][0] == 130, "uncached booster coins 130 (1.3x)", str(row[0][0]))
     check(row[0][1] == 120, "uncached booster diamonds 120 (1.2x)",
           str(row[0][1]))
 

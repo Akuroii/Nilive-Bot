@@ -91,7 +91,7 @@ class Scheduler(commands.Cog):
         # when the process last stopped. Never allowed to break scheduling.
         try:
             from utils.level_ops import drain_xp_grants_sweep
-            swept = await drain_xp_grants_sweep()
+            swept = await drain_xp_grants_sweep(bot=self.bot)
             if swept.get("applied"):
                 print(f"[SCHEDULER] settled {swept['applied']} queued XP "
                       f"award(s) across {swept['members']} member(s)")
@@ -109,6 +109,16 @@ class Scheduler(commands.Cog):
                       f"reward(s)")
         except Exception as e:
             print(f"[SCHEDULER] pending-reward retry failed: {e}")
+
+        # Streak notices use one bounded, durable outbox sweep rather than
+        # one sleeping task per member. DM failures are isolated from claims.
+        try:
+            from utils.streak_notifications import dispatch_streak_break_notifications
+            notices = await dispatch_streak_break_notifications(self.bot)
+            if notices.get("sent") or notices.get("blocked") or notices.get("retried"):
+                print(f"[SCHEDULER] streak notices: {notices}")
+        except Exception as e:
+            print(f"[SCHEDULER] streak-notice sweep failed: {e}")
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         async with aiosqlite.connect(DB_PATH) as db:

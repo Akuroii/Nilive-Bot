@@ -41,8 +41,8 @@ DEFAULT_TIER_MULTIPLIERS = {
     2: {"coins": 1.0, "diamonds": 1.0},
     3: {"coins": 1.0, "diamonds": 1.0},
     4: {"coins": 1.0, "diamonds": 1.0},
-    5: {"coins": 1.1, "diamonds": 1.0},
-    6: {"coins": 1.1, "diamonds": 1.2},
+    5: {"coins": 1.2, "diamonds": 1.1},
+    6: {"coins": 1.3, "diamonds": 1.2},
 }
 
 _ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI"}
@@ -604,6 +604,9 @@ async def sync_prestige_roles(bot, guild, member, effective_tier=None) -> None:
     Discord booster status (see get_effective_prestige).
     """
     if bot is None or guild is None or member is None:
+        print(f"[PRESTIGE ROLE WARNING] role sync skipped, missing context "
+              f"(bot={bot is not None} guild={guild is not None} "
+              f"member={member is not None})")
         return
     from utils.equip_engine import slot_lock
     async with slot_lock(guild.id, member.id):
@@ -634,15 +637,31 @@ async def sync_prestige_roles(bot, guild, member, effective_tier=None) -> None:
                 except Exception as e:
                     print(f"[PRESTIGE] Failed to remove tier {tier} role: {e}")
 
-        # Grant the desired role if missing and allowed.
-        if desired_role_id:
-            role = guild.get_role(int(desired_role_id))
-            if role and role not in member.roles:
-                can_assign, warning = check_bot_role_position(guild, role)
-                if can_assign:
-                    try:
-                        await member.add_roles(role, reason="Prestige tier")
-                    except Exception as e:
-                        print(f"[PRESTIGE] Failed to add tier role: {e}")
-                else:
-                    print(f"[PRESTIGE ROLE WARNING] {warning}")
+        # Grant the desired role if missing and allowed. Every path that ends
+        # without the member wearing the role says why, with ids, so an admin
+        # can act on it (nothing here is shown to the member).
+        ctx = f"guild={guild.id} user={member.id} tier={tier_label(effective_tier)}"
+        if not desired_role_id:
+            if int(effective_tier) > 0:
+                print(f"[PRESTIGE ROLE WARNING] {ctx}: no role is configured for "
+                      f"this tier (configured tiers: "
+                      f"{', '.join(tier_label(t) for t in sorted(role_by_tier)) or 'none'}). "
+                      f"Set it under the Prestige roles settings.")
+            return
+        role = guild.get_role(int(desired_role_id))
+        if role is None:
+            print(f"[PRESTIGE ROLE WARNING] {ctx}: configured role id "
+                  f"{desired_role_id} was not found in this server (deleted or "
+                  f"wrong id). Re-select it under the Prestige roles settings.")
+            return
+        if role in member.roles:
+            return
+        can_assign, warning = check_bot_role_position(guild, role)
+        if not can_assign:
+            print(f"[PRESTIGE ROLE WARNING] {ctx} role={role.id}: {warning}")
+            return
+        try:
+            await member.add_roles(role, reason="Prestige tier")
+        except Exception as e:
+            print(f"[PRESTIGE] Failed to add tier role: {type(e).__name__}: {e} "
+                  f"({ctx} role={role.id})")
