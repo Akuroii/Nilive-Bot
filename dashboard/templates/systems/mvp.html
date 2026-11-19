@@ -133,6 +133,21 @@
                 <input class="form-input" id="mvp-voice-weight"
                        type="number" step="0.1" min="0" placeholder="2.0">
             </div>
+            <div class="form-group">
+                <label class="form-label">Winner ranks (1–10)</label>
+                <input class="form-input" id="mvp-ranks" type="number" min="1" max="10" step="1" placeholder="1" oninput="renderRankRewards([])">
+                <div class="form-hint">Ranks, not people: members tied on a score share a rank and all win it.</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Coins per rank</label>
+                <div id="mvp-rank-rewards"></div>
+                <div class="form-hint">Paid once per winner with their Prestige multiplier applied. 0 = no Coins.</div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Minimum activity (words, 0 = off)</label>
+                <input class="form-input" id="mvp-min-words" type="number" min="0" step="1" placeholder="0" oninput="updateMinHint()">
+                <div class="form-hint" id="mvp-min-hint">Members below this do not win. Uses the chat weight above.</div>
+            </div>
         </div>
         <button class="btn btn-primary" id="mvp-save-btn"
                 onclick="saveMVPConfig(this)">Save Config</button>
@@ -152,6 +167,8 @@ var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
 __neroGlobal.switchTab = switchTab;
 __neroGlobal.loadMVPConfig = loadMVPConfig;
 __neroGlobal.saveMVPConfig = saveMVPConfig;
+__neroGlobal.renderRankRewards = renderRankRewards;
+__neroGlobal.updateMinHint = updateMinHint;
 
 function switchTab(name) {
     document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
@@ -166,6 +183,39 @@ function switchTab(name) {
 }
 switchTab('scores');
 
+function renderRankRewards(values) {
+    const box = document.getElementById('mvp-rank-rewards');
+    if (!box) return;
+    const n = Math.max(1, Math.min(10, parseInt(document.getElementById('mvp-ranks').value) || 1));
+    const old = Array.from(box.querySelectorAll('.mvp-rank-reward')).map(el => el.value);
+    box.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:6px;';
+        const label = document.createElement('span');
+        label.textContent = 'Rank ' + (i + 1);
+        label.style.minWidth = '60px';
+        const input = document.createElement('input');
+        input.className = 'form-input mvp-rank-reward';
+        input.type = 'number'; input.min = '0'; input.step = '1';
+        input.value = (values[i] !== undefined ? values[i] : (old[i] || 0));
+        row.appendChild(label); row.appendChild(input); box.appendChild(row);
+    }
+}
+
+function updateMinHint() {
+    const words = parseFloat(document.getElementById('mvp-min-words').value) || 0;
+    const chat = parseFloat(document.getElementById('mvp-chat-weight').value) || 0;
+    const voice = parseFloat(document.getElementById('mvp-voice-weight').value) || 0;
+    const hint = document.getElementById('mvp-min-hint');
+    if (!hint) return;
+    if (words <= 0) { hint.textContent = 'Off: any member with activity can win.'; return; }
+    const points = words * chat;
+    hint.textContent = voice > 0
+        ? words + ' words = ' + points.toFixed(1) + ' points = about ' + (points / voice).toFixed(1) + ' voice minutes.'
+        : words + ' words = ' + points.toFixed(1) + ' points (voice weight is 0, so voice cannot reach it).';
+}
+
 async function loadMVPConfig() {
     const res = await fetch('/api/mvp/config');
     if (!res.ok) return;
@@ -178,6 +228,12 @@ async function loadMVPConfig() {
     if (cycleEl) cycleEl.value = c.cycle_hours || 6;
     if (chatEl) chatEl.value = c.chat_word_weight || 1.0;
     if (voiceEl) voiceEl.value = c.voice_minute_weight || 2.0;
+    const ranksEl = document.getElementById('mvp-ranks');
+    if (ranksEl) ranksEl.value = c.winner_ranks || 1;
+    renderRankRewards(c.rank_rewards || []);
+    const minEl = document.getElementById('mvp-min-words');
+    if (minEl) minEl.value = c.min_activity_words || 0;
+    updateMinHint();
     // Set Select2 values after pickers are initialized
     setTimeout(function() {
         const rp = document.getElementById('mvp-role-picker');
@@ -197,6 +253,10 @@ async function saveMVPConfig(btn) {
         announce_channel_id: cp ? ($(cp).val() || null) : null,
         chat_word_weight:    parseFloat(document.getElementById('mvp-chat-weight').value)  || 1.0,
         voice_minute_weight: parseFloat(document.getElementById('mvp-voice-weight').value) || 2.0,
+        winner_ranks:        parseInt(document.getElementById('mvp-ranks').value) || 1,
+        rank_rewards:        Array.from(document.querySelectorAll('.mvp-rank-reward'))
+                                  .map(el => parseInt(el.value) || 0),
+        min_activity_words:  parseFloat(document.getElementById('mvp-min-words').value) || 0,
     };
     await ajaxSave('/api/mvp/config', payload, btn, 'MVP config saved!');
 }

@@ -295,7 +295,15 @@ class FreeVITests(unittest.IsolatedAsyncioTestCase):
         await process_purchase(itx, item)
         self.assertEqual(mutation_snapshot(), before)
         execute("UPDATE shop_items SET required_role_id=NULL WHERE id=?", (item,))
-        await process_purchase(interaction(True), item)
+        # I-V now ask for confirmation first (Coins reset warning): nothing is
+        # written until the buyer presses Confirm.
+        first = interaction(True)
+        await process_purchase(first, item)
+        self.assertEqual(rows("SELECT balance,diamonds FROM economy"), [(9000, 138)])
+        view = first.response.send_message.await_args.kwargs["view"]
+        click = interaction(True)
+        click.response.edit_message = AsyncMock()
+        await view.confirm.callback(click)
         self.assertEqual(rows("SELECT balance,diamonds FROM economy"), [(0, 138)])
         self.assertEqual(rows("SELECT xp,level,prestige FROM levels"), [(2700055, 84, 4)])
         self.assertEqual(rows("SELECT price_paid FROM purchase_history"), [(9000,)])

@@ -1,309 +1,301 @@
+"""Cairo-calendar daily claim and shared streak reward engine."""
+from __future__ import annotations
+
 import random
 import aiosqlite
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from database import DB_PATH
-from utils.timezone import get_cairo_daily_key, seconds_until_cairo_midnight, CAIRO_TZ
+from utils.timezone import seconds_until_cairo_midnight, CAIRO_TZ
+from utils.streak_settings import (
+    get_streak_settings, receipt_destinations, stage_reward_range,
+)
+from utils.streak_notifications import record_break_event
 
-# ═══════════════════════════════════════════════════════════════════════
-# DAILY / STREAK ENGINE
-#
-# Replaces the old in-memory `_daily_cooldowns` dict in cogs/economy.py
-# (module-level, wiped on every restart, no streak concept at all) with
-# persisted, per-(guild_id, user_id) state in the daily_claims table.
-#
-# Day boundary is Cairo calendar day (Africa/Cairo), not a rolling 24h window:
-#   - last_claim_date == today            -> already claimed, rejected
-#   - last_claim_date == yesterday        -> streak continues (+1)
-#   - anything older, or no prior claim   -> streak resets to 1
-#
-# The streak COUNT is never capped — it keeps incrementing past 7
-# indefinitely. Only the derived BONUS caps at the day-7 value
-# (get_streak_bonus). This is a deliberate split: streak_count is a
-# simple fact ("how many days in a row"), the bonus is a policy
-# decision layered on top of it, and the two must not be conflated by
-# artificially capping the stored count.
-#
-# claim_daily_streak() is the single place that checks-and-writes this
-# state, inside one BEGIN IMMEDIATE transaction — matching the same
-# pattern already used by utils/equip_engine.equip_role() and
-# utils/prestige.apply_prestige_purchase()/purchase_prestige() in this
-# project. Two concurrent calls (double-click, or /daily racing a
-# future /wallet "Claim Daily" button) can't both read "not claimed
-# yet": BEGIN IMMEDIATE acquires the write lock on the first
-# statement, so the second call blocks until the first transaction
-# commits, then sees the already-updated row and is correctly
-# rejected — even if the first call hasn't gotten around to crediting
-# the reward yet (crediting happens after this function returns, as a
-# separate step, same division as the existing shop purchase flow).
-# ═══════════════════════════════════════════════════════════════════════
-
-STREAK_BONUS_CAP_DAYS = 7
-
-# Coins added per streak day, capped at STREAK_BONUS_CAP_DAYS. Same
-# configurability level as the existing daily_min/daily_max settings
-# (a bot_settings key, no dedicated dashboard field yet) — not a new
-# or reduced level of admin control relative to what already exists.
+LEGACY_STREAK_BONUS_CAP_DAYS = 7
+# Backward-compatible alias for existing wallet tests/helpers.
+STREAK_BONUS_CAP_DAYS = LEGACY_STREAK_BONUS_CAP_DAYS
+STREAK_STAGE_CAP = 6
 DEFAULT_STREAK_BONUS_PER_DAY = 20
 
 
 class DailyAlreadyClaimed(Exception):
-    """Raised when the member has already claimed for the current Cairo day."""
+    """Raised when a member has already claimed during the current Cairo day."""
     def __init__(self, seconds_remaining: int):
         self.seconds_remaining = max(0, int(seconds_remaining))
         super().__init__("Already claimed for the current Cairo day")
 
 
-def _seconds_until_next_utc_midnight(now: datetime) -> int:
-    # Kept for backwards-compat alias; new code uses Cairo midnight
+def _seconds_until_next_cairo_midnight(now: datetime) -> int:
     return seconds_until_cairo_midnight(now)
 
 
-async def claim_daily_streak(guild_id: int, user_id: int) -> dict:
-    """
-    Atomically checks and updates daily-claim/streak state.
-    Returns {"streak": new_streak_count} on success.
-    Raises DailyAlreadyClaimed(seconds_remaining) if already claimed
-    for the current Cairo calendar day. Never leaves a partial write —
-    every rejection path rolls back before raising.
-    """
-    now = datetime.now(timezone.utc)
-    today_str = get_cairo_daily_key(now)
-    # Cairo yesterday = today -1 day in Cairo calendar
+def _claim_dates(now: datetime) -> tuple[str, str]:
     cairo_today = now.astimezone(CAIRO_TZ).date()
-    yesterday_str = (cairo_today - timedelta(days=1)).isoformat()
-
-    new_streak = None
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute("""
-                SELECT last_claim_date, streak_count FROM daily_claims
-                WHERE guild_id = ? AND user_id = ?
-            """, (guild_id, user_id))
-            row = await cursor.fetchone()
-
-            if row and row[0] == today_str:
-                await db.execute("ROLLBACK")
-                raise DailyAlreadyClaimed(_seconds_until_next_utc_midnight(now))
-
-            if row and row[0] == yesterday_str:
-                new_streak = int(row[1]) + 1
-            else:
-                # No prior row (first-ever claim) or the gap is more
-                # than one day (missed a full Cairo day) -> restart at 1.
-                new_streak = 1
-
-            await db.execute("""
-                INSERT INTO daily_claims
-                    (guild_id, user_id, last_claim_date, streak_count, last_claimed_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                    last_claim_date = excluded.last_claim_date,
-                    streak_count    = excluded.streak_count,
-                    last_claimed_at = CURRENT_TIMESTAMP
-            """, (guild_id, user_id, today_str, new_streak))
-            await db.commit()
-        except DailyAlreadyClaimed:
-            raise
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
-
-    return {"streak": new_streak}
+    return cairo_today.isoformat(), (cairo_today - timedelta(days=1)).isoformat()
 
 
-async def get_streak_bonus(guild_id: int, streak_count: int) -> int:
-    """
-    min(streak_count, 7) * the configured per-day bonus. streak_count
-    itself must NOT be capped before calling this — only the bonus
-    derived from it is capped, per the locked design.
-    """
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT value FROM bot_settings WHERE key = 'daily_streak_bonus_per_day'")
-        row = await cursor.fetchone()
-    per_day = int(row[0]) if row and row[0] is not None else DEFAULT_STREAK_BONUS_PER_DAY
-    capped_days = min(streak_count, STREAK_BONUS_CAP_DAYS)
-    return capped_days * per_day
+def _days_since(last_claim_date: str | None, today: date) -> int | None:
+    if not last_claim_date:
+        return None
+    try:
+        return (today - date.fromisoformat(str(last_claim_date))).days
+    except (TypeError, ValueError):
+        return None
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# SHARED CLAIM ENGINE — Wallet pass
-#
-# Three entry points now exist for the same action: /streak (canonical),
-# /daily (thin compatibility alias) and the Wallet's [🔥 Streak] button.
-# All three call perform_streak_claim() below — there is exactly ONE
-# implementation of the reward math and crediting, so the three can
-# never drift apart, and the atomic claim guard in claim_daily_streak()
-# above means they can't be raced against each other either (claiming
-# via /daily then immediately via the Wallet button correctly rejects
-# the second attempt: it's the same daily_claims row).
-#
-# ECONOMY NOTE (flagged for Akuroi, deliberately NOT changed here):
-# the reward formula below is byte-for-byte the one that already lived
-# inline in cogs/economy.py's /daily — random base in [daily_min,
-# daily_max], plus the day-capped streak bonus, with the Prestige earn
-# multiplier applied to the COMBINED total. It was MOVED, not
-# redesigned, because the prompt says the economic model is still under
-# review. get_streak_preview() reads the same settings without
-# consuming a claim, so the Wallet can show "what you'd get" honestly
-# while the model is still being decided.
-# ═══════════════════════════════════════════════════════════════════════
+def _effective_streak(last_claim_date: str | None, stored_count: int,
+                      today_str: str, yesterday_str: str) -> int:
+    if last_claim_date == today_str or last_claim_date == yesterday_str:
+        return max(0, int(stored_count or 0))
+    return 0
 
 
 async def get_daily_range(guild_id: int) -> tuple[int, int]:
-    """
-    (daily_min, daily_max) from bot_settings, same keys and same
-    100/300 defaults the old inline /daily used. Guarded so a
-    mis-typed dashboard value can't make random.randint() raise.
-    """
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "SELECT value FROM bot_settings WHERE key = 'daily_min'")
-        row = await cursor.fetchone()
-        try:
-            daily_min = int(row[0]) if row and row[0] is not None else 100
-        except (TypeError, ValueError):
-            daily_min = 100
-        cursor = await db.execute(
-            "SELECT value FROM bot_settings WHERE key = 'daily_max'")
-        row = await cursor.fetchone()
-        try:
-            daily_max = int(row[0]) if row and row[0] is not None else 300
-        except (TypeError, ValueError):
-            daily_max = 300
-
-    if daily_max < daily_min:
-        daily_min, daily_max = daily_max, daily_min
-    return daily_min, daily_max
+    """Overall reward range: the V2 table's span, else the legacy global range."""
+    config = await get_streak_settings(guild_id)
+    table = config["reward_table"]
+    if table:
+        amounts = table["stages"] + [table["stage6_min"], table["stage6_max"]]
+        return min(amounts), max(amounts)
+    return int(config["daily_min"]), int(config["daily_max"])
 
 
-async def get_streak_state(guild_id: int, user_id: int) -> dict:
-    """
-    Read-only view of the member's streak, for the Wallet hub and for
-    the cooldown message — never mutates anything.
+async def get_streak_bonus(guild_id: int, streak_count: int,
+                           base_amount: int | None = None) -> int:
+    """Legacy flat additive bonus. V2 guilds have no separate bonus (0):
+    their stage reward is the whole pre-Prestige amount."""
+    config = await get_streak_settings(guild_id)
+    if config["v2_enabled"]:
+        return 0
+    return min(max(0, int(streak_count)), LEGACY_STREAK_BONUS_CAP_DAYS) * int(
+        config["legacy_bonus_per_day"])
 
-    `streak` is the CURRENT effective streak: the stored count if the
-    last claim was today or yesterday (Cairo calendar), otherwise 0.
-    """
-    now = datetime.now(timezone.utc)
-    today_str = get_cairo_daily_key(now)
+
+async def get_streak_state(guild_id: int, user_id: int,
+                           now: datetime | None = None) -> dict:
+    """Read-only streak state including a derived persistent broken marker."""
+    now = now or datetime.now(timezone.utc)
+    today_str, yesterday_str = _claim_dates(now)
     cairo_today = now.astimezone(CAIRO_TZ).date()
-    yesterday_str = (cairo_today - timedelta(days=1)).isoformat()
-
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
+        row = await (await db.execute("""
             SELECT last_claim_date, streak_count, last_claimed_at
             FROM daily_claims WHERE guild_id = ? AND user_id = ?
-        """, (guild_id, user_id))
-        row = await cursor.fetchone()
+        """, (guild_id, user_id))).fetchone()
 
     if not row:
-        return {"streak": 0, "stored_streak": 0, "claimed_today": False,
-                "seconds_remaining": 0, "last_claim_date": None}
+        return {
+            "streak": 0, "stored_streak": 0, "claimed_today": False,
+            "seconds_remaining": 0, "last_claim_date": None,
+            "days_since_last_claim": None, "broken": False,
+        }
 
     last_date, stored, _last_at = row[0], int(row[1] or 0), row[2]
-    claimed_today = (last_date == today_str)
-    chain_alive = last_date in (today_str, yesterday_str)
-
+    elapsed = _days_since(last_date, cairo_today)
+    claimed_today = last_date == today_str
+    current = _effective_streak(last_date, stored, today_str, yesterday_str)
+    broken = elapsed is not None and elapsed >= 2 and stored > 0
     return {
-        "streak": stored if chain_alive else 0,
+        "streak": current,
         "stored_streak": stored,
         "claimed_today": claimed_today,
         "seconds_remaining": (
-            _seconds_until_next_utc_midnight(now) if claimed_today else 0),
+            _seconds_until_next_cairo_midnight(now) if claimed_today else 0),
         "last_claim_date": last_date,
+        "days_since_last_claim": elapsed,
+        "broken": broken,
     }
 
 
-async def get_streak_preview(guild_id: int, user_id: int) -> dict:
-    """
-    What the NEXT claim would look like, without consuming it. Used by
-    the Wallet's Streak panel so the member sees the reward range and
-    the bonus they're about to earn before deciding to claim.
-
-    The bonus is computed for the streak the next claim would produce
-    (current + 1, or 1 if the chain is broken) — not the current one —
-    because that's the number that will actually be paid.
-    """
-    state = await get_streak_state(guild_id, user_id)
-    next_streak = (state["streak"] + 1) if not state["claimed_today"] \
-        else state["streak"]
-    daily_min, daily_max = await get_daily_range(guild_id)
-    bonus = await get_streak_bonus(guild_id, next_streak)
+async def get_streak_preview(guild_id: int, user_id: int,
+                             now: datetime | None = None) -> dict:
+    """Return the next stage and its pre-Prestige payout range without mutation."""
+    state = await get_streak_state(guild_id, user_id, now=now)
+    next_streak = (state["streak"] if state["claimed_today"]
+                   else state["streak"] + 1)
+    stage = min(STREAK_STAGE_CAP, max(1, next_streak))
+    config = await get_streak_settings(guild_id)
+    table = config["reward_table"]
+    if table:
+        low, high = stage_reward_range(next_streak, table)
+        bonus_low = bonus_high = 0
+    else:
+        low, high = int(config["daily_min"]), int(config["daily_max"])
+        bonus_low = bonus_high = min(next_streak, LEGACY_STREAK_BONUS_CAP_DAYS) * int(
+            config["legacy_bonus_per_day"])
     return {
         **state,
         "next_streak": next_streak,
-        "daily_min": daily_min,
-        "daily_max": daily_max,
-        "next_bonus": bonus,
-        "bonus_capped": next_streak > STREAK_BONUS_CAP_DAYS,
+        "stage": stage,
+        "daily_min": low,
+        "daily_max": high,
+        "next_bonus": bonus_high,
+        "next_bonus_min": bonus_low,
+        "next_bonus_max": bonus_high,
+        "next_total_min": low + bonus_low,
+        "next_total_max": high + bonus_high,
+        "bonus_capped": (next_streak >= STREAK_STAGE_CAP
+                          if table
+                          else next_streak >= LEGACY_STREAK_BONUS_CAP_DAYS),
+        "v2_enabled": bool(config["v2_enabled"]),
     }
 
 
+async def _claim_daily_streak_in_transaction(db: aiosqlite.Connection,
+                                             guild_id: int, user_id: int,
+                                             now: datetime,
+                                             config: dict) -> dict:
+    """Claim-row transition. Caller owns BEGIN IMMEDIATE and final commit."""
+    today_str, yesterday_str = _claim_dates(now)
+    row = await (await db.execute("""
+        SELECT last_claim_date, streak_count FROM daily_claims
+        WHERE guild_id = ? AND user_id = ?
+    """, (guild_id, user_id))).fetchone()
+    if row and row[0] == today_str:
+        raise DailyAlreadyClaimed(_seconds_until_next_cairo_midnight(now))
+
+    last_date = row[0] if row else None
+    previous = int(row[1] or 0) if row else 0
+    if last_date == yesterday_str:
+        new_streak = previous + 1
+    else:
+        new_streak = 1
+
+    elapsed = _days_since(last_date, now.astimezone(CAIRO_TZ).date())
+    if last_date and previous > 0 and elapsed is not None and elapsed >= 2:
+        # Unique episode key prevents the scheduled sweep and a returning
+        # claim from creating two notices for the same missed streak.
+        await record_break_event(db, guild_id, user_id, last_date, previous)
+
+    await db.execute("""
+        INSERT INTO daily_claims
+            (guild_id, user_id, last_claim_date, streak_count, last_claimed_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            last_claim_date = excluded.last_claim_date,
+            streak_count = excluded.streak_count,
+            last_claimed_at = CURRENT_TIMESTAMP
+    """, (guild_id, user_id, today_str, new_streak))
+    return {"streak": new_streak, "previous_streak": previous,
+            "previous_last_claim_date": last_date, "days_since_previous": elapsed}
+
+
+async def claim_daily_streak(guild_id: int, user_id: int,
+                             bot=None, member=None,
+                             now: datetime | None = None) -> dict:
+    """Compatibility wrapper; all claim calls now use the atomic reward path."""
+    return await perform_streak_claim(
+        bot, guild_id, user_id, member=member, now=now)
+
+
 async def perform_streak_claim(bot, guild_id: int, user_id: int,
-                               member=None) -> dict:
+                               member=None, *, now: datetime | None = None,
+                               base_amount: int | None = None) -> dict:
+    """Single transactional claim/reward path used by the Streak panel.
+
+    Claim transition, primary-currency credit, and its ledger attempt occur
+    under one SQLite transaction. A credit exception rolls back the claim so
+    a retry can succeed; a committed retry is rejected by the same daily row.
     """
-    THE single claim implementation shared by /streak, /daily and the
-    Wallet button.
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    injected_base = None if base_amount is None else int(base_amount)
 
-    Raises DailyAlreadyClaimed (with seconds_remaining) when the member
-    has already claimed for the current Cairo day — callers turn that
-    into their own cooldown message. On success returns everything a
-    caller needs to render a result, so no caller has to re-query.
-
-    The atomic claim-check-and-write happens FIRST, before any reward
-    math or crediting, exactly as the previous inline /daily did: the
-    loser of a race is rejected before either call has touched a
-    balance.
-    """
-    result = await claim_daily_streak(guild_id, user_id)
-    streak = result["streak"]
-
-    daily_min, daily_max = await get_daily_range(guild_id)
-    base = random.randint(daily_min, daily_max)
-    streak_bonus = await get_streak_bonus(guild_id, streak)
-
-    # Prestige earn multiplier, applied to the COMBINED (base + bonus)
-    # total — unchanged from the previous inline implementation.
-    # Defensive: any lookup failure grants the raw amount rather than
-    # breaking the claim, and the member has already consumed their
-    # claim for the day at this point, so failing closed is not an
-    # option.
+    # Keep the existing Prestige behavior and lookup fallback. Resolve before
+    # taking the SQLite write lock; no Discord/network work runs in transaction.
     try:
         from utils.prestige import get_prestige_earn_multiplier, is_booster
         booster = is_booster(member) if member is not None else None
         mult = await get_prestige_earn_multiplier(
-            guild_id, user_id, "balance", is_booster=booster, bot=bot, member=member)
-    except Exception as e:
+            guild_id, user_id, "balance", is_booster=booster,
+            bot=bot, member=member)
+    except Exception as exc:
         print(f"[PRESTIGE] streak multiplier lookup failed; granting raw "
-              f"(guild={guild_id} user={user_id}): {e}")
+              f"(guild={guild_id} user={user_id}): {exc}")
         mult = 1.0
 
-    amount = int(round((base + streak_bonus) * mult))
-    if amount <= 0:
-        amount = 1
+    from utils.economy_safe import safe_credit
+    config = None
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                # Read configuration after acquiring the writer lock. A save
+                # committed before this transaction applies to this claim;
+                # a concurrent save after it applies to the next claim.
+                config = await get_streak_settings(guild_id, db=db)
+                transition = await _claim_daily_streak_in_transaction(
+                    db, guild_id, user_id, now, config)
+                streak = transition["streak"]
+                stage = min(STREAK_STAGE_CAP, streak)
+                table = config["reward_table"]
+                if table:
+                    # Days 1-5 fixed; day 6 onward random in the stage-6
+                    # range every day (no cycle). One draw per successful
+                    # claim, only after the duplicate-claim guard passed.
+                    low, high = stage_reward_range(streak, table)
+                else:
+                    low, high = int(config["daily_min"]), int(config["daily_max"])
+                if injected_base is not None and not low <= injected_base <= high:
+                    raise ValueError("Injected reward is outside this stage's configured range")
+                base = (random.randint(low, high)
+                        if injected_base is None else injected_base)
+                if table:
+                    streak_bonus = 0
+                    bonus_capped = streak >= STREAK_STAGE_CAP
+                else:
+                    # Compatibility for guilds not yet explicitly opted into
+                    # V2: preserve the old global additive rule and cap.
+                    streak_bonus = min(streak, LEGACY_STREAK_BONUS_CAP_DAYS) * int(
+                        config["legacy_bonus_per_day"])
+                    bonus_capped = streak >= LEGACY_STREAK_BONUS_CAP_DAYS
+                pre_prestige_total = base + streak_bonus
+                amount = int(round(pre_prestige_total * mult))
+                if amount <= 0:
+                    amount = 1
 
-    # safe_credit ledgers the credit itself (source='daily'), which is
-    # what makes streak rewards show up in Wallet → Receipts for free.
-    # The source string stays 'daily' rather than becoming 'streak' so
-    # existing ledger rows and any dashboard filtering keep matching.
-    from utils.economy_safe import safe_credit, get_balance
-    await safe_credit(
-        guild_id, user_id, amount,
-        reason=f"Daily reward (streak day {streak})", source="daily")
-    new_balance = await get_balance(guild_id, user_id)
+                await safe_credit(
+                    guild_id, user_id, amount,
+                    reason=f"Daily reward (streak day {streak})",
+                    source="daily", db=db)
+                balance_row = await (await db.execute(
+                    "SELECT balance FROM economy WHERE guild_id=? AND user_id=?",
+                    (guild_id, user_id))).fetchone()
+                new_balance = int(balance_row[0]) if balance_row else amount
+                await db.commit()
+            except DailyAlreadyClaimed:
+                await db.execute("ROLLBACK")
+                raise
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+    except DailyAlreadyClaimed:
+        raise
 
+    receipt_private, receipt_public = receipt_destinations(
+        config["receipt_visibility"])
     return {
+        **transition,
+        "guild_id": int(guild_id),
+        "user_id": int(user_id),
         "streak": streak,
+        "stage": stage,
         "base": base,
         "streak_bonus": streak_bonus,
-        "multiplier": mult,
+        "pre_prestige_total": pre_prestige_total,
+        "multiplier": float(mult),
         "amount": amount,
+        "credited_total": amount,
         "new_balance": new_balance,
-        "bonus_capped": streak > STREAK_BONUS_CAP_DAYS,
-        "next_reset_seconds": _seconds_until_next_utc_midnight(
-            datetime.now(timezone.utc)),
+        "bonus_capped": bonus_capped,
+        "v2_enabled": bool(config["v2_enabled"]),
+        "receipt_visibility": config["receipt_visibility"],
+        "receipt_channel_id": config["receipt_channel_id"],
+        "receipt_private": receipt_private,
+        "receipt_public": receipt_public,
+        "member_name": getattr(member, "display_name", None) or str(user_id),
+        "next_reset_seconds": _seconds_until_next_cairo_midnight(now),
     }
 
 

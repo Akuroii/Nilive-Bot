@@ -130,17 +130,34 @@ async def main():
     for ch in ("!",):
         check(f"streak preview contains no '{ch}'", ch not in rendered, rendered)
 
-    # Field names match the spec
+    # Field names — legacy path (no V2 table saved for this guild)
     field_names = [f.name for f in embed.fields]
-    check("preview has fields Daily Reward / Streak / Bonus",
-          "Daily Reward" in field_names and "Streak" in field_names
-          and "Bonus" in field_names, str(field_names))
+    check("legacy preview has Daily Rewards / legacy Streak bonus / Estimated total",
+          "Daily Rewards · Base roll" in field_names
+          and "Current legacy Streak bonus" in field_names
+          and "Estimated total · pre-Prestige" in field_names, str(field_names))
     check("preview has no Cooldown field (unclaimed state)",
           "Cooldown" not in field_names, str(field_names))
 
-    # Claim receipt
+    # Field names — V2 path (six-stage table saved for this guild)
+    from utils.streak_settings import save_streak_settings
+    await save_streak_settings(GUILD, {
+        "stages": [2, 4, 6, 8, 10], "stage6_min": 13, "stage6_max": 18,
+        "receipt_visibility": "private", "receipt_channel_id": None})
+    v2_preview = await get_streak_preview(GUILD, USER)
+    v2_embed = build_streak_embed(v2_preview, cfg2)
+    v2_names = [f.name for f in v2_embed.fields]
+    check("V2 preview shows the stage reward before Prestige",
+          "Stage 1 Reward · before Prestige" in v2_names, str(v2_names))
+    check("V2 preview has no legacy base/bonus/total fields",
+          not any(n in v2_names for n in (
+              "Daily Rewards · Base roll", "Current legacy Streak bonus",
+              "Estimated total · pre-Prestige")), str(v2_names))
+
+    # Claim receipt — legacy (base roll + flat bonus), then Prestige multiplier
     fake_result = {
-        "streak": 7, "amount": 132, "streak_bonus": 32,
+        "streak": 7, "stage": 6, "base": 100, "amount": 132, "streak_bonus": 32,
+        "pre_prestige_total": 132, "credited_total": 132,
         "multiplier": 1.0, "new_balance": 132, "bonus_capped": False,
         "next_reset_seconds": 2*3600 + 15*60,
     }
@@ -152,16 +169,37 @@ async def main():
     check("claim shows Day 7", "Day **7**" in cr, cr)
     check("claim shows +32 bonus", "+**32**" in cr, cr)
     check("claim shows cooldown 2h 15m", "2h 15m" in cr, cr)
-    for banned in ("UTC", "00:00", "capped", "Bonus grows", "Prestige"):
+    check("legacy claim shows base + bonus then the Prestige multiplier",
+          "(100 + 32) = 132 before Prestige" in cr
+          and "Prestige ×1 → **132 Gold credited**" in cr, cr)
+    for banned in ("UTC", "00:00", "capped", "Bonus grows"):
         check(f"claim receipt contains no '{banned}'",
               banned.lower() not in cr.lower(), cr)
+
+    # Claim receipt — V2 stage reward, then Prestige multiplier
+    v2_result = {
+        "streak": 7, "stage": 6, "base": 15, "amount": 18, "streak_bonus": 0,
+        "pre_prestige_total": 15, "credited_total": 18, "multiplier": 1.2,
+        "new_balance": 18, "bonus_capped": True, "v2_enabled": True,
+        "next_reset_seconds": 2*3600 + 15*60,
+    }
+    v2c = build_claim_embed(v2_result, cfg2)
+    v2r = " ".join((f.name or "") + " " + (f.value or "") for f in v2c.fields)
+    check("V2 claim shows the stage reward before Prestige",
+          "Stage 6 Reward" in v2r and "**15** Gold · before Prestige" in v2r, v2r)
+    check("V2 claim shows Prestige multiplier then credited amount",
+          "Stage reward 15 × Prestige ×1.2 → **18 Gold credited**" in v2r, v2r)
+    check("V2 claim has no separate Streak Bonus field",
+          "Streak Bonus" not in v2r, v2r)
 
     # Already-claimed race panel
     acembed = build_streak_already_claimed_embed(3600, preview, cfg2)
     ar = acembed.title + " " + (acembed.description or "")
     for f in acembed.fields:
         ar += " " + (f.name or "") + " " + (f.value or "")
-    check("already-claimed has Cooldown", "Cooldown" in ar, ar)
+    # V2 panel labels the remaining time "Next claim" (was "Cooldown").
+    check("already-claimed shows the time until the next claim",
+          "Next claim" in ar and "1h 0m" in ar, ar)
     check("already-claimed has no UTC/00:00",
           "UTC" not in ar and "00:00" not in ar, ar)
 

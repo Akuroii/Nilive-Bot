@@ -884,7 +884,7 @@ async def grant_row(idem_key: str) -> dict | None:
 
 async def drain_xp_grants(guild_id: int, user_id: int, *,
                           idem_key: str | None = None,
-                          limit: int = 100) -> dict:
+                          limit: int = 100, bot=None) -> dict:
     """Apply queued one-shot XP awards, each exactly once.
 
     Every grant gets its own `BEGIN IMMEDIATE` transaction that opens with
@@ -895,6 +895,10 @@ async def drain_xp_grants(guild_id: int, user_id: int, *,
 
     The XP write, the crossing rows and the `applied` mark commit together, so a
     crash mid-award leaves the row pending rather than half-paid.
+
+    ``bot`` lets the Prestige lookup resolve the member, so an active Booster
+    (Prestige VI) freezes the VI multiplier onto the Level rewards it creates.
+    Without it the member is unknown and the permanent tier is used.
     """
     await ensure_tables()
     applied: list[dict] = []
@@ -908,6 +912,14 @@ async def drain_xp_grants(guild_id: int, user_id: int, *,
             "AND status='pending' ORDER BY id LIMIT ?",
             (int(guild_id), int(user_id), max(1, int(limit))))
         pending = await cursor.fetchall()
+
+    # Looked up ONCE, before any write transaction opens: resolving a Booster
+    # reconciles its VI activation on its own connection (it can DELETE a
+    # stale row), which would block against this loop's BEGIN IMMEDIATE.
+    multipliers = None
+    if any(idem_key is None or str(row[1]) == str(idem_key) for row in pending):
+        from utils.level_claims import snapshot_multipliers
+        multipliers = await snapshot_multipliers(guild_id, user_id, bot=bot)
 
     for (row_id, key, amount, source, reason) in pending:
         if idem_key is not None and str(key) != str(idem_key):
@@ -930,8 +942,7 @@ async def drain_xp_grants(guild_id: int, user_id: int, *,
                         deferred.append({"idem_key": key, "reason": blocked})
                         continue
                     from utils.xp_calculator import xp_progress
-                    from utils.level_claims import (record_crossing,
-                                                    snapshot_multipliers)
+                    from utils.level_claims import record_crossing
                     cursor = await db.execute(
                         "SELECT xp FROM levels WHERE guild_id=? AND user_id=?",
                         (guild_id, user_id))
@@ -945,8 +956,6 @@ async def drain_xp_grants(guild_id: int, user_id: int, *,
                         "DO UPDATE SET xp=?, level=?",
                         (guild_id, user_id, new_xp, new_level, new_xp,
                          new_level))
-                    multipliers = await snapshot_multipliers(
-                        guild_id, user_id)
                     await record_crossing(
                         db, guild_id, user_id, old_xp, new_xp, multipliers,
                         source=source or "", is_booster=False)
@@ -985,7 +994,7 @@ async def drain_xp_grants(guild_id: int, user_id: int, *,
 
 
 async def drain_xp_grants_sweep(member_limit: int = 200,
-                                 per_member: int = 50) -> dict:
+                                 per_member: int = 50, bot=None) -> dict:
     """Periodic sweep over every member with a queued award.
 
     The in-line drains in `give_reward` and `record_activities` settle a queued
@@ -1004,7 +1013,8 @@ async def drain_xp_grants_sweep(member_limit: int = 200,
     applied = deferred = failed = 0
     for guild_id, user_id in members:
         try:
-            out = await drain_xp_grants(guild_id, user_id, limit=per_member)
+            out = await drain_xp_grants(guild_id, user_id, limit=per_member,
+                                        bot=bot)
         except Exception:
             failed += 1
             continue

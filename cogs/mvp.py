@@ -22,6 +22,7 @@ async def get_mvp_config(guild_id: int) -> dict:
         "enabled": 1, "cycle_hours": 6,
         "mvp_role_id": None, "announce_channel_id": None,
         "chat_word_weight": 1.0, "voice_minute_weight": 2.0,
+        "winner_ranks": 1, "rank_rewards": "[]", "min_activity_words": 0,
     }
 
 
@@ -63,6 +64,11 @@ class MVP(commands.Cog):
             """, (message.guild.id, message.author.id, today,
                   score, score, score, score))
             await db.commit()
+        # Per-cycle score (the daily table above is left exactly as it was).
+        from utils.mvp_engine import record_activity
+        await record_activity(
+            message.guild.id, message.author.id, message_score=score,
+            cycle_hours=int(config.get("cycle_hours") or 6))
 
     # ─── SCORE VOICE (Phase 3 / E1: now driven by the Activity
     # Engine's activity_voice_tick event instead of MVP's own
@@ -101,131 +107,27 @@ class MVP(commands.Cog):
                         total_score   = total_score   + ?
                 """, (guild.id, member.id, today, score, score))
                 await db.commit()
+            from utils.mvp_engine import record_activity
+            await record_activity(
+                guild.id, member.id, voice_minutes=1, voice_score=score,
+                cycle_hours=int(config.get("cycle_hours") or 6))
         except Exception as e:
             print(f"[MVP] voice tick error for member {member.id} "
                   f"in guild {guild.id}: {e}")
 
     # ─── MVP CYCLE TASK ──────────────────────────────────
-    @tasks.loop(minutes=30)
+    @tasks.loop(minutes=5)
     async def mvp_cycle_task(self):
+        """Settles each guild's cycle once its configured duration has elapsed.
+
+        Idempotent: utils.mvp_engine.settle_cycle commits payout + history +
+        the move to the next cycle in one transaction, so a repeated or
+        overlapping pass cannot pay twice, and downtime is not replayed.
         """
-        Checks every 30 min if a cycle has elapsed.
-        Cycle length is configurable per guild (default 6hrs).
-        """
+        from utils.mvp_engine import settle_cycle
         for guild in self.bot.guilds:
             try:
-                config = await get_mvp_config(guild.id)
-                if not config.get("enabled", 1):
-                    continue
-
-                cycle_hours = int(config.get("cycle_hours", 6))
-                now         = datetime.now(timezone.utc)
-                today       = get_cairo_daily_key(now)
-
-                # Find top scorer today
-                async with aiosqlite.connect(DB_PATH) as db:
-                    cursor = await db.execute("""
-                        SELECT user_id, total_score FROM mvp_scores
-                        WHERE guild_id = ? AND date = ?
-                        ORDER BY total_score DESC LIMIT 1
-                    """, (guild.id, today))
-                    top = await cursor.fetchone()
-
-                    # Check last MVP history to see if cycle elapsed
-                    hist_cursor = await db.execute("""
-                        SELECT cycle_end FROM mvp_history
-                        WHERE guild_id = ?
-                        ORDER BY created_at DESC LIMIT 1
-                    """, (guild.id,))
-                    last = await hist_cursor.fetchone()
-
-                if last:
-                    last_end = datetime.fromisoformat(last[0])
-                    if last_end.tzinfo is None:
-                        last_end = last_end.replace(tzinfo=timezone.utc)
-                    elapsed = (now - last_end).total_seconds() / 3600
-                    if elapsed < cycle_hours:
-                        continue
-
-                if not top:
-                    continue
-
-                mvp_user_id, mvp_score = top
-                mvp_member = guild.get_member(mvp_user_id)
-                if not mvp_member:
-                    continue
-
-                snap = snapshot_user(mvp_member)
-                # cycle_start anchored to Cairo midnight but stored as UTC ISO
-                from utils.timezone import CAIRO_TZ
-                _cairo_today = now.astimezone(CAIRO_TZ).date()
-                cycle_start = datetime(_cairo_today.year, _cairo_today.month, _cairo_today.day, tzinfo=CAIRO_TZ).astimezone(timezone.utc)
-
-                # Save to history
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("""
-                        INSERT INTO mvp_history
-                            (guild_id, user_id, user_display_name,
-                             cycle_start, cycle_end, score)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (guild.id, mvp_user_id,
-                          snap["display_name"],
-                          cycle_start.isoformat(),
-                          now.isoformat(),
-                          int(mvp_score)))
-                    await db.commit()
-
-                # Assign MVP role
-                mvp_role_id = config.get("mvp_role_id")
-                if mvp_role_id:
-                    mvp_role = guild.get_role(int(mvp_role_id))
-                    if mvp_role:
-                        # Remove from all current holders
-                        for m in guild.members:
-                            if mvp_role in m.roles and m.id != mvp_user_id:
-                                from utils.equip_engine import slot_lock
-                                from utils.timed_ownership import role_removal_blocked
-                                async with slot_lock(guild.id, m.id):
-                                    if mvp_role in m.roles:
-                                        kept = await role_removal_blocked(
-                                            guild.id, m.id, int(mvp_role_id),
-                                            retiring="mvp", bot=self.bot, member=m)
-                                        if kept:
-                                            print(f"[MVP] Keeping MVP role {mvp_role_id} for {m.id}: {kept}")
-                                        else:
-                                            try:
-                                                await m.remove_roles(mvp_role, reason="MVP cycle reset")
-                                            except Exception:
-                                                pass
-                        # Give to new MVP
-                        try:
-                            await mvp_member.add_roles(
-                                mvp_role, reason="MVP of the cycle")
-                        except Exception:
-                            pass
-
-                # Announce
-                channel_id = config.get("announce_channel_id")
-                if channel_id:
-                    channel = guild.get_channel(int(channel_id))
-                    if channel:
-                        embed = discord.Embed(
-                            title="🏆 New MVP.",
-                            description=(
-                                f"{mvp_member.mention} is the MVP "
-                                f"of this cycle with "
-                                f"**{int(mvp_score):,}** points."),
-                            color=0xFFD700)
-                        if mvp_member.display_avatar:
-                            embed.set_thumbnail(
-                                url=mvp_member.display_avatar.url)
-                        embed.set_footer(
-                            text=f"Next cycle in {cycle_hours} hours")
-                        try:
-                            await channel.send(embed=embed)
-                        except Exception:
-                            pass
-
+                await settle_cycle(self.bot, guild)
             except Exception as e:
                 print(f"[MVP CYCLE] Error for guild {guild.id}: {e}")
 
@@ -315,47 +217,13 @@ class MVP(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def mvp_force(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        config = await get_mvp_config(interaction.guild.id)
-        today  = get_cairo_daily_key()
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT user_id, total_score FROM mvp_scores
-                WHERE guild_id = ? AND date = ?
-                ORDER BY total_score DESC LIMIT 1
-            """, (interaction.guild.id, today))
-            top = await cursor.fetchone()
-
-        if not top:
-            await interaction.followup.send("No scores yet today.")
+        from utils.mvp_engine import settle_cycle
+        settled = await settle_cycle(self.bot, interaction.guild, force=True)
+        if not settled or not settled["winners"]:
+            await interaction.followup.send("No eligible winners this cycle.")
             return
-
-        uid, score  = top
-        member      = interaction.guild.get_member(uid)
-        if not member:
-            await interaction.followup.send("MVP user not found.")
-            return
-
-        snap = snapshot_user(member)
-        now  = datetime.now(timezone.utc)
-        from utils.timezone import CAIRO_TZ
-        cairo_today = now.astimezone(CAIRO_TZ).date()
-        cycle_start_cairo = __import__('datetime', fromlist=['datetime']).datetime(cairo_today.year, cairo_today.month, cairo_today.day, tzinfo=CAIRO_TZ).astimezone(timezone.utc)
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
-                INSERT INTO mvp_history
-                    (guild_id, user_id, user_display_name,
-                     cycle_start, cycle_end, score)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (interaction.guild.id, uid,
-                  snap["display_name"],
-                  cycle_start_cairo.isoformat(),
-                  now.isoformat(), int(score)))
-            await db.commit()
-
-        await interaction.followup.send(
-            f"{CHECK_EMOJI} Forced MVP: {member.mention} with {int(score):,} pts")
+        names = ", ".join(f"{w['rank']}- <@{w['user_id']}>" for w in settled["winners"])
+        await interaction.followup.send(f"{CHECK_EMOJI} Forced MVP cycle: {names}")
 
 
 async def setup(bot):
