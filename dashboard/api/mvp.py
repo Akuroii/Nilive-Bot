@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import csv
 import io
 import datetime
@@ -17,6 +18,8 @@ from dashboard.permissions import (
 from dashboard.api import api_bp
 
 # ── MVP ───────────────────────────────────────────────────────────────────────
+
+MAX_WEIGHT = 1_000_000   # per-word / per-minute weight sanity cap
 
 @api_bp.route("/mvp/scores")
 @require_api_permission(LEVEL_ADMIN)
@@ -84,25 +87,71 @@ def get_mvp_config_api():
     return jsonify({"config": run_async(fetch())})
 
 
-def _validated_mvp_numbers(data: dict):
-    """Returns (values, error). Ranks 1-10, rewards per rank, threshold >= 0."""
-    from utils.mvp_engine import MAX_RANKS, MAX_REWARD
+def _whole_number(value, label: str, *, blank_ok: bool = False, default: int = 0) -> int:
+    """Strict whole number: rejects NaN/Infinity, booleans and fractions (no silent truncation)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if blank_ok:
+            return default
+        raise ValueError(f"{label} is required.")
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a whole number.")
     try:
-        cycle_hours = int(data.get("cycle_hours", 6))
-        ranks = int(data.get("winner_ranks", 1))
-        chat_w = float(data.get("chat_word_weight", 1.0))
-        voice_w = float(data.get("voice_minute_weight", 2.0))
-        min_words = float(data.get("min_activity_words", 0) or 0)
-        raw_rewards = data.get("rank_rewards") or []
-        rewards = [int(v or 0) for v in raw_rewards][:ranks]
+        number = float(value)
     except (TypeError, ValueError):
-        return None, "Cycle hours, ranks, rewards, weights and the activity minimum must be numbers."
+        raise ValueError(f"{label} must be a whole number.")
+    if not math.isfinite(number) or number != int(number):
+        raise ValueError(f"{label} must be a whole number.")
+    return int(number)
+
+
+def _finite_number(value, label: str) -> float:
+    """Finite non-negative decimal; rejects NaN/Infinity, which JSON parsing lets through."""
+    if value is None or isinstance(value, bool) or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"{label} is required.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a number.")
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be a finite number.")
+    return number
+
+
+def _validated_mvp_numbers(data: dict, current: dict | None = None):
+    """Returns (values, error). Ranks 1-10, rewards per rank, threshold >= 0.
+
+    A key that is absent from ``data`` keeps the guild's stored value
+    (``current``, or the engine defaults for a guild with no saved row), so a
+    partial request can never silently reset another field. A key that is
+    present must be valid; blanks are errors, not silent defaults.
+    """
+    from utils.mvp_engine import MAX_RANKS, MAX_REWARD, DEFAULTS
+    base = {**DEFAULTS, **(current or {})}
+
+    def pick(key):
+        return data[key] if key in data else base[key]
+
+    try:
+        cycle_hours = _whole_number(pick("cycle_hours"), "Cycle hours")
+        ranks = _whole_number(pick("winner_ranks"), "Winner ranks")
+        chat_w = _finite_number(pick("chat_word_weight"), "Chat word weight")
+        voice_w = _finite_number(pick("voice_minute_weight"), "Voice weight")
+        min_words = _finite_number(pick("min_activity_words"), "Minimum activity")
+        raw_rewards = pick("rank_rewards") or []
+        if not isinstance(raw_rewards, (list, tuple)):
+            return None, "Rank rewards must be a list."
+        rewards = [_whole_number(v, f"Rank {i} reward", blank_ok=True)
+                   for i, v in enumerate(raw_rewards[:ranks], 1)]
+    except ValueError as exc:
+        return None, str(exc)
     if not 1 <= cycle_hours <= 168:
         return None, "Cycle hours must be from 1 to 168."
     if not 1 <= ranks <= MAX_RANKS:
         return None, f"Winner ranks must be from 1 to {MAX_RANKS}."
     if chat_w < 0 or voice_w < 0:
         return None, "Weights cannot be negative."
+    if chat_w > MAX_WEIGHT or voice_w > MAX_WEIGHT:
+        return None, f"Weights must be at most {MAX_WEIGHT:,}."
     if min_words < 0 or min_words > 10_000_000:
         return None, "The minimum activity must be from 0 to 10,000,000 words."
     rewards += [0] * (ranks - len(rewards))
@@ -116,20 +165,25 @@ def _validated_mvp_numbers(data: dict):
 @require_api_permission(LEVEL_ADMIN)
 def save_mvp_config_api():
     guild_id = get_session_guild_id()
-    data     = request.json or {}
+    data     = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Send the MVP settings as a JSON object."}), 400
 
-    values, error = _validated_mvp_numbers(data)
+    from utils.mvp_engine import get_config
+    current = run_async(get_config(guild_id))
+    values, error = _validated_mvp_numbers(data, current)
     if error:
         return jsonify({"success": False, "error": error}), 400
 
+    # A key that is absent keeps the stored role/channel; an explicit null/""
+    # clears it. This is what stops a partial request wiping them.
+    role_id = (data.get("mvp_role_id") or None) if "mvp_role_id" in data else current.get("mvp_role_id")
+    channel_id = ((data.get("announce_channel_id") or None) if "announce_channel_id" in data
+                  else current.get("announce_channel_id"))
+
     new_role = data.get("mvp_role_id")
     if new_role:
-        async def get_curr():
-            async with aiosqlite.connect(DB_PATH) as db:
-                c = await db.execute("SELECT mvp_role_id FROM mvp_config WHERE guild_id = ?", (guild_id,))
-                row = await c.fetchone()
-                return row[0] if row else None
-        curr_role = run_async(get_curr())
+        curr_role = current.get("mvp_role_id")
         from dashboard.utils.role_validation import validate_assignable_role
         valid, err = validate_assignable_role(guild_id, new_role, curr_role)
         if not valid:
@@ -156,8 +210,8 @@ def save_mvp_config_api():
             """, (
                 guild_id,
                 values["cycle_hours"],
-                data.get("mvp_role_id") or None,
-                data.get("announce_channel_id") or None,
+                role_id,
+                channel_id,
                 values["chat_w"],
                 values["voice_w"],
                 values["ranks"],

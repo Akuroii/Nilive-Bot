@@ -906,44 +906,77 @@ def retry_member_blacklist_roles_api():
 # dashboard CRUD surface for prestige_config (enabled + per-tier
 # multipliers) and prestige_roles (tier -> role_id mapping).
 
+PRESTIGE_MULTIPLIER_MAX = 100.0   # sanity cap; a multiplier must also be > 0
+
+
+def _validate_prestige_tiers(raw_tiers):
+    """Returns ({tier: {coins, diamonds}}, error). All-or-nothing: any bad entry
+    rejects the whole save with a message naming it, so "Saved" always means
+    every submitted tier was stored."""
+    import math
+    if not isinstance(raw_tiers, dict):
+        return None, "Tier multipliers must be an object keyed by tier number."
+    tiers = {}
+    for k, v in raw_tiers.items():
+        try:
+            tier = int(k)
+        except (TypeError, ValueError):
+            return None, f"Unknown Prestige tier {k!r}."
+        if tier not in (1, 2, 3, 4, 5, 6):
+            return None, f"Prestige tier {k!r} does not exist (tiers are 1 to 6)."
+        if not isinstance(v, dict):
+            return None, f"Tier {tier} needs both a coins and a diamonds multiplier."
+        entry = {}
+        for cur in ("coins", "diamonds"):
+            raw = v.get(cur)
+            if raw is None or isinstance(raw, bool) or (isinstance(raw, str) and not raw.strip()):
+                return None, f"Tier {tier} {cur} multiplier is required."
+            try:
+                number = float(raw)
+            except (TypeError, ValueError):
+                return None, f"Tier {tier} {cur} multiplier must be a number."
+            if not math.isfinite(number) or not 0 < number <= PRESTIGE_MULTIPLIER_MAX:
+                return None, (f"Tier {tier} {cur} multiplier must be greater than 0 "
+                              f"and at most {PRESTIGE_MULTIPLIER_MAX:g}.")
+            entry[cur] = number
+        tiers[tier] = entry
+    return tiers, None
+
+
 @api_bp.route("/leveling/prestige-config", methods=["GET"])
 @require_api_permission(LEVEL_ADMIN)
 def get_prestige_config_api():
-    from utils.prestige import get_prestige_config as _get_prestige_config
+    from utils.prestige import get_prestige_config as _get_prestige_config, DEFAULT_TIER_MULTIPLIERS
     guild_id = get_session_guild_id()
-    return jsonify({"config": run_async(_get_prestige_config(guild_id))})
+    config = run_async(_get_prestige_config(guild_id))
+    # Show what the earn engine will actually apply: a tier with no stored row
+    # falls back to the locked default (utils.prestige.get_effective_prestige_multipliers).
+    stored = config.get("tiers") or {}
+    config["tiers"] = {t: (stored.get(t) or dict(DEFAULT_TIER_MULTIPLIERS[t])) for t in (1, 2, 3, 4, 5, 6)}
+    return jsonify({"config": config})
 
 
 @api_bp.route("/leveling/prestige-config", methods=["POST"])
 @require_api_permission(LEVEL_ADMIN)
 def save_prestige_config_api():
     guild_id = get_session_guild_id()
-    data     = request.json or {}
-    enabled  = int(bool(data.get("enabled", True)))
+    data     = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "Send the Prestige settings as a JSON object."}), 400
 
-    # Optional per-tier multipliers, keyed by tier number (1..6). Each is
-    # {"coins": float, "diamonds": float}. Blank/invalid entries are skipped
-    # so a partial save never clobbers a tier with garbage.
+    # ``enabled`` is only written when the request carries it; leaving it out
+    # must not re-enable a system an admin switched off.
+    enabled = None
+    if "enabled" in data:
+        if not isinstance(data["enabled"], (bool, int)) or data["enabled"] not in (0, 1):
+            return jsonify({"success": False, "error": "Enabled must be true or false."}), 400
+        enabled = int(data["enabled"])
+
     tiers = None
-    raw_tiers = data.get("tiers")
-    if isinstance(raw_tiers, dict):
-        tiers = {}
-        for k, v in raw_tiers.items():
-            try:
-                tier = int(k)
-            except (TypeError, ValueError):
-                continue
-            if tier not in (1, 2, 3, 4, 5, 6):
-                continue
-            if not isinstance(v, dict):
-                continue
-            try:
-                tiers[tier] = {
-                    "coins": max(0.0, float(v.get("coins", 1.0))),
-                    "diamonds": max(0.0, float(v.get("diamonds", 1.0))),
-                }
-            except (TypeError, ValueError):
-                continue
+    if data.get("tiers") is not None:
+        tiers, error = _validate_prestige_tiers(data["tiers"])
+        if error:
+            return jsonify({"success": False, "error": error}), 400
 
     from utils.prestige import set_prestige_multipliers
 
@@ -952,7 +985,8 @@ def save_prestige_config_api():
 
     run_async(save())
     log_action(guild_id,
-               f"Updated prestige config: enabled={bool(enabled)}",
+               "Updated prestige config"
+               + (f": enabled={bool(enabled)}" if enabled is not None else ""),
                "leveling")
     return jsonify({"success": True})
 

@@ -108,6 +108,7 @@
 <div id="tab-content-config" class="tab-content" style="display:none;">
     <div class="card" data-ux-track-dirty>
         <div class="card-title"><svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-settings"></use></svg> MVP Configuration</div>
+        <p id="mvp-config-scope" class="text-muted text-sm" role="status" aria-live="polite" style="margin-bottom:16px;"></p>
         <div class="form-row">
             <div class="form-group">
                 <label class="form-label">Cycle hours (how often MVP resets)</label>
@@ -126,32 +127,33 @@
             <div class="form-group">
                 <label class="form-label">Chat word weight (XP per word)</label>
                 <input class="form-input" id="mvp-chat-weight"
-                       type="number" step="0.1" min="0" placeholder="1.0">
+                       type="number" step="0.1" min="0" placeholder="1.0" oninput="updateMinHint()">
             </div>
             <div class="form-group">
                 <label class="form-label">Voice weight (XP per minute)</label>
                 <input class="form-input" id="mvp-voice-weight"
-                       type="number" step="0.1" min="0" placeholder="2.0">
+                       type="number" step="0.1" min="0" placeholder="2.0" oninput="updateMinHint()">
             </div>
             <div class="form-group">
                 <label class="form-label">Winner ranks (1–10)</label>
                 <input class="form-input" id="mvp-ranks" type="number" min="1" max="10" step="1" placeholder="1" oninput="renderRankRewards([])">
-                <div class="form-hint">Ranks, not people: members tied on a score share a rank and all win it.</div>
+                <div class="form-hint">Ranks, not people. Members tied on the same score share that rank, and every tied member receives that rank's Coins reward and the MVP role. The next lower score takes the next rank (two members tied for Rank 1, then the next score is Rank 2).</div>
             </div>
             <div class="form-group">
                 <label class="form-label">Coins per rank</label>
                 <div id="mvp-rank-rewards"></div>
-                <div class="form-hint">Paid once per winner with their Prestige multiplier applied. 0 = no Coins.</div>
+                <div class="form-hint">Paid once per winner with their Prestige multiplier applied. 0 = no Coins. Tied winners are each paid the full amount for their shared rank.</div>
+                <div id="mvp-reward-preview" class="form-hint" style="margin-top:8px;" aria-live="polite"></div>
             </div>
             <div class="form-group">
                 <label class="form-label">Minimum activity (words, 0 = off)</label>
                 <input class="form-input" id="mvp-min-words" type="number" min="0" step="1" placeholder="0" oninput="updateMinHint()">
-                <div class="form-hint" id="mvp-min-hint">Members below this do not win. Uses the chat weight above.</div>
+                <div class="form-hint" id="mvp-min-hint">Members below this do not win. Uses this server's chat weight above.</div>
             </div>
         </div>
         <button class="btn btn-primary" id="mvp-save-btn"
                 onclick="saveMVPConfig(this)">Save Config</button>
-        <span class="form-save-state" data-ux-save-state aria-live="polite"></span>
+        <span class="form-save-state" data-ux-save-state id="mvp-save-status" aria-live="polite"></span>
     </div>
 </div>
 
@@ -199,8 +201,21 @@ function renderRankRewards(values) {
         input.className = 'form-input mvp-rank-reward';
         input.type = 'number'; input.min = '0'; input.step = '1';
         input.value = (values[i] !== undefined ? values[i] : (old[i] || 0));
+        input.addEventListener('input', updateRewardPreview);
         row.appendChild(label); row.appendChild(input); box.appendChild(row);
     }
+    updateRewardPreview();
+}
+
+function updateRewardPreview() {
+    const out = document.getElementById('mvp-reward-preview');
+    if (!out) return;
+    const inputs = Array.from(document.querySelectorAll('.mvp-rank-reward'));
+    const parts = inputs.map((el, i) => {
+        const v = Number(el.value);
+        return 'Rank ' + (i + 1) + ': ' + (Number.isFinite(v) && el.value !== '' ? v.toLocaleString() : '?') + ' Coins';
+    });
+    out.textContent = 'Preview (before Prestige) — ' + parts.join(' · ') + '. Each tied member gets their shared rank\'s amount.';
 }
 
 function updateMinHint() {
@@ -212,28 +227,49 @@ function updateMinHint() {
     if (words <= 0) { hint.textContent = 'Off: any member with activity can win.'; return; }
     const points = words * chat;
     hint.textContent = voice > 0
-        ? words + ' words = ' + points.toFixed(1) + ' points = about ' + (points / voice).toFixed(1) + ' voice minutes.'
+        ? words + ' words = ' + points.toFixed(1) + ' points = about ' + (points / voice).toFixed(1) + ' voice minutes (this server\'s chat and voice weights).'
         : words + ' words = ' + points.toFixed(1) + ' points (voice weight is 0, so voice cannot reach it).';
 }
 
+// The saved role/channel as loaded, so a save made before the pickers finish
+// populating cannot send "no role" and wipe them.
+let loadedRoleId = null;
+let loadedChannelId = null;
+
+function pickerValue(el, loadedId) {
+    const v = el ? ($(el).val() || null) : null;
+    if (v) return v;
+    if (loadedId && el && !Array.from(el.options).some(o => o.value === String(loadedId))) return String(loadedId);
+    return null;
+}
+
 async function loadMVPConfig() {
-    const res = await fetch('/api/mvp/config');
-    if (!res.ok) return;
-    const data = await res.json();
-    const c    = data.config;
-    if (!c) return;
-    const cycleEl = document.getElementById('mvp-cycle');
-    const chatEl = document.getElementById('mvp-chat-weight');
-    const voiceEl = document.getElementById('mvp-voice-weight');
-    if (cycleEl) cycleEl.value = c.cycle_hours || 6;
-    if (chatEl) chatEl.value = c.chat_word_weight || 1.0;
-    if (voiceEl) voiceEl.value = c.voice_minute_weight || 2.0;
-    const ranksEl = document.getElementById('mvp-ranks');
-    if (ranksEl) ranksEl.value = c.winner_ranks || 1;
+    const scope = document.getElementById('mvp-config-scope');
+    let data;
+    try {
+        const res = await fetch('/api/mvp/config');
+        if (!res.ok) { if (scope) scope.textContent = 'Could not load the saved MVP settings.'; return; }
+        data = await res.json();
+    } catch (e) {
+        if (scope) scope.textContent = 'Could not load the saved MVP settings.';
+        return;
+    }
+    const c = data.config || {};
+    const saved = Object.keys(c).length > 0;
+    if (scope) scope.textContent = saved
+        ? 'These settings are saved specifically for this server.'
+        : 'No MVP settings are saved for this server yet. The values shown are the defaults; nothing is shared with other servers.';
+    // `??` (not `||`): a saved 0 must be shown as 0, never replaced by a default.
+    const num = (v, d) => (v === undefined || v === null ? d : v);
+    document.getElementById('mvp-cycle').value = num(c.cycle_hours, 6);
+    document.getElementById('mvp-chat-weight').value = num(c.chat_word_weight, 1.0);
+    document.getElementById('mvp-voice-weight').value = num(c.voice_minute_weight, 2.0);
+    document.getElementById('mvp-ranks').value = num(c.winner_ranks, 1);
     renderRankRewards(c.rank_rewards || []);
-    const minEl = document.getElementById('mvp-min-words');
-    if (minEl) minEl.value = c.min_activity_words || 0;
+    document.getElementById('mvp-min-words').value = num(c.min_activity_words, 0);
     updateMinHint();
+    loadedRoleId = c.mvp_role_id ? String(c.mvp_role_id) : null;
+    loadedChannelId = c.announce_channel_id ? String(c.announce_channel_id) : null;
     // Set Select2 values after pickers are initialized
     setTimeout(function() {
         const rp = document.getElementById('mvp-role-picker');
@@ -244,21 +280,65 @@ async function loadMVPConfig() {
 }
 loadMVPConfig();
 
+// Reads the form without substituting defaults: a blank or invalid field is
+// reported, never silently turned into 6 / 1.0 / 2.0 (which also overwrote a
+// deliberate 0 weight).
+function readMVPForm() {
+    const val = id => String(document.getElementById(id).value).trim();
+    const whole = (id, label, lo, hi) => {
+        const raw = val(id), n = Number(raw);
+        if (raw === '' || !Number.isInteger(n) || n < lo || n > hi) return { error: label + ' must be a whole number from ' + lo + ' to ' + hi + '.' };
+        return { n };
+    };
+    const dec = (id, label, hi) => {
+        const raw = val(id), n = Number(raw);
+        if (raw === '' || !Number.isFinite(n) || n < 0 || n > hi) return { error: label + ' must be a number from 0 to ' + hi.toLocaleString() + '.' };
+        return { n };
+    };
+    const cycle = whole('mvp-cycle', 'Cycle hours', 1, 168);
+    const ranks = whole('mvp-ranks', 'Winner ranks', 1, 10);
+    const chat = dec('mvp-chat-weight', 'Chat word weight', 1000000);
+    const voice = dec('mvp-voice-weight', 'Voice weight', 1000000);
+    const minw = dec('mvp-min-words', 'Minimum activity', 10000000);
+    for (const r of [cycle, ranks, chat, voice, minw]) if (r.error) return { error: r.error };
+    const rewards = [];
+    const inputs = Array.from(document.querySelectorAll('.mvp-rank-reward'));
+    for (let i = 0; i < inputs.length; i++) {
+        const raw = String(inputs[i].value).trim(), n = Number(raw);
+        if (raw === '' || !Number.isInteger(n) || n < 0 || n > 1000000000) {
+            return { error: 'Rank ' + (i + 1) + ' reward must be a whole number of Coins from 0 to 1,000,000,000.' };
+        }
+        rewards.push(n);
+    }
+    if (rewards.length !== ranks.n) return { error: 'Set a Coins reward for each of the ' + ranks.n + ' ranks.' };
+    return { payload: {
+        cycle_hours: cycle.n, winner_ranks: ranks.n,
+        chat_word_weight: chat.n, voice_minute_weight: voice.n,
+        min_activity_words: minw.n, rank_rewards: rewards,
+    } };
+}
+
 async function saveMVPConfig(btn) {
+    const status = document.getElementById('mvp-save-status');
+    const form = readMVPForm();
+    if (form.error) {
+        if (status) { status.textContent = form.error; status.dataset.state = 'error'; }
+        showToast(form.error, 'error');
+        return;
+    }
+    if (status) delete status.dataset.state;
     const rp = document.getElementById('mvp-role-picker');
     const cp = document.getElementById('mvp-channel-picker');
-    const payload = {
-        cycle_hours:         parseInt(document.getElementById('mvp-cycle').value)         || 6,
-        mvp_role_id:         rp ? ($(rp).val() || null) : null,
-        announce_channel_id: cp ? ($(cp).val() || null) : null,
-        chat_word_weight:    parseFloat(document.getElementById('mvp-chat-weight').value)  || 1.0,
-        voice_minute_weight: parseFloat(document.getElementById('mvp-voice-weight').value) || 2.0,
-        winner_ranks:        parseInt(document.getElementById('mvp-ranks').value) || 1,
-        rank_rewards:        Array.from(document.querySelectorAll('.mvp-rank-reward'))
-                                  .map(el => parseInt(el.value) || 0),
-        min_activity_words:  parseFloat(document.getElementById('mvp-min-words').value) || 0,
-    };
-    await ajaxSave('/api/mvp/config', payload, btn, 'MVP config saved!');
+    const payload = Object.assign({}, form.payload, {
+        mvp_role_id:         pickerValue(rp, loadedRoleId),
+        announce_channel_id: pickerValue(cp, loadedChannelId),
+    });
+    const data = await ajaxSave('/api/mvp/config', payload, btn, 'MVP config saved!');
+    if (data && data.success) {
+        const scope = document.getElementById('mvp-config-scope');
+        if (scope) scope.textContent = 'These settings are saved specifically for this server.';
+        loadedRoleId = payload.mvp_role_id; loadedChannelId = payload.announce_channel_id;
+    }
 }
 
 })();
