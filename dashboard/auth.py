@@ -307,6 +307,8 @@ def fetch_bot_guilds_full() -> GuildDiscoveryList:
             return GuildDiscoveryList(stored, ok=True, complete=True, status="ok", http_status=200)
     except Exception as e:
         print(f"[AUTH] Error querying local bot_guilds: {e}")
+        # Database exceptions must NEVER fall through to Discord REST requests
+        return GuildDiscoveryList([], ok=False, complete=False, status="db_error", error=f"Database error: {type(e).__name__}")
 
     # Not synchronized yet. Avoid repeated REST hammering: throttle recovery attempts to at most once per 60s
     now = time.time()
@@ -331,7 +333,7 @@ def fetch_bot_guilds_full() -> GuildDiscoveryList:
                 }
                 for g in res
             ]
-            run_async(sync_bot_guilds(guild_payloads))
+            run_async(sync_bot_guilds(guild_payloads, authoritative=True))
         except Exception as e:
             print(f"[AUTH] Error persisting recovery bot guilds: {e}")
     return res
@@ -353,6 +355,8 @@ def check_bot_guild_membership(guild_id: int) -> str:
             return BotMembershipStatus.CONFIRMED_NO_ACCESS
     except Exception as e:
         print(f"[AUTH] Error checking local bot guild membership: {e}")
+        # Database exceptions must NEVER fall through to Discord REST requests
+        return BotMembershipStatus.INDETERMINATE
 
     bot_token = os.getenv("DISCORD_TOKEN", "")
     if not bot_token:

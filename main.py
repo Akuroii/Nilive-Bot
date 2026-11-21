@@ -326,6 +326,7 @@ async def backfill_guild_owners():
     each guild's real Discord owner a dashboard_users row.
     Safe to re-run on every on_ready reconnect.
     """
+    is_authoritative = bot.is_ready()
     guild_payloads = [
         {
             "guild_id": guild.id,
@@ -336,11 +337,11 @@ async def backfill_guild_owners():
         }
         for guild in bot.guilds
     ]
-    await sync_bot_guilds(guild_payloads)
+    await sync_bot_guilds(guild_payloads, authoritative=is_authoritative)
     for guild in bot.guilds:
         if guild.owner_id:
             await add_guild_owner(guild.id, guild.owner_id)
-    print(f"✅ Synchronized {len(bot.guilds)} guilds to database & backfilled owner access")
+    print(f"✅ Synchronized {len(bot.guilds)} guilds to database & backfilled owner access (authoritative={is_authoritative})")
 
 
 @bot.command()

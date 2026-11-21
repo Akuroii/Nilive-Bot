@@ -2685,13 +2685,22 @@ async def add_guild_owner(guild_id: int, owner_discord_id: int):
     print(f"✅ Owner access granted for guild {guild_id} (owner={owner_discord_id})")
 
 
-async def sync_bot_guilds(guild_data_list: list[dict]):
+async def sync_bot_guilds(guild_data_list: list[dict], *, authoritative: bool = True):
     """
     Atomically synchronizes the full set of bot guilds from Gateway client state.
-    Upserts active guilds, deletes confirmed removed guilds, and stamps readiness.
-    Guards against incomplete Gateway state by refusing to prune when the incoming
-    guild list is empty, and preserves known names/icons for temporarily unavailable guilds.
-    Idempotent across repeated on_ready events and periodic heartbeat cycles.
+    Distinguishes complete authoritative snapshots (authoritative=True) from
+    incomplete/transient snapshots (authoritative=False):
+    - When authoritative=True and guild_data_list is non-empty:
+        Upserts active guilds, deletes removed guilds, and stamps guilds_synced = '1'.
+    - When authoritative=True and guild_data_list is empty ([]):
+        Confirmed zero-guild bot state. Purges all stale records from bot_guilds
+        and stamps guilds_synced = '1'. Subsequent checks for any guild confirm non-membership.
+    - When authoritative=False:
+        Incomplete/unverified Gateway state (e.g. connecting, unready).
+        Upserts any available guilds without pruning missing ones, and does NOT
+        mark synchronization as complete.
+    Preserves known names/icons for temporarily unavailable guilds.
+    Guaranteed atomic via BEGIN TRANSACTION with rollback on error.
     """
     now = datetime.now(timezone.utc).isoformat()
     active_ids = []
@@ -2717,21 +2726,23 @@ async def sync_bot_guilds(guild_data_list: list[dict]):
                         synced_at = excluded.synced_at
                 """, (gid, name, icon, owner_id, member_count, now, name, name, name))
 
-            # Prune removed guilds ONLY when we have a valid, non-empty active guild set.
-            # An empty incoming list represents an incomplete Gateway connection state,
-            # so we never prune to prevent dropping valid records.
-            if active_ids:
-                placeholders = ",".join("?" for _ in active_ids)
-                await db.execute(f"DELETE FROM bot_guilds WHERE guild_id NOT IN ({placeholders})", active_ids)
+            if authoritative:
+                if active_ids:
+                    placeholders = ",".join("?" for _ in active_ids)
+                    await db.execute(f"DELETE FROM bot_guilds WHERE guild_id NOT IN ({placeholders})", active_ids)
+                else:
+                    # Confirmed authoritative zero-guild snapshot: purge stale records
+                    await db.execute("DELETE FROM bot_guilds")
 
-            # Record synchronization readiness
-            await db.execute("""
-                INSERT INTO bot_sync_state (key, value, updated_at)
-                VALUES ('guilds_synced', '1', ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = '1',
-                    updated_at = excluded.updated_at
-            """, (now,))
+                # Record synchronization readiness
+                await db.execute("""
+                    INSERT INTO bot_sync_state (key, value, updated_at)
+                    VALUES ('guilds_synced', '1', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = '1',
+                        updated_at = excluded.updated_at
+                """, (now,))
+
             await db.commit()
         except Exception:
             await db.rollback()

@@ -134,7 +134,7 @@ class Health(commands.Cog):
                     }
                     for guild in self.bot.guilds
                 ]
-                await sync_bot_guilds(guild_payloads)
+                await sync_bot_guilds(guild_payloads, authoritative=True)
         except Exception:
             # A failure to WRITE health data shouldn't itself crash
             # the loop — print and let the next tick try again.

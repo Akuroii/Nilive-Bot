@@ -36,6 +36,12 @@ class DeveloperGuildAccessTests(unittest.TestCase):
         run_async(init_db())
 
     def setUp(self):
+        os.environ["OWNER_ID"] = str(DEV_USER_ID)
+        import database
+        database.OWNER_DISCORD_ID = DEV_USER_ID
+        import dashboard.permissions
+        dashboard.permissions.OWNER_DISCORD_ID = DEV_USER_ID
+
         self.client = app.test_client()
         async def reset_db():
             async with aiosqlite.connect(DB_PATH) as db:
@@ -252,7 +258,7 @@ class DeveloperGuildAccessTests(unittest.TestCase):
             self.assertEqual(sel_resp.status_code, 302)
 
     def test_09_bot_removal_and_gateway_safety(self):
-        """Scenario 9: Bot removal revokes access; empty/incomplete state never wipes database; unavailable preserved."""
+        """Scenario 9: Bot removal revokes access; incomplete state preserves records; authoritative empty sync purges and denies access."""
         self._login(DEV_USER_ID, "Developer")
 
         # 9a. Bot removal revokes access
@@ -263,8 +269,8 @@ class DeveloperGuildAccessTests(unittest.TestCase):
         )
         self.assertEqual(sel_resp.status_code, 403)
 
-        # 9b. Incomplete Gateway reconnect with empty guild list does NOT wipe database
-        run_async(sync_bot_guilds([]))
+        # 9b. Incomplete Gateway snapshot (authoritative=False) with empty guild list does NOT wipe database
+        run_async(sync_bot_guilds([], authoritative=False))
         stored = run_async(get_stored_bot_guilds())
         stored_ids = {g["id_num"] for g in stored}
         # Guild 2 and 3 must still exist
@@ -274,11 +280,25 @@ class DeveloperGuildAccessTests(unittest.TestCase):
         # 9c. Temporary guild unavailability preserves known name and icon
         run_async(sync_bot_guilds([
             {"guild_id": INSTALLED_GUILD_2, "name": None, "icon": None, "owner_id": 0, "member_count": 0},
-        ]))
+        ], authoritative=False))
         stored2 = run_async(get_stored_bot_guilds())
         g2 = next(g for g in stored2 if g["id_num"] == INSTALLED_GUILD_2)
         self.assertEqual(g2["name"], "Bot Server 2 (Dev Regular Member)")
         self.assertEqual(g2["icon"], "icon2")
+
+        # 9d. Authoritative empty sync ([] with authoritative=True): confirms zero-guild bot state,
+        # purges all stale records, sets guilds_synced = '1', and Dashboard denies access.
+        run_async(sync_bot_guilds([], authoritative=True))
+        stored_empty = run_async(get_stored_bot_guilds())
+        self.assertEqual(len(stored_empty), 0)
+        self.assertTrue(run_async(is_bot_guild_synced()))
+
+        # Dashboard immediately treats empty authoritative sync as confirmed zero membership
+        sel_resp2 = self.client.post(
+            f"/select-guild/{INSTALLED_GUILD_2}",
+            data={"csrf_token": "test-csrf-token"},
+        )
+        self.assertEqual(sel_resp2.status_code, 403)
 
     def test_10_zero_discord_bot_rest_requests_when_synced(self):
         """Scenario 10: Server select and guild check make ZERO outbound Discord REST calls with bot token."""
@@ -298,6 +318,64 @@ class DeveloperGuildAccessTests(unittest.TestCase):
             # Assert requests.get was NEVER called for bot endpoints (Bot <token>)
             bot_calls = [c for c in mock_req.call_args_list if "Bot " in str(c)]
             self.assertEqual(len(bot_calls), 0)
+
+    def test_11_throttle_enforcement_under_unsynced_and_empty_states(self):
+        """Scenario 11 (Blocker 1): Repeated calls during unsynchronized or empty states respect 60s throttle."""
+        async def clear_sync_state():
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM bot_guilds")
+                await db.execute("DELETE FROM bot_sync_state")
+                await db.commit()
+        run_async(clear_sync_state())
+
+        auth._last_bot_rest_attempt = 0.0
+        with patch.dict(os.environ, {"DISCORD_TOKEN": "mock-bot-token"}), \
+             patch("dashboard.auth._fetch_paginated_guilds") as mock_fetch:
+            from dashboard.auth import GuildDiscoveryList
+            mock_fetch.return_value = GuildDiscoveryList([], ok=True, complete=True, status="ok", http_status=200)
+
+            current_time = 1000.0
+            with patch("dashboard.auth.time.time", side_effect=lambda: current_time):
+                # Call 1: First attempt allowed
+                res1 = auth.fetch_bot_guilds_full()
+                self.assertEqual(mock_fetch.call_count, 1)
+
+                # Call 2: Immediate repeat must be throttled without REST call
+                res2 = auth.fetch_bot_guilds_full()
+                self.assertEqual(mock_fetch.call_count, 1)
+                self.assertEqual(res2.status, "sync_pending")
+
+                # Call 3: Advance 30s (< 60s) - still throttled
+                current_time = 1030.0
+                res3 = auth.fetch_bot_guilds_full()
+                self.assertEqual(mock_fetch.call_count, 1)
+                self.assertEqual(res3.status, "sync_pending")
+
+                # Call 4: Advance to 1061s (> 60s) - allowed
+                current_time = 1061.0
+                res4 = auth.fetch_bot_guilds_full()
+                self.assertEqual(mock_fetch.call_count, 2)
+
+    def test_12_database_exceptions_never_trigger_discord_rest_requests(self):
+        """Scenario 12 (Blocker 1): Database exceptions in fetch_bot_guilds_full or check_bot_guild_membership do not fall through to REST."""
+        with patch.dict(os.environ, {"DISCORD_TOKEN": "mock-bot-token"}), \
+             patch("database.is_bot_guild_synced", side_effect=Exception("Simulated SQLite lock error")), \
+             patch("database.is_stored_bot_guild", side_effect=Exception("Simulated SQLite lock error")), \
+             patch("dashboard.auth.requests.get") as mock_http, \
+             patch("dashboard.auth._fetch_paginated_guilds") as mock_fetch:
+
+            # 1. fetch_bot_guilds_full should return db_error without calling Discord REST
+            res = auth.fetch_bot_guilds_full()
+            self.assertFalse(res.ok)
+            self.assertEqual(res.status, "db_error")
+            self.assertIn("Database error", res.error)
+            mock_fetch.assert_not_called()
+            mock_http.assert_not_called()
+
+            # 2. check_bot_guild_membership should return INDETERMINATE without calling Discord REST
+            status = auth.check_bot_guild_membership(INSTALLED_GUILD_1)
+            self.assertEqual(status, auth.BotMembershipStatus.INDETERMINATE)
+            mock_http.assert_not_called()
 
 
 if __name__ == "__main__":
