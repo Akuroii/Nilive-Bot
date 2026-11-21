@@ -17,7 +17,10 @@ load_dotenv()
 # silently invisible to it. Moved below load_dotenv() so both sources
 # work the same way.
 import aiosqlite
-from database import DB_PATH, add_guild_owner
+from database import (
+    DB_PATH, add_guild_owner, sync_bot_guilds,
+    record_bot_guild_join, record_bot_guild_remove, record_bot_guild_update,
+)
 
 print("Starting Nero bot...")
 
@@ -297,22 +300,48 @@ async def on_app_command_error(interaction: discord.Interaction,
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     print(f"Joined new guild: {guild.name} ({guild.id})")
+    icon_key = getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)
+    await record_bot_guild_join(
+        guild.id, guild.name, icon_key,
+        guild.owner_id or 0, getattr(guild, "member_count", 0) or 0,
+    )
     await add_guild_owner(guild.id, guild.owner_id)
+
+
+@bot.event
+async def on_guild_remove(guild: discord.Guild):
+    print(f"Removed from guild: {guild.name} ({guild.id})")
+    await record_bot_guild_remove(guild.id)
+
+
+@bot.event
+async def on_guild_update(before: discord.Guild, after: discord.Guild):
+    icon_key = getattr(after.icon, "key", None) if hasattr(after.icon, "key") else (str(after.icon) if after.icon else None)
+    await record_bot_guild_update(after.id, after.name, icon_key)
 
 
 async def backfill_guild_owners():
     """
-    Grants each guild's REAL Discord owner (guild.owner_id) a
-    dashboard_users 'owner' row, for every guild the bot is ALREADY
-    in — on_guild_join above only covers guilds joined after this
-    deploy. Called from on_ready, which re-fires on every reconnect;
-    safe to re-run every time since add_guild_owner()'s INSERT OR
-    IGNORE is idempotent against idx_du_unique(guild_id, user_id).
+    Synchronizes the bot's installed guild list to bot_guilds and grants
+    each guild's real Discord owner a dashboard_users row.
+    Safe to re-run on every on_ready reconnect.
     """
+    is_authoritative = bot.is_ready()
+    guild_payloads = [
+        {
+            "guild_id": guild.id,
+            "name": guild.name if not getattr(guild, "unavailable", False) else None,
+            "icon": (getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)) if not getattr(guild, "unavailable", False) else None,
+            "owner_id": (guild.owner_id or 0) if not getattr(guild, "unavailable", False) else 0,
+            "member_count": (getattr(guild, "member_count", 0) or 0) if not getattr(guild, "unavailable", False) else 0,
+        }
+        for guild in bot.guilds
+    ]
+    await sync_bot_guilds(guild_payloads, authoritative=is_authoritative)
     for guild in bot.guilds:
         if guild.owner_id:
             await add_guild_owner(guild.id, guild.owner_id)
-    print(f"✅ Backfilled real owner access for {len(bot.guilds)} guilds")
+    print(f"✅ Synchronized {len(bot.guilds)} guilds to database & backfilled owner access (authoritative={is_authoritative})")
 
 
 @bot.command()
