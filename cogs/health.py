@@ -6,7 +6,7 @@ import traceback
 from discord.ext import commands, tasks
 import aiosqlite
 import json
-from database import DB_PATH
+from database import DB_PATH, sync_bot_guilds
 from utils.formatters import now_iso
 
 HEARTBEAT_INTERVAL_SECONDS = 30
@@ -123,6 +123,18 @@ class Health(commands.Cog):
                     platform.python_version(),
                 ))
                 await db.commit()
+            if self.bot.is_ready():
+                guild_payloads = [
+                    {
+                        "guild_id": guild.id,
+                        "name": guild.name if not getattr(guild, "unavailable", False) else None,
+                        "icon": (getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)) if not getattr(guild, "unavailable", False) else None,
+                        "owner_id": (guild.owner_id or 0) if not getattr(guild, "unavailable", False) else 0,
+                        "member_count": (getattr(guild, "member_count", 0) or 0) if not getattr(guild, "unavailable", False) else 0,
+                    }
+                    for guild in self.bot.guilds
+                ]
+                await sync_bot_guilds(guild_payloads)
         except Exception:
             # A failure to WRITE health data shouldn't itself crash
             # the loop — print and let the next tick try again.

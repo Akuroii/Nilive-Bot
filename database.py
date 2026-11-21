@@ -1,5 +1,6 @@
 import aiosqlite
 import asyncio
+from datetime import datetime, timezone
 import os
 import re
 import sqlite3
@@ -2280,6 +2281,25 @@ async def init_db():
         """)
 
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_guilds (
+                guild_id        INTEGER PRIMARY KEY,
+                name            TEXT NOT NULL DEFAULT 'Unknown Server',
+                icon            TEXT,
+                owner_id        INTEGER DEFAULT 0,
+                member_count    INTEGER DEFAULT 0,
+                synced_at       TEXT NOT NULL
+            )
+        """)
+
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_sync_state (
+                key             TEXT PRIMARY KEY,
+                value           TEXT,
+                updated_at      TEXT NOT NULL
+            )
+        """)
+
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_users (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id         INTEGER NOT NULL,
@@ -2663,6 +2683,133 @@ async def add_guild_owner(guild_id: int, owner_discord_id: int):
         """, (guild_id, owner_discord_id))
         await db.commit()
     print(f"✅ Owner access granted for guild {guild_id} (owner={owner_discord_id})")
+
+
+async def sync_bot_guilds(guild_data_list: list[dict]):
+    """
+    Atomically synchronizes the full set of bot guilds from Gateway client state.
+    Upserts active guilds, deletes confirmed removed guilds, and stamps readiness.
+    Guards against incomplete Gateway state by refusing to prune when the incoming
+    guild list is empty, and preserves known names/icons for temporarily unavailable guilds.
+    Idempotent across repeated on_ready events and periodic heartbeat cycles.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    active_ids = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("BEGIN TRANSACTION")
+            for g in guild_data_list:
+                gid = int(g["guild_id"])
+                active_ids.append(gid)
+                raw_name = g.get("name")
+                name = str(raw_name) if raw_name is not None else None
+                icon = g.get("icon")
+                owner_id = int(g.get("owner_id") or 0)
+                member_count = int(g.get("member_count") or 0)
+                await db.execute("""
+                    INSERT INTO bot_guilds (guild_id, name, icon, owner_id, member_count, synced_at)
+                    VALUES (?, COALESCE(?, 'Unknown Server'), ?, ?, ?, ?)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        name = CASE WHEN ? IS NOT NULL AND ? != '' THEN ? ELSE bot_guilds.name END,
+                        icon = COALESCE(excluded.icon, bot_guilds.icon),
+                        owner_id = CASE WHEN excluded.owner_id > 0 THEN excluded.owner_id ELSE bot_guilds.owner_id END,
+                        member_count = CASE WHEN excluded.member_count > 0 THEN excluded.member_count ELSE bot_guilds.member_count END,
+                        synced_at = excluded.synced_at
+                """, (gid, name, icon, owner_id, member_count, now, name, name, name))
+
+            # Prune removed guilds ONLY when we have a valid, non-empty active guild set.
+            # An empty incoming list represents an incomplete Gateway connection state,
+            # so we never prune to prevent dropping valid records.
+            if active_ids:
+                placeholders = ",".join("?" for _ in active_ids)
+                await db.execute(f"DELETE FROM bot_guilds WHERE guild_id NOT IN ({placeholders})", active_ids)
+
+            # Record synchronization readiness
+            await db.execute("""
+                INSERT INTO bot_sync_state (key, value, updated_at)
+                VALUES ('guilds_synced', '1', ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = '1',
+                    updated_at = excluded.updated_at
+            """, (now,))
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def record_bot_guild_join(guild_id: int, name: str, icon: str | None,
+                                owner_id: int = 0, member_count: int = 0):
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT INTO bot_guilds (guild_id, name, icon, owner_id, member_count, synced_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                name = excluded.name,
+                icon = excluded.icon,
+                owner_id = excluded.owner_id,
+                member_count = excluded.member_count,
+                synced_at = excluded.synced_at
+        """, (int(guild_id), str(name), icon, int(owner_id), int(member_count), now))
+        await db.commit()
+
+
+async def record_bot_guild_remove(guild_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM bot_guilds WHERE guild_id = ?", (int(guild_id),))
+        await db.commit()
+
+
+async def record_bot_guild_update(guild_id: int, name: str, icon: str | None):
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE bot_guilds
+            SET name = ?, icon = ?, synced_at = ?
+            WHERE guild_id = ?
+        """, (str(name), icon, now, int(guild_id)))
+        await db.commit()
+
+
+async def get_stored_bot_guilds() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT guild_id, name, icon, owner_id, member_count, synced_at
+            FROM bot_guilds
+            ORDER BY name COLLATE NOCASE ASC
+        """)
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": str(row[0]),
+                "id_num": row[0],
+                "name": row[1],
+                "icon": row[2],
+                "owner_id": row[3],
+                "member_count": row[4],
+                "synced_at": row[5],
+            }
+            for row in rows
+        ]
+
+
+async def is_bot_guild_synced() -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT value FROM bot_sync_state WHERE key = 'guilds_synced'
+        """)
+        row = await cursor.fetchone()
+        return bool(row and row[0] == '1')
+
+
+async def is_stored_bot_guild(guild_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT 1 FROM bot_guilds WHERE guild_id = ?
+        """, (int(guild_id),))
+        row = await cursor.fetchone()
+        return row is not None
 
 
 if __name__ == "__main__":
