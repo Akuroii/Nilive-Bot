@@ -282,56 +282,49 @@ def fetch_discord_bot_guilds() -> GuildDiscoverySet:
     )
 
 
+_last_bot_rest_attempt: float = 0.0
+
+
 def fetch_bot_guilds_full() -> GuildDiscoveryList:
     """
     Full guild objects (id, name, icon, ...) the bot is currently a
-    member of, read via the BOT token with bounded pagination.
-    Returns a GuildDiscoveryList (a list subclass with .ok, .complete,
-    .status, .http_status, .error) so callers can distinguish genuine empty
-    membership from missing DISCORD_TOKEN, API failures, or truncated lists.
+    member of. Sourced strictly from the local bot_guilds database table,
+    authoritatively synchronized by the Gateway bot process with zero Discord
+    REST rate-limit overhead.
     """
-    bot_token = os.getenv("DISCORD_TOKEN", "").strip()
-    if not bot_token:
-        return GuildDiscoveryList([], ok=False, complete=False, status="missing_token", error="BOT_TOKEN not configured")
-    return _fetch_paginated_guilds(f"Bot {bot_token}", "fetch_bot_guilds_full")
+    from database import get_stored_bot_guilds, is_bot_guild_synced
+
+    try:
+        synced = run_async(is_bot_guild_synced())
+        stored = run_async(get_stored_bot_guilds())
+        if synced:
+            return GuildDiscoveryList(stored, ok=True, complete=True, status="ok", http_status=200)
+        if stored:
+            # Table has rows from previous run; return with sync pending
+            return GuildDiscoveryList(stored, ok=True, complete=False, status="sync_pending", http_status=200)
+        return GuildDiscoveryList([], ok=False, complete=False, status="sync_pending", error="Bot synchronization pending")
+    except Exception as e:
+        print(f"[AUTH] Error querying local bot_guilds: {e}")
+        return GuildDiscoveryList([], ok=False, complete=False, status="db_error", error=f"Database error: {type(e).__name__}")
 
 
 def check_bot_guild_membership(guild_id: int) -> str:
     """
-    Conservative tri-state membership check via the BOT token.
-    Distinguishes confirmed installation (200), confirmed non-access
-    (explicit Discord error codes 10004 Unknown Guild or 50001 Missing Access),
-    and indeterminate states (timeouts, rate limits 429, auth errors 401,
-    Discord server errors 5xx).
+    Conservative tri-state membership check. Sourced strictly from the local
+    atomic bot_guilds check. Zero Discord REST requests.
     """
-    bot_token = os.getenv("DISCORD_TOKEN", "")
-    if not bot_token:
-        return BotMembershipStatus.INDETERMINATE
+    from database import check_bot_guild_access_atomic, GuildAccessState
+
     try:
-        r = requests.get(
-            f"{DISCORD_API}/guilds/{guild_id}",
-            headers={"Authorization": f"Bot {bot_token}"},
-            timeout=5,
-        )
-        if r.status_code == 200:
+        state = run_async(check_bot_guild_access_atomic(guild_id))
+        if state == GuildAccessState.INSTALLED:
             return BotMembershipStatus.INSTALLED
-
-        try:
-            data = r.json()
-            code = data.get("code")
-        except Exception:
-            code = None
-
-        if r.status_code == 404 and code == 10004:
+        elif state == GuildAccessState.CONFIRMED_NO_ACCESS:
             return BotMembershipStatus.CONFIRMED_NO_ACCESS
-        if r.status_code == 403 and code == 50001:
-            return BotMembershipStatus.CONFIRMED_NO_ACCESS
-
-        return BotMembershipStatus.INDETERMINATE
-    except (requests.Timeout, requests.ConnectionError):
-        return BotMembershipStatus.INDETERMINATE
+        else:
+            return BotMembershipStatus.INDETERMINATE
     except Exception as e:
-        print(f"[AUTH] check_bot_guild_membership error: {e}")
+        print(f"[AUTH] Error checking local bot guild membership: {e}")
         return BotMembershipStatus.INDETERMINATE
 
 

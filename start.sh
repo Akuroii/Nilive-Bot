@@ -1,44 +1,97 @@
 #!/bin/bash
-echo "Starting bot..."
+set -eo pipefail
+set -m
+
+echo "Starting Nilive-Bot container..."
 cd /app
 
-# RELIABILITY FIX: previously this backgrounded main.py once, did a
-# single 5s liveness check, then moved on to run the dashboard in the
-# foreground forever. If the bot crashed hours into uptime, nothing
-# here noticed or restarted it — the container itself stayed healthy
-# (the dashboard process was still alive), so container-level restart
-# policies never triggered either. The only signal was the /health
-# dashboard page going stale, discovered only if someone happened to
-# look.
-#
-# This now runs the bot inside a small supervisor loop in the
-# background: if main.py exits for any reason, it's relaunched after
-# a short backoff, indefinitely, for the lifetime of the container.
+cleanup_and_exit() {
+    local target_exit_code=$1
+    echo "[start.sh] Attempting to invalidate persisted authorization..."
+    if ! python3 -m utils.startup_barrier 2>/dev/null; then
+        echo "[start.sh] WARNING: Failed to invalidate persisted authorization during cleanup."
+    else
+        echo "[start.sh] Successfully invalidated persisted authorization."
+    fi
+
+    echo "[start.sh] Reaping service process groups..."
+    kill -TERM -"$BOT_SUPERVISOR_PID" 2>/dev/null || true
+    kill -TERM -"$DASHBOARD_PID" 2>/dev/null || true
+
+    for _ in {1..20}; do
+        if ! kill -0 "$BOT_SUPERVISOR_PID" 2>/dev/null && ! kill -0 "$DASHBOARD_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    kill -KILL -"$BOT_SUPERVISOR_PID" 2>/dev/null || true
+    kill -KILL -"$DASHBOARD_PID" 2>/dev/null || true
+
+    wait "$BOT_SUPERVISOR_PID" 2>/dev/null || true
+    wait "$DASHBOARD_PID" 2>/dev/null || true
+
+    echo "[start.sh] All processes reaped. Container exiting with code $target_exit_code."
+    exit "$target_exit_code"
+}
+
+shutdown() {
+    echo "[start.sh] SIGTERM/SIGINT received. Initiating graceful container shutdown..."
+    cleanup_and_exit 0
+}
+trap shutdown TERM INT
+
+# 1. Initial pre-flight barrier
+echo "[start.sh] Running pre-flight startup barrier..."
+if ! python3 -m utils.startup_barrier; then
+    echo "[start.sh] FATAL: Pre-flight startup barrier failed. Container aborting."
+    exit 1
+fi
+
+# 2. Bot Supervisor Loop (PGID = BOT_SUPERVISOR_PID)
 supervise_bot() {
     while true; do
-        echo "[supervisor] Launching bot..."
-        python -u main.py 2>&1
-        exit_code=$?
-        echo "[supervisor] Bot exited with code $exit_code — restarting in 5s..."
+        echo "[supervisor] Running pre-launch barrier..."
+        if ! python3 -m utils.startup_barrier; then
+            echo "[supervisor] Pre-launch barrier failed! Exiting supervisor loop with failure."
+            exit 1
+        fi
+
+        echo "[supervisor] Launching main.py..."
+        code=0
+        python3 -u main.py || code=$?
+        echo "[supervisor] Bot process exited with code $code."
+
+        echo "[supervisor] Running post-exit barrier..."
+        if ! python3 -m utils.startup_barrier; then
+            echo "[supervisor] Post-exit barrier failed! Exiting supervisor loop with failure."
+            exit 1
+        fi
+
+        echo "[supervisor] Restarting bot in 5s..."
         sleep 5
     done
 }
 
 supervise_bot &
 BOT_SUPERVISOR_PID=$!
-echo "Bot supervisor PID: $BOT_SUPERVISOR_PID"
-sleep 5
-echo "Bot status check..."
-if kill -0 $BOT_SUPERVISOR_PID 2>/dev/null; then
-    echo "Bot supervisor is running!"
-else
-    echo "Bot supervisor failed to start!"
-fi
+echo "[start.sh] Bot supervisor started with PGID: $BOT_SUPERVISOR_PID"
 
-# NOTE: the dashboard no longer depends on this sleep for correctness —
-# dashboard/app.py calls init_db() itself on import, so the schema exists
-# before any Flask route can run, regardless of how long the bot takes to
-# come up (or whether it crashes). The sleep above is just to surface a
-# quick bot-crashed log line, not to gate DB readiness.
-echo "Starting dashboard..."
-python -u dashboard/app.py 2>&1
+# 3. Dashboard Daemon (PGID = DASHBOARD_PID)
+echo "[start.sh] Starting dashboard..."
+python3 -u dashboard/app.py &
+DASHBOARD_PID=$!
+echo "[start.sh] Dashboard started with PGID: $DASHBOARD_PID"
+
+# 4. Monitor both critical services
+CHILD_STATUS=0
+wait -fn "$BOT_SUPERVISOR_PID" "$DASHBOARD_PID" || CHILD_STATUS=$?
+
+echo "[start.sh] Critical service terminated with status $CHILD_STATUS."
+
+if [ "$CHILD_STATUS" -eq 0 ]; then
+    echo "[start.sh] Service exited unexpectedly with status 0. Escalating to 1."
+    cleanup_and_exit 1
+else
+    cleanup_and_exit "$CHILD_STATUS"
+fi

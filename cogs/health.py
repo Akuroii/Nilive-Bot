@@ -6,10 +6,11 @@ import traceback
 from discord.ext import commands, tasks
 import aiosqlite
 import json
-from database import DB_PATH
+from utils.db_config import DB_PATH
+from database import touch_bot_sync_lease
 from utils.formatters import now_iso
 
-HEARTBEAT_INTERVAL_SECONDS = 30
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 async def _ensure_row():
@@ -123,6 +124,14 @@ class Health(commands.Cog):
                     platform.python_version(),
                 ))
                 await db.commit()
+
+            coordinator = getattr(self.bot, "gateway_coordinator", None)
+            if coordinator and coordinator.can_touch_lease():
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute("SELECT value FROM bot_sync_state WHERE key = 'guilds_synced'")
+                    row = await cursor.fetchone()
+                    if row and row[0] == '1':
+                        await touch_bot_sync_lease(DB_PATH)
         except Exception:
             # A failure to WRITE health data shouldn't itself crash
             # the loop — print and let the next tick try again.
