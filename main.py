@@ -17,10 +17,12 @@ load_dotenv()
 # silently invisible to it. Moved below load_dotenv() so both sources
 # work the same way.
 import aiosqlite
+from utils.db_config import DB_PATH
 from database import (
-    DB_PATH, add_guild_owner, sync_bot_guilds,
+    add_guild_owner, sync_bot_guilds,
     record_bot_guild_join, record_bot_guild_remove, record_bot_guild_update,
 )
+from utils.guild_lifecycle import GuildLifecycleCoordinator
 
 print("Starting Nero bot...")
 
@@ -145,6 +147,7 @@ class NeroCommandTree(discord.app_commands.CommandTree):
 
         return True
 bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=NeroCommandTree, case_insensitive=True)
+bot.gateway_coordinator = GuildLifecycleCoordinator(bot)
 
 _status_index = 0
 
@@ -232,6 +235,7 @@ async def load_cogs():
 @bot.event
 async def on_ready():
     print(f"Nero is online as {bot.user}")
+    bot.gateway_coordinator.gateway_transport_verified = True
     try:
         await bot.tree.sync()
         synced = await bot.tree.fetch_commands()
@@ -239,8 +243,23 @@ async def on_ready():
     except Exception as e:
         print(f"Sync error: {e}")
         traceback.print_exc()
+
+    await bot.gateway_coordinator.reconcile_guilds()
     await backfill_guild_owners()
     rotate_status.start()
+
+
+@bot.event
+async def on_resumed():
+    print("[GATEWAY] Session resumed successfully; reconciling guild state...")
+    bot.gateway_coordinator.gateway_transport_verified = True
+    await bot.gateway_coordinator.reconcile_guilds()
+
+
+@bot.event
+async def on_disconnect():
+    print("[GATEWAY] Disconnected from Discord Gateway; invalidating authorization...")
+    await bot.gateway_coordinator.on_disconnect_async()
 
 
 @bot.event
@@ -300,48 +319,59 @@ async def on_app_command_error(interaction: discord.Interaction,
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     print(f"Joined new guild: {guild.name} ({guild.id})")
-    icon_key = getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)
-    await record_bot_guild_join(
-        guild.id, guild.name, icon_key,
-        guild.owner_id or 0, getattr(guild, "member_count", 0) or 0,
-    )
-    await add_guild_owner(guild.id, guild.owner_id)
+    async def _do_join():
+        icon_key = getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)
+        await record_bot_guild_join(
+            guild.id, guild.name, icon_key,
+            guild.owner_id or 0, getattr(guild, "member_count", 0) or 0,
+        )
+        await add_guild_owner(guild.id, guild.owner_id)
+    await bot.gateway_coordinator.execute_mutation(_do_join)
 
 
 @bot.event
 async def on_guild_remove(guild: discord.Guild):
+    if getattr(guild, "unavailable", False):
+        print(f"[GATEWAY] Guild {guild.id} is temporarily unavailable; preserving in database.")
+        return
     print(f"Removed from guild: {guild.name} ({guild.id})")
-    await record_bot_guild_remove(guild.id)
+    async def _do_remove():
+        await record_bot_guild_remove(guild.id)
+    await bot.gateway_coordinator.execute_mutation(_do_remove)
+
+
+@bot.event
+async def on_guild_unavailable(guild: discord.Guild):
+    print(f"[GATEWAY] Guild {guild.id} is temporarily unavailable due to Discord outage; preserving in database.")
+
+
+@bot.event
+async def on_guild_available(guild: discord.Guild):
+    print(f"[GATEWAY] Guild {guild.id} is back online; updating metadata.")
+    icon_key = getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)
+    async def _do_update():
+        await record_bot_guild_update(guild.id, guild.name, icon_key)
+    await bot.gateway_coordinator.execute_mutation(_do_update)
 
 
 @bot.event
 async def on_guild_update(before: discord.Guild, after: discord.Guild):
     icon_key = getattr(after.icon, "key", None) if hasattr(after.icon, "key") else (str(after.icon) if after.icon else None)
-    await record_bot_guild_update(after.id, after.name, icon_key)
+    async def _do_update():
+        await record_bot_guild_update(after.id, after.name, icon_key)
+    await bot.gateway_coordinator.execute_mutation(_do_update)
 
 
 async def backfill_guild_owners():
     """
-    Synchronizes the bot's installed guild list to bot_guilds and grants
-    each guild's real Discord owner a dashboard_users row.
-    Safe to re-run on every on_ready reconnect.
+    Backfills owner access rows in dashboard_users for installed guilds.
+    Guild synchronization to bot_guilds is handled authoritatively by
+    bot.gateway_coordinator.reconcile_guilds().
     """
-    is_authoritative = bot.is_ready()
-    guild_payloads = [
-        {
-            "guild_id": guild.id,
-            "name": guild.name if not getattr(guild, "unavailable", False) else None,
-            "icon": (getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)) if not getattr(guild, "unavailable", False) else None,
-            "owner_id": (guild.owner_id or 0) if not getattr(guild, "unavailable", False) else 0,
-            "member_count": (getattr(guild, "member_count", 0) or 0) if not getattr(guild, "unavailable", False) else 0,
-        }
-        for guild in bot.guilds
-    ]
-    await sync_bot_guilds(guild_payloads, authoritative=is_authoritative)
     for guild in bot.guilds:
         if guild.owner_id:
             await add_guild_owner(guild.id, guild.owner_id)
-    print(f"✅ Synchronized {len(bot.guilds)} guilds to database & backfilled owner access (authoritative={is_authoritative})")
+    print(f"✅ Backfilled owner access for {len(bot.guilds)} installed guilds")
 
 
 @bot.command()

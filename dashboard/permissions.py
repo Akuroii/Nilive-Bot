@@ -6,7 +6,7 @@ import aiosqlite
 from functools import wraps
 from urllib.parse import urlencode
 from flask import session, redirect, url_for, abort, jsonify, request, render_template
-from database import DB_PATH, OWNER_DISCORD_ID
+from database import DB_PATH, OWNER_DISCORD_ID, check_bot_guild_access_atomic, GuildAccessState
 from dashboard.utils.async_utils import run_async
 from utils.permissions import (
     LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
@@ -15,12 +15,15 @@ from utils.permissions import (
 
 
 async def _get_permission_level(guild_id: int, user_id: int) -> str | None:
-    # Guild-blind developer bypass — checked before touching
-    # dashboard_users at all, so the trusted developer never needs a
-    # row (and therefore never appears in Current Access) in any
-    # guild. See is_trusted_super_admin() below for the trust set.
+    # Trusted developer / super admin: developer bypass is scoped strictly to
+    # guilds where the bot is currently installed. Evaluated atomically via
+    # check_bot_guild_access_atomic to ensure synchronization validity.
     if is_trusted_super_admin(user_id):
-        return LEVEL_OWNER
+        access_state = await check_bot_guild_access_atomic(guild_id)
+        if access_state == GuildAccessState.INSTALLED:
+            return LEVEL_OWNER
+        # Fail closed on CONFIRMED_NO_ACCESS or INDETERMINATE (returns None -> 403 Forbidden)
+        return None
 
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""

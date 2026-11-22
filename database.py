@@ -1,36 +1,13 @@
 import aiosqlite
 import asyncio
 from datetime import datetime, timezone
+from enum import Enum
 import os
 import re
 import sqlite3
 import sys
 
-# STAGING / PRODUCTION SEPARATION: set NERO_ENVIRONMENT=staging on a
-# second deploy (e.g. a throwaway Oracle Cloud instance or a local dev
-# box) to point at a separate DB file without touching production data.
-# Unset (the default) behaves exactly as before — DATABASE_PATH (or the
-# hardcoded /app/data/nero.db default) is used untouched, so existing
-# deploys need zero config changes.
-NERO_ENVIRONMENT = os.getenv("NERO_ENVIRONMENT", "production").strip().lower()
-
-if NERO_ENVIRONMENT == "staging":
-    DB_PATH = os.getenv("STAGING_DATABASE_PATH", "/app/data/nero_staging.db")
-    # Safety guard: if someone sets NERO_ENVIRONMENT=staging but a
-    # STAGING_DATABASE_PATH that (accidentally or via copy-paste) points
-    # at the same file as production, refuse to start rather than let a
-    # staging session silently read/write prod data.
-    _prod_path = os.getenv("DATABASE_PATH", "/app/data/nero.db")
-    if os.path.abspath(DB_PATH) == os.path.abspath(_prod_path):
-        print("=" * 60)
-        print("FATAL: NERO_ENVIRONMENT=staging but STAGING_DATABASE_PATH")
-        print("  resolves to the SAME file as production DATABASE_PATH.")
-        print(f"  Both resolve to: {os.path.abspath(DB_PATH)}")
-        print("  -> Set STAGING_DATABASE_PATH to a different path.")
-        print("=" * 60)
-        sys.exit(1)
-else:
-    DB_PATH = os.getenv("DATABASE_PATH", "/app/data/nero.db")
+from utils.db_config import DB_PATH, NERO_ENVIRONMENT
 
 # SECURITY FIX: OWNER_DISCORD_ID previously had a hardcoded fallback —
 # anyone deploying from this source without setting OWNER_ID got a
@@ -2685,7 +2662,7 @@ async def add_guild_owner(guild_id: int, owner_discord_id: int):
     print(f"✅ Owner access granted for guild {guild_id} (owner={owner_discord_id})")
 
 
-async def sync_bot_guilds(guild_data_list: list[dict], *, authoritative: bool = True):
+async def sync_bot_guilds(guild_data_list: list[dict], *, authoritative: bool = True, db_path: str = DB_PATH):
     """
     Atomically synchronizes the full set of bot guilds from Gateway client state.
     Distinguishes complete authoritative snapshots (authoritative=True) from
@@ -2704,7 +2681,7 @@ async def sync_bot_guilds(guild_data_list: list[dict], *, authoritative: bool = 
     """
     now = datetime.now(timezone.utc).isoformat()
     active_ids = []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         try:
             await db.execute("BEGIN TRANSACTION")
             for g in guild_data_list:
@@ -2734,10 +2711,17 @@ async def sync_bot_guilds(guild_data_list: list[dict], *, authoritative: bool = 
                     # Confirmed authoritative zero-guild snapshot: purge stale records
                     await db.execute("DELETE FROM bot_guilds")
 
-                # Record synchronization readiness
+                # Record synchronization readiness and refresh lease
                 await db.execute("""
                     INSERT INTO bot_sync_state (key, value, updated_at)
                     VALUES ('guilds_synced', '1', ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = '1',
+                        updated_at = excluded.updated_at
+                """, (now,))
+                await db.execute("""
+                    INSERT INTO bot_sync_state (key, value, updated_at)
+                    VALUES ('bot_sync_lease', '1', ?)
                     ON CONFLICT(key) DO UPDATE SET
                         value = '1',
                         updated_at = excluded.updated_at
@@ -2749,10 +2733,151 @@ async def sync_bot_guilds(guild_data_list: list[dict], *, authoritative: bool = 
             raise
 
 
-async def record_bot_guild_join(guild_id: int, name: str, icon: str | None,
-                                owner_id: int = 0, member_count: int = 0):
+BOT_SYNC_LEASE_TTL_SECONDS = 45.0
+
+
+class GuildAccessState(str, Enum):
+    INSTALLED           = "INSTALLED"
+    CONFIRMED_NO_ACCESS = "CONFIRMED_NO_ACCESS"
+    INDETERMINATE       = "INDETERMINATE"
+
+
+async def check_bot_guild_access_atomic(guild_id: int | str, db_path: str = DB_PATH) -> GuildAccessState:
+    """
+    Asynchronously evaluates synchronization readiness, lease freshness (<= 45.0s),
+    and guild membership in a SINGLE atomic SQLite read query.
+    Guarantees consistent read snapshot isolation and explicit connection cleanup.
+    """
+    try:
+        gid = int(guild_id)
+    except (ValueError, TypeError):
+        return GuildAccessState.CONFIRMED_NO_ACCESS
+
+    try:
+        async with aiosqlite.connect(db_path, timeout=5.0) as db:
+            query = """
+                SELECT
+                    (SELECT value FROM bot_sync_state WHERE key = 'guilds_synced') AS sync_val,
+                    (SELECT updated_at FROM bot_sync_state WHERE key = 'bot_sync_lease') AS lease_time,
+                    (SELECT 1 FROM bot_guilds WHERE guild_id = ?) AS is_member
+            """
+            async with db.execute(query, (gid,)) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                return GuildAccessState.INDETERMINATE
+
+            sync_val, lease_time_str, is_member = row
+
+            if sync_val != '1' or not lease_time_str:
+                return GuildAccessState.INDETERMINATE
+
+            try:
+                lease_time = datetime.fromisoformat(lease_time_str)
+                if lease_time.tzinfo is None:
+                    lease_time = lease_time.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                return GuildAccessState.INDETERMINATE
+
+            now = datetime.now(timezone.utc)
+            age = (now - lease_time).total_seconds()
+            if age < -5.0 or age > BOT_SYNC_LEASE_TTL_SECONDS:
+                return GuildAccessState.INDETERMINATE
+
+            if is_member == 1:
+                return GuildAccessState.INSTALLED
+            else:
+                return GuildAccessState.CONFIRMED_NO_ACCESS
+    except Exception:
+        return GuildAccessState.INDETERMINATE
+
+
+async def is_bot_sync_valid(db_path: str = DB_PATH) -> bool:
+    """
+    Validates whether the bot's synchronization state is current and its heartbeat lease is active (<= 45s).
+    """
+    try:
+        async with aiosqlite.connect(db_path, timeout=5.0) as db:
+            query = """
+                SELECT
+                    (SELECT value FROM bot_sync_state WHERE key = 'guilds_synced') AS sync_val,
+                    (SELECT updated_at FROM bot_sync_state WHERE key = 'bot_sync_lease') AS lease_time
+            """
+            async with db.execute(query) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                return False
+
+            sync_val, lease_time_str = row
+            if sync_val != '1' or not lease_time_str:
+                return False
+
+            try:
+                lease_time = datetime.fromisoformat(lease_time_str)
+                if lease_time.tzinfo is None:
+                    lease_time = lease_time.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                return False
+
+            now = datetime.now(timezone.utc)
+            age = (now - lease_time).total_seconds()
+            return -5.0 <= age <= BOT_SYNC_LEASE_TTL_SECONDS
+    except Exception:
+        return False
+
+
+async def touch_bot_sync_lease(db_path: str = DB_PATH) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path, timeout=5.0) as db:
+        await db.execute("""
+            INSERT INTO bot_sync_state (key, value, updated_at)
+            VALUES ('bot_sync_lease', '1', ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = '1',
+                updated_at = excluded.updated_at
+        """, (now,))
+        await db.commit()
+
+
+async def invalidate_bot_sync_state(db_path: str = DB_PATH) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(db_path, timeout=5.0) as db:
+        await db.execute("""
+            INSERT INTO bot_sync_state (key, value, updated_at)
+            VALUES ('guilds_synced', '0', ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = '0',
+                updated_at = excluded.updated_at
+        """, (now,))
+        await db.commit()
+
+
+async def restore_bot_sync_state(db_path: str = DB_PATH) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(db_path, timeout=5.0) as db:
+        await db.execute("""
+            INSERT INTO bot_sync_state (key, value, updated_at)
+            VALUES ('guilds_synced', '1', ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = '1',
+                updated_at = excluded.updated_at
+        """, (now,))
+        await db.execute("""
+            INSERT INTO bot_sync_state (key, value, updated_at)
+            VALUES ('bot_sync_lease', '1', ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = '1',
+                updated_at = excluded.updated_at
+        """, (now,))
+        await db.commit()
+
+
+async def record_bot_guild_join(guild_id: int, name: str, icon: str | None,
+                                owner_id: int = 0, member_count: int = 0,
+                                db_path: str = DB_PATH):
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(db_path) as db:
         await db.execute("""
             INSERT INTO bot_guilds (guild_id, name, icon, owner_id, member_count, synced_at)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -2766,15 +2891,15 @@ async def record_bot_guild_join(guild_id: int, name: str, icon: str | None,
         await db.commit()
 
 
-async def record_bot_guild_remove(guild_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+async def record_bot_guild_remove(guild_id: int, db_path: str = DB_PATH):
+    async with aiosqlite.connect(db_path) as db:
         await db.execute("DELETE FROM bot_guilds WHERE guild_id = ?", (int(guild_id),))
         await db.commit()
 
 
-async def record_bot_guild_update(guild_id: int, name: str, icon: str | None):
+async def record_bot_guild_update(guild_id: int, name: str, icon: str | None, db_path: str = DB_PATH):
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(db_path) as db:
         await db.execute("""
             UPDATE bot_guilds
             SET name = ?, icon = ?, synced_at = ?
@@ -2783,8 +2908,8 @@ async def record_bot_guild_update(guild_id: int, name: str, icon: str | None):
         await db.commit()
 
 
-async def get_stored_bot_guilds() -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
+async def get_stored_bot_guilds(db_path: str = DB_PATH) -> list[dict]:
+    async with aiosqlite.connect(db_path) as db:
         cursor = await db.execute("""
             SELECT guild_id, name, icon, owner_id, member_count, synced_at
             FROM bot_guilds
@@ -2805,17 +2930,12 @@ async def get_stored_bot_guilds() -> list[dict]:
         ]
 
 
-async def is_bot_guild_synced() -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("""
-            SELECT value FROM bot_sync_state WHERE key = 'guilds_synced'
-        """)
-        row = await cursor.fetchone()
-        return bool(row and row[0] == '1')
+async def is_bot_guild_synced(db_path: str = DB_PATH) -> bool:
+    return await is_bot_sync_valid(db_path)
 
 
-async def is_stored_bot_guild(guild_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
+async def is_stored_bot_guild(guild_id: int, db_path: str = DB_PATH) -> bool:
+    async with aiosqlite.connect(db_path) as db:
         cursor = await db.execute("""
             SELECT 1 FROM bot_guilds WHERE guild_id = ?
         """, (int(guild_id),))

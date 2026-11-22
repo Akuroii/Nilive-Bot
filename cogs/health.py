@@ -6,10 +6,11 @@ import traceback
 from discord.ext import commands, tasks
 import aiosqlite
 import json
-from database import DB_PATH, sync_bot_guilds
+from utils.db_config import DB_PATH
+from database import touch_bot_sync_lease
 from utils.formatters import now_iso
 
-HEARTBEAT_INTERVAL_SECONDS = 30
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 async def _ensure_row():
@@ -123,18 +124,14 @@ class Health(commands.Cog):
                     platform.python_version(),
                 ))
                 await db.commit()
-            if self.bot.is_ready():
-                guild_payloads = [
-                    {
-                        "guild_id": guild.id,
-                        "name": guild.name if not getattr(guild, "unavailable", False) else None,
-                        "icon": (getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)) if not getattr(guild, "unavailable", False) else None,
-                        "owner_id": (guild.owner_id or 0) if not getattr(guild, "unavailable", False) else 0,
-                        "member_count": (getattr(guild, "member_count", 0) or 0) if not getattr(guild, "unavailable", False) else 0,
-                    }
-                    for guild in self.bot.guilds
-                ]
-                await sync_bot_guilds(guild_payloads, authoritative=True)
+
+            coordinator = getattr(self.bot, "gateway_coordinator", None)
+            if coordinator and coordinator.can_touch_lease():
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cursor = await db.execute("SELECT value FROM bot_sync_state WHERE key = 'guilds_synced'")
+                    row = await cursor.fetchone()
+                    if row and row[0] == '1':
+                        await touch_bot_sync_lease(DB_PATH)
         except Exception:
             # A failure to WRITE health data shouldn't itself crash
             # the loop — print and let the next tick try again.

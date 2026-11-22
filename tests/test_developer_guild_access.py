@@ -319,8 +319,8 @@ class DeveloperGuildAccessTests(unittest.TestCase):
             bot_calls = [c for c in mock_req.call_args_list if "Bot " in str(c)]
             self.assertEqual(len(bot_calls), 0)
 
-    def test_11_throttle_enforcement_under_unsynced_and_empty_states(self):
-        """Scenario 11 (Blocker 1): Repeated calls during unsynchronized or empty states respect 60s throttle."""
+    def test_11_zero_discord_rest_membership_calls_when_unsynced(self):
+        """Scenario 11: Zero Dashboard Discord REST calls when unsynchronized; returns sync_pending locally."""
         async def clear_sync_state():
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("DELETE FROM bot_guilds")
@@ -328,39 +328,24 @@ class DeveloperGuildAccessTests(unittest.TestCase):
                 await db.commit()
         run_async(clear_sync_state())
 
-        auth._last_bot_rest_attempt = 0.0
         with patch.dict(os.environ, {"DISCORD_TOKEN": "mock-bot-token"}), \
-             patch("dashboard.auth._fetch_paginated_guilds") as mock_fetch:
-            from dashboard.auth import GuildDiscoveryList
-            mock_fetch.return_value = GuildDiscoveryList([], ok=True, complete=True, status="ok", http_status=200)
+             patch("dashboard.auth._fetch_paginated_guilds") as mock_fetch, \
+             patch("dashboard.auth.requests.get") as mock_http:
 
-            current_time = 1000.0
-            with patch("dashboard.auth.time.time", side_effect=lambda: current_time):
-                # Call 1: First attempt allowed
-                res1 = auth.fetch_bot_guilds_full()
-                self.assertEqual(mock_fetch.call_count, 1)
+            res = auth.fetch_bot_guilds_full()
+            self.assertEqual(res.status, "sync_pending")
+            mock_fetch.assert_not_called()
+            mock_http.assert_not_called()
 
-                # Call 2: Immediate repeat must be throttled without REST call
-                res2 = auth.fetch_bot_guilds_full()
-                self.assertEqual(mock_fetch.call_count, 1)
-                self.assertEqual(res2.status, "sync_pending")
-
-                # Call 3: Advance 30s (< 60s) - still throttled
-                current_time = 1030.0
-                res3 = auth.fetch_bot_guilds_full()
-                self.assertEqual(mock_fetch.call_count, 1)
-                self.assertEqual(res3.status, "sync_pending")
-
-                # Call 4: Advance to 1061s (> 60s) - allowed
-                current_time = 1061.0
-                res4 = auth.fetch_bot_guilds_full()
-                self.assertEqual(mock_fetch.call_count, 2)
+            status = auth.check_bot_guild_membership(INSTALLED_GUILD_1)
+            self.assertEqual(status, auth.BotMembershipStatus.INDETERMINATE)
+            mock_http.assert_not_called()
 
     def test_12_database_exceptions_never_trigger_discord_rest_requests(self):
-        """Scenario 12 (Blocker 1): Database exceptions in fetch_bot_guilds_full or check_bot_guild_membership do not fall through to REST."""
+        """Scenario 12: Database exceptions in fetch_bot_guilds_full or check_bot_guild_membership do not fall through to REST."""
         with patch.dict(os.environ, {"DISCORD_TOKEN": "mock-bot-token"}), \
              patch("database.is_bot_guild_synced", side_effect=Exception("Simulated SQLite lock error")), \
-             patch("database.is_stored_bot_guild", side_effect=Exception("Simulated SQLite lock error")), \
+             patch("database.check_bot_guild_access_atomic", side_effect=Exception("Simulated SQLite lock error")), \
              patch("dashboard.auth.requests.get") as mock_http, \
              patch("dashboard.auth._fetch_paginated_guilds") as mock_fetch:
 
