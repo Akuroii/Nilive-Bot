@@ -423,8 +423,8 @@ def server_select():
         # Checked before the "no guilds" early return below, since an
         # empty personal guild list shouldn't short-circuit this.
         if is_trusted_super_admin(user_id):
-            from dashboard.auth import fetch_bot_guilds_full
-            bot_guilds = fetch_bot_guilds_full()
+            from dashboard.auth import fetch_bot_guilds_full_async
+            bot_guilds = await fetch_bot_guilds_full_async()
             return [{
                 "id":    int(g["id"]),
                 "name":  g.get("name", "Unknown Server"),

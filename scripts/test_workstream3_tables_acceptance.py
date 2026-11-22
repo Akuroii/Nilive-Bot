@@ -22,6 +22,7 @@ os.environ["SECRET_KEY"] = "0123456789abcdef0123456789abcdef"
 os.environ["DISCORD_TOKEN"] = "mock_bot_token"
 
 from database import init_db, DB_PATH
+from support.installed_guilds import seed_installed_guilds
 from dashboard.utils.async_utils import run_async
 run_async(init_db())
 
@@ -33,6 +34,7 @@ class TestWorkstream3MobileTables(unittest.TestCase):
         self.client = app.test_client()
         self.user_id = 999999999
         self.guild_id = 900000000000000001
+        seed_installed_guilds(self.guild_id)
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.templates_dir = os.path.join(self.base_dir, "dashboard", "templates")
         self.static_css_path = os.path.join(self.base_dir, "dashboard", "static", "css", "main.css")

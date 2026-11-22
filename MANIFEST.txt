@@ -1,11 +1,29 @@
-Leveling fixes for PR #76 follow-up (P1-B, P1-C, P1-A documentation)
+PR #130 changed-files package (complete change set vs main, merge-base diff)
+Base (origin/main): 93bc4911f4f6586da480ef39449c7c11a058cfe4
+Final HEAD SHA (local commit; NOT pushed): 46f5a9f6f0a83acc1bedf3fe07620c594765c3a7
+Original PR HEAD reviewed: 8c2443503a41646a36becb5d33b9f256d05a16a6
 
-Final modified versions of exactly these 5 files (repo-relative paths):
-  database.py
-  scripts/test_leveling_config_migration.py
-  XP_PACING_SIMULATION.md
-  scripts/simulate_xp_pacing.py
-  dashboard/templates/systems/leveling.html
-
-Copy/replace each into your working project at the same path.
-Not committed or pushed. No other files are included.
+STATUS	PATH
+M	cogs/health.py
+M	dashboard/app.py
+M	dashboard/auth.py
+M	dashboard/permissions.py
+M	dashboard/utils/async_utils.py
+M	database.py
+M	main.py
+A	scripts/support/installed_guilds.py
+M	scripts/test_channel_grouping_acceptance.py
+M	scripts/test_dashboard_page_scripts.py
+M	scripts/test_dashboard_stabilization_audit.py
+M	scripts/test_workstream1_acceptance.py
+M	scripts/test_workstream2_acceptance.py
+M	scripts/test_workstream2_roles_acceptance.py
+M	scripts/test_workstream3_tables_acceptance.py
+M	start.sh
+A	tests/test_dashboard_developer_gate.py
+A	tests/test_developer_guild_access.py
+A	tests/test_guild_lifecycle_production.py
+A	tests/test_supervisor_start_sh.py
+A	utils/db_config.py
+A	utils/guild_lifecycle.py
+A	utils/startup_barrier.py
