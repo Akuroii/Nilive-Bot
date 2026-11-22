@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 _TMP_DIR = tempfile.mkdtemp(prefix="nero_audit_")
 os.environ["NERO_ENVIRONMENT"] = "staging"
@@ -39,6 +39,7 @@ import aiosqlite
 import requests
 
 from database import DB_PATH, init_db
+from support.installed_guilds import seed_installed_guilds
 from dashboard.utils.async_utils import run_async
 
 run_async(init_db())
@@ -87,6 +88,7 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
                 await db.commit()
 
         run_async(_seed())
+        seed_installed_guilds(SNOWFLAKE_GUILD)
 
     def _login(self, guild_id=SNOWFLAKE_GUILD, level="owner", user_id=None):
         with self.client.session_transaction() as sess:
@@ -375,12 +377,14 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
     # ── 2. ISSUE B: Server Discovery Pagination & Indeterminate Handling ───
 
     def test_issue_b_server_discovery_pagination_and_failure_preservation(self):
-        # 2a. Missing token must mark ok=False (not genuine empty)
-        with patch.dict(os.environ, {"DISCORD_TOKEN": ""}, clear=False):
+        # 2a. Unsynchronized bot state must mark ok=False (not a genuine empty list), with zero REST calls
+        with patch("database.get_bot_guilds_snapshot", new=AsyncMock(return_value=(False, []))), \
+             patch("dashboard.auth.requests.get") as no_rest:
             missing = auth.fetch_bot_guilds_full()
             self.assertEqual(list(missing), [])
             self.assertFalse(getattr(missing, "ok", True))
-            self.assertEqual(getattr(missing, "status", None), "missing_token")
+            self.assertEqual(getattr(missing, "status", None), "sync_pending")
+            no_rest.assert_not_called()
 
         # 2b. Rate limit / network failure in /api/user/servers must NOT downgrade granted server to dangling
         self._login(guild_id=None)
@@ -393,7 +397,9 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             status="ok",
         ) if hasattr(auth, "GuildDiscoveryList") else []
 
-        with patch("dashboard.auth.requests.get", return_value=_mock_resp(429, {"retry_after": 3.0})), \
+        failed_bot_list = auth.GuildDiscoveryList([], ok=False, complete=False, status="sync_pending",
+                                                  error="Bot synchronization pending")
+        with patch("dashboard.auth.fetch_bot_guilds_full", return_value=failed_bot_list), \
              patch("dashboard.app.fetch_discord_guilds", return_value=user_guilds):
             resp = self.client.get("/api/user/servers")
             self.assertEqual(resp.status_code, 200)
@@ -420,7 +426,7 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             raise AssertionError(f"Unexpected pagination params: {params}")
 
         with patch("dashboard.auth.requests.get", side_effect=fake_pages):
-            full = auth.fetch_bot_guilds_full()
+            full = auth._fetch_paginated_guilds("Bearer t", "fetch_discord_guilds")
             self.assertTrue(getattr(full, "ok", False))
             self.assertTrue(getattr(full, "complete", False))
             self.assertEqual(len(full), 205)
@@ -446,7 +452,7 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             raise AssertionError(f"Unexpected pagination params: {params}")
 
         with patch("dashboard.auth.requests.get", side_effect=fake_short_page):
-            full = auth.fetch_bot_guilds_full()
+            full = auth._fetch_paginated_guilds("Bearer t", "fetch_discord_guilds")
             self.assertEqual(len(seen_params), 3)
             self.assertEqual(seen_params[1].get("after"), "1198")
             self.assertEqual(seen_params[2].get("after"), "1201")
@@ -470,7 +476,7 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             return _mock_resp(200, page1)
 
         with patch("dashboard.auth.requests.get", side_effect=fake_repeated_cursor):
-            res = auth.fetch_bot_guilds_full()
+            res = auth._fetch_paginated_guilds("Bearer t", "fetch_discord_guilds")
             self.assertEqual(len(seen_params), 2)
             self.assertEqual(seen_params[1].get("after"), "1199")
             self.assertEqual(len(res), 200)
@@ -500,7 +506,7 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             raise AssertionError(f"Unexpected pagination params: {params}")
 
         with patch("dashboard.auth.requests.get", side_effect=fake_cycling_cursor):
-            res = auth.fetch_bot_guilds_full()
+            res = auth._fetch_paginated_guilds("Bearer t", "fetch_discord_guilds")
             self.assertEqual(len(seen_params), 3)
             self.assertEqual([p.get("after") for p in seen_params], [None, "1199", "1399"])
             self.assertEqual(len(res), len({g["id"] for g in res}))
@@ -519,17 +525,13 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             return _mock_resp(200, [{"id": str(base + i), "name": f"Guild_{base + i}"} for i in range(200)])
 
         with patch("dashboard.auth.requests.get", side_effect=fake_infinite_pages):
-            capped = auth.fetch_bot_guilds_full()
+            capped = auth._fetch_paginated_guilds("Bearer t", "fetch_discord_guilds")
             self.assertEqual(call_idx["n"], auth._MAX_GUILD_PAGES)
             self.assertEqual(len(capped), auth._MAX_GUILD_PAGES * 200)
             self.assertFalse(capped.complete, "Truncated 25-page list must set complete=False")
             self.assertFalse(capped.ok, "Truncated 25-page list must NOT report ok=True")
             self.assertEqual(capped.status, "truncated")
 
-            bot_set = auth.fetch_discord_bot_guilds()
-            self.assertFalse(bot_set.complete)
-            self.assertFalse(bot_set.ok)
-            self.assertEqual(bot_set.status, "truncated")
 
         # Verify /api/user/servers treats truncated bot list as degraded:
         # - Guilds inside the returned 5,000 ARE recognized as installed ("active" when granted)
@@ -546,8 +548,10 @@ class TestDashboardStabilizationAudit(unittest.TestCase):
             complete=True,
             status="ok",
         )
-        call_idx["n"] = 0
-        with patch("dashboard.auth.requests.get", side_effect=fake_infinite_pages), \
+        truncated_bot_list = auth.GuildDiscoveryList(
+            [{"id": in_window_guild, "name": "Seen In First 5000", "icon": None}],
+            ok=False, complete=False, status="truncated", error="truncated")
+        with patch("dashboard.auth.fetch_bot_guilds_full", return_value=truncated_bot_list), \
              patch("dashboard.app.fetch_discord_guilds", return_value=user_guilds):
             resp = self.client.get("/api/user/servers")
             self.assertEqual(resp.status_code, 200)

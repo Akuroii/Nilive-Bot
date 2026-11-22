@@ -58,5 +58,10 @@ def _ensure_loop_running() -> asyncio.AbstractEventLoop:
 
 def run_async(coro):
     loop = _ensure_loop_running()
+    if threading.current_thread() is _thread:
+        # Blocking this thread on a future that only this thread can complete is a
+        # permanent, process-wide deadlock. Fail loudly instead.
+        coro.close()
+        raise RuntimeError("run_async() called from the dashboard event-loop thread; await the coroutine instead")
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result()

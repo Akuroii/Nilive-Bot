@@ -6,10 +6,10 @@ import traceback
 from discord.ext import commands, tasks
 import aiosqlite
 import json
-from database import DB_PATH
+from utils.db_config import DB_PATH
 from utils.formatters import now_iso
 
-HEARTBEAT_INTERVAL_SECONDS = 30
+HEARTBEAT_INTERVAL_SECONDS = 15
 
 
 async def _ensure_row():
@@ -123,6 +123,10 @@ class Health(commands.Cog):
                     platform.python_version(),
                 ))
                 await db.commit()
+
+            coordinator = getattr(self.bot, "gateway_coordinator", None)
+            if coordinator:
+                await coordinator.heartbeat()
         except Exception:
             # A failure to WRITE health data shouldn't itself crash
             # the loop — print and let the next tick try again.

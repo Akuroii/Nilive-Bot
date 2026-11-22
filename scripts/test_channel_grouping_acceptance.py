@@ -13,6 +13,7 @@ import json
 from unittest.mock import patch, MagicMock
 from flask import session
 from dashboard.app import app
+from support.installed_guilds import seed_installed_guilds
 from dashboard.api.core import get_guild_channels
 
 class TestChannelGroupingAcceptance(unittest.TestCase):
@@ -31,6 +32,8 @@ class TestChannelGroupingAcceptance(unittest.TestCase):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = mock_raw_channels
+
+        seed_installed_guilds(123456)
 
         with app.test_request_context():
             session["user"] = {"id": "999999999", "username": "Admin"}
@@ -92,6 +95,8 @@ class TestChannelGroupingAcceptance(unittest.TestCase):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = mock_raw_channels
+
+        seed_installed_guilds(123456)
 
         with app.test_request_context():
             session["user"] = {"id": "999999999", "username": "Admin"}

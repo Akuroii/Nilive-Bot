@@ -96,27 +96,29 @@ class TestWorkstream1(unittest.TestCase):
 
     @patch("dashboard.auth.requests.get")
     def test_conservative_bot_membership_classification(self, mock_get):
-        # 1. 200 -> INSTALLED
-        mock_get.return_value = MagicMock(status_code=200)
+        # Bot membership is read from the Gateway-synchronized local tables (zero REST calls).
+        from database import sync_bot_guilds, restore_bot_sync_state, invalidate_bot_sync_state
+        run_async(sync_bot_guilds([{"guild_id": self.guild_a, "name": "A"}], authoritative=True))
+
+        # 1. rows present but readiness never restored -> INDETERMINATE (not assumed installed)
+        run_async(invalidate_bot_sync_state())
+        self.assertEqual(check_bot_guild_membership(self.guild_a), BotMembershipStatus.INDETERMINATE)
+        self.assertFalse(bot_is_in_guild(self.guild_a))
+
+        # 2. synced + row -> INSTALLED
+        run_async(restore_bot_sync_state())
         self.assertEqual(check_bot_guild_membership(self.guild_a), BotMembershipStatus.INSTALLED)
         self.assertTrue(bot_is_in_guild(self.guild_a))
 
-        # 2. 404 with code 10004 -> CONFIRMED_NO_ACCESS
-        mock_get.return_value = MagicMock(status_code=404, json=lambda: {"code": 10004, "message": "Unknown Guild"})
-        self.assertEqual(check_bot_guild_membership(self.guild_a), BotMembershipStatus.CONFIRMED_NO_ACCESS)
-        self.assertFalse(bot_is_in_guild(self.guild_a))
+        # 3. synced + no row -> CONFIRMED_NO_ACCESS
+        self.assertEqual(check_bot_guild_membership(self.guild_b), BotMembershipStatus.CONFIRMED_NO_ACCESS)
+        self.assertFalse(bot_is_in_guild(self.guild_b))
 
-        # 3. 403 with code 50001 -> CONFIRMED_NO_ACCESS
-        mock_get.return_value = MagicMock(status_code=403, json=lambda: {"code": 50001, "message": "Missing Access"})
-        self.assertEqual(check_bot_guild_membership(self.guild_a), BotMembershipStatus.CONFIRMED_NO_ACCESS)
+        # 4. database error -> INDETERMINATE
+        with patch("database.check_bot_guild_access_atomic", side_effect=RuntimeError("db down")):
+            self.assertEqual(check_bot_guild_membership(self.guild_a), BotMembershipStatus.INDETERMINATE)
 
-        # 4. 429 Rate Limit -> INDETERMINATE (Not assumed removed!)
-        mock_get.return_value = MagicMock(status_code=429, json=lambda: {"retry_after": 2.5})
-        self.assertEqual(check_bot_guild_membership(self.guild_a), BotMembershipStatus.INDETERMINATE)
-
-        # 5. 500 Internal Error -> INDETERMINATE
-        mock_get.return_value = MagicMock(status_code=500, json=lambda: {})
-        self.assertEqual(check_bot_guild_membership(self.guild_a), BotMembershipStatus.INDETERMINATE)
+        mock_get.assert_not_called()
 
     @patch("dashboard.app.fetch_discord_guilds")
     @patch("dashboard.auth.fetch_bot_guilds_full")

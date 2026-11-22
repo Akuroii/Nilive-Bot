@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aiosqlite
 import discord
 from database import DB_PATH, init_db
+from support.installed_guilds import seed_installed_guilds
 from utils.permissions import check_bot_role_position
 from dashboard.utils.role_validation import (
     compute_role_assignability,
@@ -55,6 +56,7 @@ class TestWS2RoleHierarchyAcceptance(unittest.TestCase):
 
     def setUp(self):
         self.guild_id = 123456789012345678
+        seed_installed_guilds(self.guild_id)
         self.bot_user_id = 999888777666555444
 
         # Sample Discord Roles Payload

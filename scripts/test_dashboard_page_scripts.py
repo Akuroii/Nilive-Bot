@@ -230,6 +230,8 @@ def main():
     from phase1_support import GUILD, execute, reset_database
 
     asyncio.run(reset_database())
+    from support.installed_guilds import seed_installed_guilds
+    seed_installed_guilds(GUILD)
     execute("INSERT OR IGNORE INTO guild_settings (guild_id) VALUES (?)", (GUILD,))
     execute("INSERT OR IGNORE INTO levels (guild_id, user_id, xp, level) VALUES (?,?,?,?)",
             (GUILD, 8201, 1234, 3))

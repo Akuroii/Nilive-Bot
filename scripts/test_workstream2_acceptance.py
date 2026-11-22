@@ -23,6 +23,7 @@ import asyncio
 asyncio.run(init_db())
 
 from dashboard.app import app
+from support.installed_guilds import seed_installed_guilds
 
 class Workstream2AcceptanceTests(unittest.TestCase):
     @classmethod
@@ -31,6 +32,7 @@ class Workstream2AcceptanceTests(unittest.TestCase):
         cls.client = app.test_client()
 
     def test_ws5_command_manager_ssr_head_and_cards(self):
+        seed_installed_guilds(123456789)
         """WS5: Verify command-manager.css in head, SSR category pre-filtering, and initial rail alignment."""
         import time
         with self.client.session_transaction() as sess:
