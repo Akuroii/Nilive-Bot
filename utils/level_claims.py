@@ -547,12 +547,19 @@ async def _mark(db, claim_id: int, token: str, status: str,
                 error: str | None = None) -> bool:
     now = _iso(_now())
     if status == "fulfilled":
-        cursor = await db.execute("""
+        await db.execute("""
             UPDATE level_reward_claims
             SET status='fulfilled', fulfilled_at=?, owner_token=NULL,
                 processing_started_at=NULL, last_error=NULL
             WHERE id=? AND owner_token=? AND status='processing'
         """, (now, claim_id, token))
+    elif status == "pending":
+        await db.execute("""
+            UPDATE level_reward_claims
+            SET status='pending', last_error=?, owner_token=NULL,
+                processing_started_at=NULL
+            WHERE id=? AND owner_token=? AND status='processing'
+        """, ((error[:500] if error else None), claim_id, token))
     else:
         await db.execute("""
             UPDATE level_reward_claims
@@ -1216,6 +1223,92 @@ async def _record_delivery_provenance(db, guild_id: int, user_id: int,
         print(f"[PROVENANCE] claim {row.get('id')} grant record failed: {exc}")
 
 
+async def _inventory_conflict_error(db, guild_id: int, user_id: int,
+                                    payload: dict) -> str | None:
+    """Return the conflict message if `payload` would clash with an owned stack."""
+    from utils.inventory import FUNCTIONAL_ITEM_TYPES
+    item_type = _INVENTORY_TYPE.get(payload.get("type"))
+    item_name = payload.get("name")
+    if not item_name or not item_type:
+        return None
+    cursor = await db.execute(
+        "SELECT item_type, quantity FROM inventory_items "
+        "WHERE guild_id=? AND user_id=? AND item_name=?",
+        (guild_id, user_id, item_name),
+    )
+    existing = await cursor.fetchone()
+    if not existing or int(existing[1] or 0) <= 0:
+        return None
+    stored_type = existing[0] or "custom"
+    if item_type != stored_type and (
+        item_type in FUNCTIONAL_ITEM_TYPES or stored_type in FUNCTIONAL_ITEM_TYPES
+    ):
+        return "An unrelated item already uses this name"
+    return None
+
+
+async def _settle_level_claim_pending_pointer(db, guild_id: int, user_id: int,
+                                              claim_id: int) -> None:
+    """Close any open `pending_rewards` pointer once `claim_id` is fulfilled."""
+    try:
+        cur = await db.execute(
+            "SELECT id, payload FROM pending_rewards "
+            "WHERE guild_id=? AND user_id=? AND reward_type='level_claim' "
+            "AND status IN ('pending', 'delivering', 'needs_review')",
+            (guild_id, user_id),
+        )
+        open_rows = await cur.fetchall()
+        now_iso = _iso(_now())
+        target_key = f"level_claim:{int(claim_id)}"
+        for pid, raw_payload in open_rows:
+            try:
+                p = json.loads(raw_payload or "{}") or {}
+            except (TypeError, ValueError):
+                p = {}
+            if (
+                int(p.get("claim_id") or -1) == int(claim_id)
+                or str(p.get("idempotency_key") or "") == target_key
+            ):
+                await db.execute(
+                    "UPDATE pending_rewards "
+                    "SET status='delivered', last_error=NULL, "
+                    "updated_at=?, delivered_at=? WHERE id=?",
+                    (now_iso, now_iso, pid),
+                )
+    except Exception as exc:
+        if "no such table" not in str(exc).lower():
+            print(f"[LEVEL CLAIM] could not settle pending pointer for "
+                  f"claim {claim_id}: {exc}")
+
+
+async def _park_held_level_claim(guild_id: int, user_id: int, row: dict,
+                                 error: str) -> None:
+    """Register a deduplicated `pending_rewards` pointer so automatic retries
+    (`/inventory` open and scheduler sweep) redeliver `row` once the name frees.
+    """
+    payload = row["payload"]
+    try:
+        from utils.pending_rewards import park
+        await park(
+            guild_id,
+            user_id,
+            "level_claim",
+            {
+                "claim_id": int(row["id"]),
+                "item_name": str(payload.get("name") or ""),
+                "item_type": _INVENTORY_TYPE.get(payload.get("type")),
+                "quantity": int(payload.get("quantity") or 1),
+                "role_id": payload.get("role_id"),
+                "idempotency_key": f"level_claim:{int(row['id'])}",
+            },
+            source="level_claim",
+            reason=f"Level {row['reward_level']} reward",
+            error=error,
+        )
+    except Exception as exc:
+        print(f"[LEVEL CLAIM] could not park held claim #{row.get('id')}: {exc}")
+
+
 async def claim_available(guild_id: int, user_id: int, *,
                           member=None, bot=None,
                           claim_ids: list[int] | None = None) -> dict:
@@ -1230,6 +1323,7 @@ async def claim_available(guild_id: int, user_id: int, *,
         "owned": 0,
         "fulfilled": [],
         "failed": [],
+        "held_pending": [],
         "delivered_currency": 0,
         "delivered_roles": 0,
         "delivered_shop": 0,
@@ -1246,6 +1340,7 @@ async def claim_available(guild_id: int, user_id: int, *,
     }
     roles = []
     temp_roles = []
+    to_park_pending: list[tuple[dict, str]] = []
     # Booster-only rows are reserved only while Discord reports an active
     # boost on the passed member. Checked here, outside the DB lock.
     booster_ok = member_is_booster(member)
@@ -1322,11 +1417,21 @@ async def claim_available(guild_id: int, user_id: int, *,
                     lock_params.extend(claim_ids)
                 cursor = await db.execute(lock_sql, lock_params)
                 result["locked"] = int((await cursor.fetchone())[0])
+            from utils.inventory import ItemTypeConflict
             for row in owned:
                 if row["track"] == TRACK_ROLE:
                     roles.append(row)
                     continue
                 if row["track"] == TRACK_SHOP and row["payload"].get("type") == "temp_role":
+                    conflict_err = await _inventory_conflict_error(
+                        db, guild_id, user_id, row["payload"]
+                    )
+                    if conflict_err:
+                        msg = f"Held pending due to item conflict: {conflict_err}"
+                        if await _mark(db, row["id"], token, "pending", msg):
+                            result["held_pending"].append(row["id"])
+                            to_park_pending.append((row, conflict_err))
+                        continue
                     temp_roles.append(row)
                     continue
                 await db.execute(f"SAVEPOINT claim_{row['id']}")
@@ -1353,6 +1458,10 @@ async def claim_available(guild_id: int, user_id: int, *,
                     if not await _mark(db, row["id"], token, "fulfilled"):
                         raise RuntimeError("lost claim ownership before fulfillment")
                     await _record_delivery_provenance(db, guild_id, user_id, row)
+                    if row["track"] == TRACK_SHOP:
+                        await _settle_level_claim_pending_pointer(
+                            db, guild_id, user_id, row["id"]
+                        )
                     await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
                     result["fulfilled"].append(row["id"])
                     if row["track"] == TRACK_CURRENCY:
@@ -1361,6 +1470,13 @@ async def claim_available(guild_id: int, user_id: int, *,
                         result["delivered_boost"] += 1
                     else:
                         result["delivered_shop"] += 1
+                except ItemTypeConflict as e:
+                    await db.execute(
+                        f"ROLLBACK TO SAVEPOINT claim_{row['id']}")
+                    msg = f"Held pending due to item conflict: {e}"
+                    if await _mark(db, row["id"], token, "pending", msg):
+                        result["held_pending"].append(row["id"])
+                        to_park_pending.append((row, str(e)))
                 except Exception as e:
                     await db.execute(
                         f"ROLLBACK TO SAVEPOINT claim_{row['id']}")
@@ -1436,17 +1552,29 @@ async def claim_available(guild_id: int, user_id: int, *,
 
     for row in temp_roles:
         payload = row["payload"]
+        role_id_int = int(payload["role_id"])
+        had_role_before = False
+        had_units_before = False
         try:
             if member is None:
                 raise RuntimeError("Member not available for role delivery")
             from utils.xp_calculator import is_member_blacklisted
             if await is_member_blacklisted(guild_id, user_id):
                 raise RuntimeError("Member is blacklisted from receiving Level reward roles")
+            had_role_before = role_id_int in {
+                getattr(r, "id", None) for r in (getattr(member, "roles", None) or [])
+            }
+            async with aiosqlite.connect(DB_PATH, timeout=10) as check_db:
+                cur_u = await check_db.execute(
+                    "SELECT COUNT(*) FROM temp_roles WHERE claim_id=?",
+                    (row["id"],),
+                )
+                had_units_before = int((await cur_u.fetchone())[0] or 0) > 0
             await deliver_role(
-                member, int(payload["role_id"]),
+                member, role_id_int,
                 f"Level {row['reward_level']} reward")
             expires_at = await _ensure_temp_role_units(
-                row["id"], guild_id, user_id, int(payload["role_id"]),
+                row["id"], guild_id, user_id, role_id_int,
                 int(payload["quantity"]), int(payload["duration_hours"]))
         except Exception as e:
             async with aiosqlite.connect(DB_PATH, timeout=10) as db:
@@ -1459,6 +1587,7 @@ async def claim_available(guild_id: int, user_id: int, *,
                     await db.execute("ROLLBACK")
                     raise
             continue
+        race_conflict = False
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -1469,7 +1598,7 @@ async def claim_available(guild_id: int, user_id: int, *,
                     await db.commit()
                     try:
                         guild = getattr(member, "guild", None)
-                        role = guild.get_role(int(payload["role_id"])) if guild else None
+                        role = guild.get_role(role_id_int) if guild else None
                         if role is not None and role in getattr(member, "roles", []):
                             await member.remove_roles(role, reason="[Leveling Blacklist] In-flight race compensation")
                     except Exception:
@@ -1480,16 +1609,31 @@ async def claim_available(guild_id: int, user_id: int, *,
                     await _grant_inventory(
                         db, guild_id, user_id, payload,
                         metadata={
-                            "role_id": int(payload["role_id"]),
+                            "role_id": role_id_int,
                             "expires_at": expires_at,
                             "duration_hours": int(payload["duration_hours"]),
                         })
                     if not await _mark(db, row["id"], token, "fulfilled"):
                         raise RuntimeError("lost claim ownership before fulfillment")
                     await _record_delivery_provenance(db, guild_id, user_id, row)
+                    await _settle_level_claim_pending_pointer(
+                        db, guild_id, user_id, row["id"]
+                    )
                     await db.execute(f"RELEASE SAVEPOINT claim_{row['id']}")
                     result["fulfilled"].append(row["id"])
                     result["delivered_shop"] += 1
+                except ItemTypeConflict as e:
+                    await db.execute(f"ROLLBACK TO SAVEPOINT claim_{row['id']}")
+                    if not had_units_before:
+                        await db.execute(
+                            "DELETE FROM temp_roles WHERE claim_id=?",
+                            (row["id"],),
+                        )
+                    msg = f"Held pending due to item conflict: {e}"
+                    if await _mark(db, row["id"], token, "pending", msg):
+                        result["held_pending"].append(row["id"])
+                        to_park_pending.append((row, str(e)))
+                        race_conflict = True
                 except Exception as e:
                     await db.execute(f"ROLLBACK TO SAVEPOINT claim_{row['id']}")
                     if await _mark(db, row["id"], token, "failed", str(e)):
@@ -1498,6 +1642,26 @@ async def claim_available(guild_id: int, user_id: int, *,
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
+        if race_conflict and not had_role_before and member is not None:
+            try:
+                from utils.timed_ownership import role_removal_blocked
+                guild = getattr(member, "guild", None)
+                role = guild.get_role(role_id_int) if guild else None
+                if role is not None and role in (getattr(member, "roles", None) or []):
+                    kept = await role_removal_blocked(
+                        guild_id, user_id, role_id_int,
+                        retiring="level:temp_role", member=member,
+                    )
+                    if not kept:
+                        await member.remove_roles(
+                            role,
+                            reason="Held pending due to inventory item conflict",
+                        )
+            except Exception as comp_exc:
+                print(f"[LEVEL CLAIM] temp_role conflict role cleanup failed: {comp_exc}")
+
+    for held_row, conflict_err in to_park_pending:
+        await _park_held_level_claim(guild_id, user_id, held_row, conflict_err)
 
     # Explicit reconciliation on the member's own Claim All pass (never on a
     # message, never on a timer, never in the background). Requires a member and

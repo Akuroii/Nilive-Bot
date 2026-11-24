@@ -306,8 +306,11 @@ def claim_result_footer(result: dict) -> str:
     """
     got = len(result.get("fulfilled") or [])
     missed = len(result.get("failed") or [])
+    held_cnt = len(result.get("held_pending") or [])
     text = (f"تم الاستلام: {got}. "
             f"إخفاقات قابلة لإعادة المحاولة: {missed}.")
+    if held_cnt:
+        text += f" محفوظة كمعلقة (تعارض اسم/نوع): {held_cnt}."
     locked = int(result.get("locked") or 0)
     if locked:
         text += f" مقفلة (Boosters فقط): {locked}."
@@ -452,15 +455,19 @@ async def claim_confirmation(guild, result: dict, claims,
                         if int(i) in by_id), key=order)
     broken = sorted((by_id[int(i)] for i in (result.get("failed") or [])
                      if int(i) in by_id), key=order)
-    if not delivered and not broken:
+    held = sorted((by_id[int(i)] for i in (result.get("held_pending") or [])
+                   if int(i) in by_id), key=order)
+    if not delivered and not broken and not held:
         return None
     currency = (await get_currency_config(guild.id)) if guild is not None else {}
     remaining = [c for c in (claims or []) if _claimable_now(c, booster_ok)]
 
-    if delivered and not broken:
+    if delivered and not broken and not held:
         head = "🎉 مبروك! تم استلام مكافآتك"
     elif delivered:
         head = "⚠️ تم تسليم بعض المكافآت فقط"
+    elif held and not broken:
+        head = "⏳ تم حفظ المكافآت كمعلقة بانتظار زوال تعارض الاسم"
     else:
         head = "❌ تعذّر تسليم المكافآت"
 
@@ -471,6 +478,14 @@ async def claim_confirmation(guild, result: dict, claims,
         # A total only adds information once there is more than one reward.
         if len(delivered) > 1:
             lines.append(f"**الإجمالي:** {_claim_totals(delivered, currency)}")
+    if held:
+        lines.append(
+            f"⏳ **محفوظة كمعلقة ({len(held)}) وتُسلَّم تلقائيًا فور زوال تعارض الاسم:**"
+        )
+        for claim in held:
+            reason = (claim.get("last_error") or "item conflict").strip()
+            lines.append(f"- {_claim_reward_text(guild, claim, currency)}"
+                         f": {reason[:160]}")
     if broken:
         verb = ("**تعذّر تسليم**" if not delivered
                 else "**ولم يتم تسليم**")
@@ -483,7 +498,7 @@ async def claim_confirmation(guild, result: dict, claims,
     if remaining:
         lines.append(f"⏳ **ما زال متاحًا للاستلام:** {len(remaining)} مكافأة. "
                      f"زر Claim All ما زال مفعّلًا.")
-    elif delivered and not broken:
+    elif delivered and not broken and not held:
         lines.append("✔ لا يتبقّى شيء للاستلام. كل المكافآت تم تسليمها.")
     return "نتيجة الاستلام", _bounded_lines(lines)
 
