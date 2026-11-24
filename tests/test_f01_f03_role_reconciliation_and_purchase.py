@@ -530,6 +530,286 @@ class F01F03RoleReconciliationAndPurchaseTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(worn_ids(self.member), [])
         self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
 
+    async def test_f01_conflicting_delivery_intents_stay_fail_closed(self):
+        item_id = seed_shop_role("Flame", "role", FLAME, price=200)
+        await inventory.set_quantity(
+            GUILD, USER, "Flame", 1, item_type="role", source="shop",
+            metadata={"role_id": FLAME, "product_id": item_id},
+        )
+        inv_id = rows(
+            "SELECT id FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='Flame'",
+            (GUILD, USER),
+        )[0][0]
+        # Op 1 observed role already present before; Op 2 observed absent before -> conflicting proof!
+        for op_id, present in (("op-conf-1", True), ("op-conf-2", False)):
+            execute(
+                "INSERT INTO shop_purchase_operations "
+                "(op_id, guild_id, user_id, item_id, item_name, currency, amount, status, "
+                "stock_reserved, charged, refunded, stock_returned, delivery_intent, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'Flame', 'balance', 200, 'delivered', 0, 1, 0, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (
+                    op_id, GUILD, USER, item_id,
+                    json.dumps({
+                        "kind": "discord_role",
+                        "role_id": FLAME,
+                        "role_present_before": present,
+                        "state": "recorded",
+                    }),
+                ),
+            )
+        execute(
+            "INSERT INTO equipped_roles (guild_id, user_id, item_name, role_id, entry_key, role_added, role_added_role_id) "
+            "VALUES (?, ?, 'Flame', ?, ?, NULL, NULL)",
+            (GUILD, USER, FLAME, f"i:{inv_id}"),
+        )
+        self.member.roles = [self.roles[FLAME]]
+
+        slot_dict = await equip_engine.get_equipped(GUILD, USER)
+        rec = await equip_engine.reconcile_legacy_slot_observation(GUILD, USER, slot_dict)
+        self.assertIsNone(rec)
+        un = await equip_engine.unequip_role(self.bot, GUILD, USER, "Flame")
+        self.assertFalse(un["success"])
+        self.assertTrue(un["uncertain"])
+        self.assertEqual(worn_ids(self.member), [FLAME])
+
+    async def test_f01_stale_non_role_refunded_or_unlinked_records_never_reconcile(self):
+        # Unverified role row + legacy NULL slot
+        potion_shop_id = execute(
+            "INSERT INTO shop_items (guild_id, name, type, price, duration_hours, xp_boost_multiplier, enabled) "
+            "VALUES (?, 'Flame', 'potion', 50, 2, 2.0, 1)",
+            (GUILD,),
+        )
+        role_shop_id = seed_shop_role("RefundedFlame", "role", FLAME, price=200)
+        await inventory.set_quantity(
+            GUILD, USER, "Flame", 1, item_type="role", source="shop",
+            metadata={"role_id": FLAME, "product_id": potion_shop_id},
+        )
+        inv_id = rows(
+            "SELECT id FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='Flame'",
+            (GUILD, USER),
+        )[0][0]
+        # 1. Purchase history for a POTION sharing name/product_id
+        execute(
+            "INSERT INTO purchase_history (guild_id, user_id, user_display_name, item_id, item_name, price_paid) "
+            "VALUES (?, ?, 'Member', ?, 'Flame', 50)",
+            (GUILD, USER, potion_shop_id),
+        )
+        # 2. Purchase history for FLAME role that was REFUNDED in shop_purchase_operations
+        ref_hist_id = execute(
+            "INSERT INTO purchase_history (guild_id, user_id, user_display_name, item_id, item_name, price_paid) "
+            "VALUES (?, ?, 'Member', ?, 'RefundedFlame', 200)",
+            (GUILD, USER, role_shop_id),
+        )
+        execute(
+            "INSERT INTO shop_purchase_operations "
+            "(op_id, guild_id, user_id, item_id, item_name, currency, amount, status, "
+            "stock_reserved, charged, refunded, stock_returned, history_id, created_at, updated_at) "
+            "VALUES ('op-ref-1', ?, ?, ?, 'RefundedFlame', 'balance', 200, 'refunded', 0, 1, 1, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (GUILD, USER, role_shop_id, ref_hist_id),
+        )
+        # 3. Expired temp_roles row from the past
+        past_iso = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        execute(
+            "INSERT INTO temp_roles (guild_id, user_id, role_id, expires_at, source) "
+            "VALUES (?, ?, ?, ?, 'legacy')",
+            (GUILD, USER, FLAME, past_iso),
+        )
+        # 4. Non-role reward_grants row with the same item_name ('Flame' potion claim)
+        #    AND a reversed role reward_grants row -> neither reconciles!
+        claim_id = execute(
+            "INSERT INTO level_reward_claims "
+            "(guild_id, user_id, reward_level, track, reward_ref, payload_json, status, created_at) "
+            "VALUES (?, ?, 5, 'shop', 'all:5:potion', ?, 'fulfilled', CURRENT_TIMESTAMP)",
+            (GUILD, USER, json.dumps({"type": "potion", "name": "Flame", "quantity": 1})),
+        )
+        execute(
+            "INSERT INTO reward_grants "
+            "(grant_id, guild_id, user_id, claim_id, reward_level, track, kind, item_name, quantity, remaining_quantity, created_at) "
+            "VALUES ('rg-pot-1', ?, ?, ?, 5, 'shop', 'inventory_item', 'Flame', 1, 1, CURRENT_TIMESTAMP)",
+            (GUILD, USER, claim_id),
+        )
+        rev_claim_id = execute(
+            "INSERT INTO level_reward_claims "
+            "(guild_id, user_id, reward_level, track, reward_ref, payload_json, status, created_at) "
+            "VALUES (?, ?, 6, 'shop', 'all:6:temp_role', ?, 'fulfilled', CURRENT_TIMESTAMP)",
+            (GUILD, USER, json.dumps({"type": "temp_role", "name": "Flame", "role_id": FLAME, "quantity": 1, "duration_hours": 12})),
+        )
+        execute(
+            "INSERT INTO reward_grants "
+            "(grant_id, guild_id, user_id, claim_id, reward_level, track, kind, item_name, quantity, remaining_quantity, created_at) "
+            "VALUES ('rg-rev-1', ?, ?, ?, 6, 'shop', 'inventory_item', 'Flame', 1, 1, CURRENT_TIMESTAMP)",
+            (GUILD, USER, rev_claim_id),
+        )
+        execute(
+            "INSERT INTO reward_reversals "
+            "(reversal_id, operation_id, guild_id, user_id, claim_id, grant_id, kind, item_name, quantity, status, created_at) "
+            "VALUES ('rr-1', 'op-corr-1', ?, ?, ?, 'rg-rev-1', 'inventory_item', 'Flame', 1, 'reversed', CURRENT_TIMESTAMP)",
+            (GUILD, USER, rev_claim_id),
+        )
+        # 5. Unrelated minigame win in the same guild where another template awards FLAME
+        from utils import minigame_store
+        await minigame_store.ensure_tables()
+        tmpl_id = execute(
+            "INSERT INTO minigame_templates (guild_id, category_id, name, game_type, embed_json, channel_id, enabled) "
+            "VALUES (?, 1, 'RoleGame', 'trivia', '{}', 111, 1)",
+            (GUILD,),
+        )
+        execute(
+            "INSERT INTO minigame_rewards (template_id, reward_type, reward_value) "
+            "VALUES (?, 'role', ?)",
+            (tmpl_id, str(FLAME)),
+        )
+        execute(
+            "INSERT INTO minigames_log (guild_id, event_date, tier, channel_id, winner_id) "
+            "VALUES (?, '2026-11-24', 'common', 222, ?)",
+            (GUILD, USER),
+        )
+
+        execute(
+            "INSERT INTO equipped_roles (guild_id, user_id, item_name, role_id, entry_key, role_added, role_added_role_id) "
+            "VALUES (?, ?, 'Flame', ?, ?, NULL, NULL)",
+            (GUILD, USER, FLAME, f"i:{inv_id}"),
+        )
+        self.member.roles = [self.roles[FLAME]]
+
+        slot_dict = await equip_engine.get_equipped(GUILD, USER)
+        self.assertIsNone(
+            await equip_engine.reconcile_legacy_slot_observation(GUILD, USER, slot_dict)
+        )
+        un = await equip_engine.unequip_role(self.bot, GUILD, USER, "Flame")
+        self.assertFalse(un["success"])
+        self.assertTrue(un["uncertain"])
+        self.assertEqual(worn_ids(self.member), [FLAME])
+
+        # Conversely, an ACTIVE unreversed reward_grants role claim DOES reconcile!
+        ok_claim_id = execute(
+            "INSERT INTO level_reward_claims "
+            "(guild_id, user_id, reward_level, track, reward_ref, payload_json, status, created_at) "
+            "VALUES (?, ?, 7, 'shop', 'all:7:temp_role', ?, 'fulfilled', CURRENT_TIMESTAMP)",
+            (GUILD, USER, json.dumps({"type": "temp_role", "name": "Flame", "role_id": FLAME, "quantity": 1, "duration_hours": 12})),
+        )
+        execute(
+            "INSERT INTO reward_grants "
+            "(grant_id, guild_id, user_id, claim_id, reward_level, track, kind, item_name, quantity, remaining_quantity, created_at) "
+            "VALUES ('rg-ok-1', ?, ?, ?, 7, 'shop', 'inventory_item', 'Flame', 1, 1, CURRENT_TIMESTAMP)",
+            (GUILD, USER, ok_claim_id),
+        )
+        self.assertIs(
+            await equip_engine.reconcile_legacy_slot_observation(GUILD, USER, slot_dict),
+            True,
+        )
+
+    async def test_f01_idempotent_repeat_reconciliation_and_same_role_renewal(self):
+        item_id = seed_shop_role("TimedFlame", "temp_role", FLAME, price=150, duration_hours=12)
+        future_iso = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+        hid = await timed_ownership.grant_timed_holding(
+            GUILD, USER, "TimedFlame", expires_at=future_iso,
+            item_type="temp_role", metadata={"role_id": FLAME, "product_id": item_id},
+            role_id=FLAME, product_id=item_id, source="shop",
+        )
+        execute(
+            "INSERT INTO purchase_history (guild_id, user_id, user_display_name, item_id, item_name, price_paid) "
+            "VALUES (?, ?, 'Member', ?, 'TimedFlame', 150)",
+            (GUILD, USER, item_id),
+        )
+        execute(
+            "INSERT INTO equipped_roles (guild_id, user_id, item_name, role_id, entry_key, role_added, role_added_role_id) "
+            "VALUES (?, ?, 'TimedFlame', ?, ?, NULL, NULL)",
+            (GUILD, USER, FLAME, f"h:{hid}"),
+        )
+        self.member.roles = [self.roles[FLAME]]
+
+        # Renewing / buying a second holding of the SAME role while legacy slot has NULL
+        # must reconcile (1, FLAME) instead of overwriting with (0, FLAME)!
+        itx = make_interaction(self.bot, self.guild, self.member)
+        await _process_purchase(itx, item_id)
+        self.assertEqual(balance_of(), 850)
+        slot_after = await equip_engine.get_equipped(GUILD, USER)
+        self.assertEqual(
+            (slot_after["role_added"], slot_after["role_added_role_id"]),
+            (1, FLAME),
+        )
+        # Idempotency: calling reconcile_legacy_slot_observation repeatedly returns True!
+        self.assertIs(
+            await equip_engine.reconcile_legacy_slot_observation(GUILD, USER, slot_after),
+            True,
+        )
+        self.assertIs(
+            await equip_engine.reconcile_legacy_slot_observation(GUILD, USER, slot_after),
+            True,
+        )
+
+    async def test_f03_delivering_level_claim_block_403_single_refund_timeout_and_db_fail(self):
+        from unittest.mock import patch
+        timed_id = seed_shop_role("TimedBlue", "temp_role", BLUE, price=200, duration_hours=12, stock=5)
+
+        # 1) Active pending_rewards 'delivering' row of reward_type='level_claim' with role_id blocks BEFORE charge
+        pr_id = execute(
+            "INSERT INTO pending_rewards (guild_id, user_id, reward_type, payload, source, status, created_at, updated_at) "
+            "VALUES (?, ?, 'level_claim', ?, 'level_claim', 'delivering', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (GUILD, USER, json.dumps({"claim_id": 99, "role_id": GOLD, "item_name": "Crown"})),
+        )
+        itx0 = make_interaction(self.bot, self.guild, self.member)
+        await _process_purchase(itx0, timed_id)
+        self.assertEqual(balance_of(), 1000)
+        execute("DELETE FROM pending_rewards WHERE id=?", (pr_id,))
+
+        # 2) Discord 403 Forbidden on assigning role -> certain failure, 1x refund, never double-refunded
+        forbidden = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions"
+        )
+        self.member.add_roles = AsyncMock(side_effect=forbidden)
+        itx_403 = make_interaction(self.bot, self.guild, self.member)
+        await _process_purchase(itx_403, timed_id)
+        self.assertEqual(balance_of(), 1000)
+        op_403 = rows(
+            "SELECT op_id, status, refunded, stock_returned FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+        )[0]
+        self.assertEqual(op_403[1:], ("failed", 1, 1))
+        # Second refund attempts via both helpers are strict no-ops
+        await timed_ownership.refund_purchase(op_403[0])
+        await timed_ownership.resolve_purchase_operation(op_403[0], action="refund", confirmed=True)
+        self.assertEqual(balance_of(), 1000)
+        self.assertEqual(rows("SELECT current_stock FROM shop_items WHERE id=?", (timed_id,)), [(5,)])
+
+        # 3) Discord TimeoutError -> PURCHASE_UNCERTAIN (no auto-refund); operator resolve 'delivered' settles once
+        self.member.add_roles = AsyncMock(side_effect=asyncio.TimeoutError("Discord REST timeout"))
+        itx_to = make_interaction(self.bot, self.guild, self.member)
+        await _process_purchase(itx_to, timed_id)
+        self.assertEqual(balance_of(), 800)
+        op_to = rows(
+            "SELECT op_id, status, refunded FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+        )[0]
+        self.assertEqual(op_to[1:], ("uncertain", 0))
+        res_del = await timed_ownership.resolve_purchase_operation(
+            op_to[0], action="delivered", confirmed=True, note="Verified role on Discord"
+        )
+        self.assertTrue(res_del["success"])
+        self.assertEqual(
+            rows("SELECT status, refunded FROM shop_purchase_operations WHERE op_id=?", (op_to[0],)),
+            [("delivered", 0)],
+        )
+
+        # 4) Discord adds role (role_added=True) THEN DB write fails -> PURCHASE_UNCERTAIN (never auto-refunded!)
+        async def normal_add(role, reason=None):
+            if role not in self.member.roles:
+                self.member.roles.append(role)
+
+        self.member.add_roles = AsyncMock(side_effect=normal_add)
+        with patch.object(
+            timed_ownership,
+            "grant_timed_holding",
+            AsyncMock(side_effect=RuntimeError("disk full after Discord role grant")),
+        ):
+            itx_dbfail = make_interaction(self.bot, self.guild, self.member)
+            await _process_purchase(itx_dbfail, timed_id)
+        self.assertEqual(balance_of(), 600)
+        op_dbf = rows(
+            "SELECT op_id, status, refunded FROM shop_purchase_operations ORDER BY rowid DESC LIMIT 1"
+        )[0]
+        self.assertEqual(op_dbf[1:], ("uncertain", 0))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

@@ -247,17 +247,25 @@ async def _check_role_purchase_block(interaction: discord.Interaction,
 
         try:
             cur = await db.execute(
-                "SELECT id FROM pending_rewards "
+                "SELECT reward_type, payload FROM pending_rewards "
                 "WHERE guild_id=? AND user_id=? "
                 "AND status = 'delivering' "
-                "AND reward_type IN ('role', 'temp_role') LIMIT 1",
+                "AND reward_type IN ('role', 'temp_role', 'level_claim')",
                 (guild_id, user_id),
             )
-            if await cur.fetchone():
-                return (
-                    "A role reward is currently being delivered to your account. "
-                    "Nothing was charged — please wait a moment and try again."
-                )
+            for pr_type, raw_pr_payload in await cur.fetchall():
+                has_role = pr_type in ("role", "temp_role")
+                if not has_role and raw_pr_payload:
+                    try:
+                        parsed_pr = json.loads(raw_pr_payload) or {}
+                        has_role = bool(parsed_pr.get("role_id"))
+                    except (TypeError, ValueError, AttributeError):
+                        has_role = False
+                if has_role:
+                    return (
+                        "A role reward is currently being delivered to your account. "
+                        "Nothing was charged — please wait a moment and try again."
+                    )
         except Exception as exc:
             if "no such table" not in str(exc).lower():
                 return (

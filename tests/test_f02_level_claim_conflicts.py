@@ -273,6 +273,72 @@ class F02LevelClaimConflictTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await pending_rewards.list_pending(GUILD, USER), [])
 
+    async def test_f02_admin_reset_and_staff_review_keep_pending_and_claims_synchronized(self):
+        # 1) Conflicted claim parked in pending_rewards -> admin deletes/resets level_reward_claims
+        #    -> list_pending() auto-settles the orphan pointer and returns [] immediately!
+        seed_shop_reward(1, "Relic", "title", quantity=1)
+        await reward_engine.give_reward(
+            self.bot, GUILD, USER, "xp", amount=150, reason="play", source="test"
+        )
+        await inventory.give_item(
+            GUILD, USER, "Relic", 1, item_type="potion", metadata=POTION_META
+        )
+        res = await level_claims.claim_available(
+            GUILD, USER, member=self.member, bot=self.bot
+        )
+        self.assertEqual(len(res["held_pending"]), 1)
+        self.assertEqual(len(await pending_rewards.list_pending(GUILD, USER)), 1)
+
+        execute("DELETE FROM level_reward_claims WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        self.assertEqual(await pending_rewards.list_pending(GUILD, USER), [])
+        self.assertEqual(
+            rows("SELECT status FROM pending_rewards WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            [("delivered",)],
+        )
+
+        # 2) Staff resolve_review(..., action='delivered') on a needs_review level_claim
+        #    marks level_reward_claims fulfilled so Claim All cannot deliver a 2nd copy!
+        await inventory.remove_item(GUILD, USER, "Relic", 1)
+        execute("DELETE FROM pending_rewards WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        execute("DELETE FROM levels WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        seed_shop_reward(2, "Halo", "title", quantity=1)
+        await reward_engine.give_reward(
+            self.bot, GUILD, USER, "xp", amount=500, reason="play", source="test"
+        )
+        await inventory.give_item(
+            GUILD, USER, "Halo", 1, item_type="potion", metadata=POTION_META
+        )
+        res2 = await level_claims.claim_available(
+            GUILD, USER, member=self.member, bot=self.bot
+        )
+        halo_claim_id = [
+            c["id"] for c in await level_claims.list_claims(GUILD, USER)
+            if c["reward_level"] == 2
+        ][0]
+        self.assertIn(halo_claim_id, res2["held_pending"])
+        pr_rows = await pending_rewards.list_pending(GUILD, USER)
+        halo_pr_id = [p["id"] for p in pr_rows if p["payload"].get("claim_id") == halo_claim_id][0]
+
+        # Simulate crash -> needs_review, then staff marks 'delivered' after manual grant
+        await inventory.remove_item(GUILD, USER, "Halo", 1)
+        execute("UPDATE pending_rewards SET status='needs_review' WHERE id=?", (halo_pr_id,))
+        resolved = await pending_rewards.resolve_review(GUILD, halo_pr_id, "delivered", actor="admin")
+        self.assertTrue(resolved)
+        self.assertEqual(
+            rows("SELECT status FROM level_reward_claims WHERE id=?", (halo_claim_id,)),
+            [("fulfilled",)],
+        )
+        # Subsequent Claim All does NOT deliver Halo a second time!
+        after_claim = await level_claims.claim_available(
+            GUILD, USER, member=self.member, bot=self.bot, claim_ids=[halo_claim_id]
+        )
+        self.assertEqual(after_claim["fulfilled"], [])
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='Halo' AND quantity > 0", (GUILD, USER)),
+            [(0,)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
