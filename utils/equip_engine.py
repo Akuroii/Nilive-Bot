@@ -214,49 +214,17 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
 
     try:
         async with aiosqlite.connect(DB_PATH) as db:
-            # 1) Exact recorded delivery_intent on finalized, unrefunded Shop ops.
-            #    Conflicting observations ({True, False}) across history stay
-            #    strictly fail-closed rather than guessing which write won.
-            intent_rows = await _optional_rows(
-                db,
-                "SELECT delivery_intent FROM shop_purchase_operations "
-                "WHERE guild_id=? AND user_id=? AND status='delivered' "
-                "AND COALESCE(refunded, 0)=0 AND delivery_intent IS NOT NULL "
-                "ORDER BY rowid DESC",
-                (gid, uid),
-            )
-            intent_present_before: set[bool] = set()
-            for (raw_intent,) in intent_rows:
-                try:
-                    intent = json.loads(raw_intent) if raw_intent else None
-                except (TypeError, ValueError):
-                    intent = None
-                if not isinstance(intent, dict):
-                    continue
-                if intent.get("kind") != "discord_role":
-                    continue
-                try:
-                    intent_role = int(intent.get("role_id"))
-                except (TypeError, ValueError):
-                    continue
-                if intent_role != role_id:
-                    continue
-                present_before = intent.get("role_present_before")
-                if isinstance(present_before, bool):
-                    intent_present_before.add(present_before)
-            if len(intent_present_before) > 1:
-                return None
-            if len(intent_present_before) == 1:
-                only_present_before = next(iter(intent_present_before))
-                return await _persist_reconciled(db, not only_present_before)
-
-            # 2) Locate backing owned role entry and require subsystem provenance.
+            # 1) Locate live backing owned role entry first so stale receipts
+            #    from expired/deleted holdings can never claim an unowned role
+            #    or strip an independently held Discord role.
             sources: set[str] = set()
             product_ids: set[int] = set()
             item_names: set[str] = set()
             if slot_item_name:
                 item_names.add(slot_item_name)
-            has_owned_entry = False
+            has_timed_holding = False
+            has_perm_inventory = False
+            has_temp_inventory = False
 
             def _meta_matches_role(raw_meta, col_role=None) -> tuple[bool, int | None]:
                 parsed_meta = {}
@@ -296,7 +264,7 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                     for h_name, h_src, h_pid, h_rid, h_meta in h_rows:
                         matched, meta_pid = _meta_matches_role(h_meta, h_rid)
                         if matched:
-                            has_owned_entry = True
+                            has_timed_holding = True
                             if h_name:
                                 item_names.add(str(h_name))
                             if h_src:
@@ -312,15 +280,18 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                 if iid is not None:
                     i_rows = await _optional_rows(
                         db,
-                        "SELECT item_name, source, metadata FROM inventory_items "
+                        "SELECT item_name, item_type, source, metadata FROM inventory_items "
                         "WHERE id=? AND guild_id=? AND user_id=? AND quantity > 0 "
                         "AND item_type IN ('role', 'temp_role')",
                         (iid, gid, uid),
                     )
-                    for i_name, i_src, i_meta in i_rows:
+                    for i_name, i_type, i_src, i_meta in i_rows:
                         matched, meta_pid = _meta_matches_role(i_meta)
                         if matched:
-                            has_owned_entry = True
+                            if i_type == "role":
+                                has_perm_inventory = True
+                            else:
+                                has_temp_inventory = True
                             if i_name:
                                 item_names.add(str(i_name))
                             if i_src:
@@ -330,15 +301,18 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
             elif entry_key is None:
                 i_rows = await _optional_rows(
                     db,
-                    "SELECT item_name, source, metadata FROM inventory_items "
+                    "SELECT item_name, item_type, source, metadata FROM inventory_items "
                     "WHERE guild_id=? AND user_id=? AND quantity > 0 "
                     "AND item_type IN ('role', 'temp_role')",
                     (gid, uid),
                 )
-                for i_name, i_src, i_meta in i_rows:
+                for i_name, i_type, i_src, i_meta in i_rows:
                     matched, meta_pid = _meta_matches_role(i_meta)
                     if matched:
-                        has_owned_entry = True
+                        if i_type == "role":
+                            has_perm_inventory = True
+                        else:
+                            has_temp_inventory = True
                         if i_name:
                             item_names.add(str(i_name))
                         if i_src:
@@ -355,7 +329,7 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                 for h_name, h_src, h_pid, h_rid, h_meta in h_rows:
                     matched, meta_pid = _meta_matches_role(h_meta, h_rid)
                     if matched:
-                        has_owned_entry = True
+                        has_timed_holding = True
                         if h_name:
                             item_names.add(str(h_name))
                         if h_src:
@@ -364,7 +338,8 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                             if p is not None:
                                 product_ids.add(int(p))
 
-            # Direct legacy temp_roles table is an explicit bot grant table when unexpired.
+            # Direct legacy temp_roles table is an explicit bot grant table when unexpired,
+            # provided the slot is not bound to a deleted timed_holdings / permanent row.
             from utils.timed_ownership import is_expired, utcnow
             now_dt = utcnow()
             legacy_temp = await _optional_rows(
@@ -373,27 +348,96 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                 "WHERE guild_id=? AND user_id=? AND role_id=?",
                 (gid, uid, role_id),
             )
-            proven = any(
+            has_live_temp_role = any(
                 tr_exp and not is_expired(tr_exp, now=now_dt)
                 for (tr_exp,) in legacy_temp
             )
-
-            if not proven and not has_owned_entry:
+            temp_role_backs_slot = has_live_temp_role and (
+                entry_key is None or has_temp_inventory
+            )
+            has_owned_entry = (
+                has_timed_holding or has_perm_inventory or has_temp_inventory
+            )
+            if not has_owned_entry and not temp_role_backs_slot:
                 return None
+
+            perm_only_backing = (
+                has_perm_inventory and not has_timed_holding and not temp_role_backs_slot
+            )
+
+            # 2) Exact recorded delivery_intent on finalized, unrefunded Shop ops.
+            #    Conflicting observations ({True, False}) across history stay
+            #    strictly fail-closed rather than guessing which write won.
+            #    When the live slot is backed only by a permanent role row, a
+            #    stale intent from an expired timed listing cannot authorize
+            #    role_added=1.
+            intent_rows = await _optional_rows(
+                db,
+                "SELECT op.delivery_intent, si.type, si.duration_hours "
+                "FROM shop_purchase_operations op "
+                "LEFT JOIN shop_items si ON si.id = op.item_id AND si.guild_id = op.guild_id "
+                "WHERE op.guild_id=? AND op.user_id=? AND op.status='delivered' "
+                "AND COALESCE(op.refunded, 0)=0 AND op.delivery_intent IS NOT NULL "
+                "ORDER BY op.rowid DESC",
+                (gid, uid),
+            )
+            intent_present_before: set[bool] = set()
+            has_eligible_added_intent = False
+            for raw_intent, si_type, si_dur in intent_rows:
+                try:
+                    intent = json.loads(raw_intent) if raw_intent else None
+                except (TypeError, ValueError):
+                    intent = None
+                if not isinstance(intent, dict):
+                    continue
+                if intent.get("kind") != "discord_role":
+                    continue
+                try:
+                    intent_role = int(intent.get("role_id"))
+                except (TypeError, ValueError):
+                    continue
+                if intent_role != role_id:
+                    continue
+                present_before = intent.get("role_present_before")
+                if isinstance(present_before, bool):
+                    intent_present_before.add(present_before)
+                    if present_before is False:
+                        try:
+                            timed_listing = (
+                                si_type == "temp_role"
+                                or (si_dur is not None and int(si_dur) > 0)
+                            )
+                        except (TypeError, ValueError):
+                            timed_listing = False
+                        if not (perm_only_backing and timed_listing):
+                            has_eligible_added_intent = True
+            if len(intent_present_before) > 1:
+                return None
+            if intent_present_before == {True}:
+                return await _persist_reconciled(db, False)
+            if intent_present_before == {False} and has_eligible_added_intent:
+                return await _persist_reconciled(db, True)
+
+            proven = temp_role_backs_slot
+            shop_perm_clause = (
+                "AND si.type != 'temp_role' AND COALESCE(si.duration_hours, 0) <= 0 "
+                if perm_only_backing else ""
+            )
 
             # Shop purchase_history corroboration (strictly bound to role_id and unrefunded)
             if not proven:
                 ph_by_role = await _optional_rows(
                     db,
-                    "SELECT 1 FROM purchase_history ph "
-                    "JOIN shop_items si ON si.id = ph.item_id AND si.guild_id = ph.guild_id "
-                    "WHERE ph.guild_id=? AND ph.user_id=? "
-                    "AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') "
-                    "AND NOT EXISTS ("
-                    "    SELECT 1 FROM shop_purchase_operations rop "
-                    "    WHERE rop.guild_id = ph.guild_id AND rop.history_id = ph.id "
-                    "    AND COALESCE(rop.refunded, 0) = 1"
-                    ") LIMIT 1",
+                    f"SELECT 1 FROM purchase_history ph "
+                    f"JOIN shop_items si ON si.id = ph.item_id AND si.guild_id = ph.guild_id "
+                    f"WHERE ph.guild_id=? AND ph.user_id=? "
+                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') "
+                    f"{shop_perm_clause}"
+                    f"AND NOT EXISTS ("
+                    f"    SELECT 1 FROM shop_purchase_operations rop "
+                    f"    WHERE rop.guild_id = ph.guild_id AND rop.history_id = ph.id "
+                    f"    AND COALESCE(rop.refunded, 0) = 1"
+                    f") LIMIT 1",
                     (gid, uid, role_id),
                 )
                 if ph_by_role:
@@ -403,11 +447,12 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
             if not proven:
                 op_by_role = await _optional_rows(
                     db,
-                    "SELECT 1 FROM shop_purchase_operations op "
-                    "JOIN shop_items si ON si.id = op.item_id AND si.guild_id = op.guild_id "
-                    "WHERE op.guild_id=? AND op.user_id=? AND op.status='delivered' "
-                    "AND COALESCE(op.refunded, 0)=0 "
-                    "AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') LIMIT 1",
+                    f"SELECT 1 FROM shop_purchase_operations op "
+                    f"JOIN shop_items si ON si.id = op.item_id AND si.guild_id = op.guild_id "
+                    f"WHERE op.guild_id=? AND op.user_id=? AND op.status='delivered' "
+                    f"AND COALESCE(op.refunded, 0)=0 "
+                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') "
+                    f"{shop_perm_clause}LIMIT 1",
                     (gid, uid, role_id),
                 )
                 if op_by_role:

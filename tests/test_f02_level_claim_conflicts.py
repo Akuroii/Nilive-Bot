@@ -319,16 +319,22 @@ class F02LevelClaimConflictTests(unittest.IsolatedAsyncioTestCase):
         pr_rows = await pending_rewards.list_pending(GUILD, USER)
         halo_pr_id = [p["id"] for p in pr_rows if p["payload"].get("claim_id") == halo_claim_id][0]
 
-        # Simulate crash -> needs_review, then staff marks 'delivered' after manual grant
+        # Simulate mid-delivery crash leaving level_reward_claims in stale 'processing'
+        # and pending_rewards in 'needs_review'; staff marks 'delivered' after verifying grant
         await inventory.remove_item(GUILD, USER, "Halo", 1)
+        execute(
+            "UPDATE level_reward_claims SET status='processing', owner_token='crashed-worker', "
+            "processing_started_at='2000-01-01 00:00:00' WHERE id=?",
+            (halo_claim_id,),
+        )
         execute("UPDATE pending_rewards SET status='needs_review' WHERE id=?", (halo_pr_id,))
         resolved = await pending_rewards.resolve_review(GUILD, halo_pr_id, "delivered", actor="admin")
         self.assertTrue(resolved)
         self.assertEqual(
-            rows("SELECT status FROM level_reward_claims WHERE id=?", (halo_claim_id,)),
-            [("fulfilled",)],
+            rows("SELECT status, owner_token, processing_started_at FROM level_reward_claims WHERE id=?", (halo_claim_id,)),
+            [("fulfilled", None, None)],
         )
-        # Subsequent Claim All does NOT deliver Halo a second time!
+        # Subsequent Claim All cannot reclaim the expired 'processing' row or deliver Halo twice!
         after_claim = await level_claims.claim_available(
             GUILD, USER, member=self.member, bot=self.bot, claim_ids=[halo_claim_id]
         )

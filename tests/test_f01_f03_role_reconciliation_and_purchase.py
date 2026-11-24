@@ -809,6 +809,69 @@ class F01F03RoleReconciliationAndPurchaseTests(unittest.IsolatedAsyncioTestCase)
         )[0]
         self.assertEqual(op_dbf[1:], ("uncertain", 0))
 
+    async def test_f01_stale_expired_timed_receipt_never_reconciles_unowned_or_perm_slot(self):
+        # Past 1-hour timed Flame purchase whose timed_holdings row already expired and was deleted.
+        timed_id = seed_shop_role("TimedFlame", "temp_role", FLAME, price=150, duration_hours=1)
+        ph_id = execute(
+            "INSERT INTO purchase_history (guild_id, user_id, user_display_name, item_id, item_name, price_paid) "
+            "VALUES (?, ?, 'Member', ?, 'TimedFlame', 150)",
+            (GUILD, USER, timed_id),
+        )
+        execute(
+            "INSERT INTO shop_purchase_operations "
+            "(op_id, guild_id, user_id, item_id, item_name, currency, amount, status, "
+            "stock_reserved, charged, refunded, stock_returned, history_id, delivery_intent, created_at, updated_at) "
+            "VALUES ('op-expired-timed', ?, ?, ?, 'TimedFlame', 'balance', 150, 'delivered', "
+            "1, 1, 0, 0, ?, ?, '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+            (
+                GUILD, USER, timed_id, ph_id,
+                json.dumps({
+                    "kind": "discord_role",
+                    "role_id": FLAME,
+                    "role_present_before": False,
+                    "state": "recorded",
+                }),
+            ),
+        )
+        # Case A: Admin later manually granted FLAME on Discord; stale equipped_roles row
+        # points to deleted timed_holdings h:999 -> fail-closed, role NOT stripped!
+        execute(
+            "INSERT INTO equipped_roles (guild_id, user_id, item_name, role_id, entry_key, role_added, role_added_role_id) "
+            "VALUES (?, ?, 'TimedFlame', ?, 'h:999', NULL, NULL)",
+            (GUILD, USER, FLAME),
+        )
+        self.member.roles = [self.roles[FLAME]]
+
+        slot_a = await equip_engine.get_equipped(GUILD, USER)
+        self.assertIsNone(await equip_engine.reconcile_legacy_slot_observation(GUILD, USER, slot_a))
+        res_a = await equip_engine.unequip_role(self.bot, GUILD, USER, "TimedFlame")
+        self.assertFalse(res_a["success"])
+        self.assertTrue(res_a["uncertain"])
+        self.assertEqual(worn_ids(self.member), [FLAME])
+
+        # Case B: Uncorroborated permanent inventory_items(item_type='role') row cannot be
+        # corroborated by the stale expired timed receipt either!
+        execute("DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        await inventory.set_quantity(
+            GUILD, USER, "Flame", 1, item_type="role", source="manual_seed",
+            metadata={"role_id": FLAME},
+        )
+        perm_inv_id = rows(
+            "SELECT id FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='Flame'",
+            (GUILD, USER),
+        )[0][0]
+        execute(
+            "INSERT INTO equipped_roles (guild_id, user_id, item_name, role_id, entry_key, role_added, role_added_role_id) "
+            "VALUES (?, ?, 'Flame', ?, ?, NULL, NULL)",
+            (GUILD, USER, FLAME, f"i:{perm_inv_id}"),
+        )
+        slot_b = await equip_engine.get_equipped(GUILD, USER)
+        self.assertIsNone(await equip_engine.reconcile_legacy_slot_observation(GUILD, USER, slot_b))
+        res_b = await equip_engine.unequip_role(self.bot, GUILD, USER, "Flame")
+        self.assertFalse(res_b["success"])
+        self.assertTrue(res_b["uncertain"])
+        self.assertEqual(worn_ids(self.member), [FLAME])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

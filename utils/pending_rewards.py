@@ -411,7 +411,7 @@ async def resolve_review(guild_id: int, row_id: int, action: str, *,
                             "owner_token=NULL, processing_started_at=NULL, "
                             "last_error=NULL "
                             "WHERE id=? AND guild_id=? AND user_id=? "
-                            "AND status IN ('pending', 'failed')",
+                            "AND status IN ('pending', 'failed', 'processing')",
                             (now, cid, guild_id, int(cur_row[0])),
                         )
                     except aiosqlite.Error as exc:
