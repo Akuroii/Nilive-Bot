@@ -234,13 +234,22 @@ class AdditionalApiTests(unittest.TestCase):
                 self.assertEqual(mutation_snapshot(), before)
 
     def test_form_numbers_supported_and_session_guild_is_authoritative(self):
+        # VI is unmetered (`max_stock="0"` -> None), and Prestige II accepts
+        # positive form-number stock while session `guild_id` stays authoritative.
         response = self.client.post("/api/shop/item", data=dict(name="VI", type="prestige",
-            price="0", prestige_tier="6", max_stock="2", guild_id=str(GUILD + 1)),
+            price="0", prestige_tier="6", max_stock="0", guild_id=str(GUILD + 1)),
             headers={"X-CSRF-Token": "phase1-csrf"})
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.get_json())
         self.assertIs(response.get_json()["success"], True)
-        self.assertEqual(rows("SELECT guild_id,price,prestige_tier,current_stock FROM shop_items"),
-                         [(GUILD, 0, 6, None)])
+
+        response2 = self.client.post("/api/shop/item", data=dict(name="PII", type="prestige",
+            price="500", prestige_tier="2", max_stock="2", guild_id=str(GUILD + 1)),
+            headers={"X-CSRF-Token": "phase1-csrf"})
+        self.assertEqual(response2.status_code, 200, response2.get_json())
+        self.assertEqual(
+            rows("SELECT guild_id,price,prestige_tier,current_stock FROM shop_items ORDER BY prestige_tier"),
+            [(GUILD, 500, 2, 2), (GUILD, 0, 6, None)],
+        )
 
 
 class AdditionalRuntimeTests(unittest.IsolatedAsyncioTestCase):
