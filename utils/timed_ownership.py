@@ -3223,7 +3223,9 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                         f"your roles."
                     )
                 else:
-                    if taken_back not in ("removed", "not_added"):
+                    if taken_back in ("removed", "not_added"):
+                        role_added = False
+                    else:
                         equip_uncertain = True
                     # The wording must reflect what the member did: a Shop
                     # purchase is "purchased", a Mission/Event/Minigame/Tag

@@ -186,6 +186,179 @@ class PrestigeConfirmView(discord.ui.View):
             content="Purchase cancelled. Nothing was changed.", embed=None, view=None)
 
 
+async def _check_role_purchase_block(interaction: discord.Interaction,
+                                     guild_id: int, user_id: int,
+                                     role_id: int) -> str | None:
+    """Refuse a role purchase BEFORE charging or starting any timer when the
+    member's role state is currently suspended or unconfirmed.
+    """
+    from utils.level_ops import _now as _ops_now
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            cur = await db.execute(
+                "SELECT operation_id, holder FROM level_op_locks "
+                "WHERE guild_id=? AND user_id=? AND expires_at > ? LIMIT 1",
+                (guild_id, user_id, _ops_now()),
+            )
+            lock_row = await cur.fetchone()
+            if lock_row:
+                return (
+                    "Another role or level operation is still running for your "
+                    "account. Nothing was charged — please wait a moment and try again."
+                )
+        except Exception as exc:
+            if "no such table" not in str(exc).lower():
+                return (
+                    "Could not verify active role operations right now. "
+                    "Nothing was charged — please try again."
+                )
+
+        try:
+            cur = await db.execute(
+                "SELECT op.op_id, op.status, op.delivery_intent, si.type "
+                "FROM shop_purchase_operations op "
+                "LEFT JOIN shop_items si ON si.id = op.item_id AND si.guild_id = op.guild_id "
+                "WHERE op.guild_id=? AND op.user_id=? "
+                "AND op.status = 'delivering' "
+                "AND COALESCE(op.refunded, 0) = 0",
+                (guild_id, user_id),
+            )
+            open_ops = await cur.fetchall()
+            for stuck_op_id, _st, raw_intent, si_type in open_ops:
+                is_role_op = si_type in ("role", "temp_role", "color")
+                if not is_role_op and raw_intent:
+                    try:
+                        parsed = json.loads(raw_intent) or {}
+                        is_role_op = parsed.get("kind") == "discord_role"
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+                if is_role_op:
+                    return (
+                        f"Another role purchase (`{stuck_op_id}`) is still "
+                        f"being delivered. Nothing was charged — please wait "
+                        f"a moment and try again."
+                    )
+        except Exception as exc:
+            if "no such table" not in str(exc).lower():
+                return (
+                    "Could not verify in-flight role purchases right now. "
+                    "Nothing was charged — please try again."
+                )
+
+        try:
+            cur = await db.execute(
+                "SELECT reward_type, payload FROM pending_rewards "
+                "WHERE guild_id=? AND user_id=? "
+                "AND status = 'delivering' "
+                "AND reward_type IN ('role', 'temp_role', 'level_claim')",
+                (guild_id, user_id),
+            )
+            for pr_type, raw_pr_payload in await cur.fetchall():
+                has_role = pr_type in ("role", "temp_role")
+                if not has_role and raw_pr_payload:
+                    try:
+                        parsed_pr = json.loads(raw_pr_payload) or {}
+                        has_role = bool(parsed_pr.get("role_id"))
+                    except (TypeError, ValueError, AttributeError):
+                        has_role = False
+                if has_role:
+                    return (
+                        "A role reward is currently being delivered to your account. "
+                        "Nothing was charged — please wait a moment and try again."
+                    )
+        except Exception as exc:
+            if "no such table" not in str(exc).lower():
+                return (
+                    "Could not verify pending role rewards right now. "
+                    "Nothing was charged — please try again."
+                )
+
+    from utils.equip_engine import (
+        _MemberRoleView,
+        get_equipped,
+        observed_role_state,
+        reconcile_legacy_slot_observation,
+    )
+    try:
+        current = await get_equipped(guild_id, user_id)
+    except Exception:
+        return (
+            "Could not read your currently equipped role right now. "
+            "Nothing was charged — please try again."
+        )
+    if not current:
+        return None
+    try:
+        old_role_id = int(current["role_id"])
+    except (KeyError, TypeError, ValueError):
+        return (
+            "Your current equipped role slot has invalid metadata. "
+            "Nothing was charged — ask an admin to inspect it."
+        )
+    if old_role_id == int(role_id):
+        return None
+
+    state = observed_role_state(current)
+    if state is None and (
+        current.get("role_added") is None
+        and current.get("role_added_role_id") is None
+    ):
+        state = await reconcile_legacy_slot_observation(guild_id, user_id, current)
+    if state is not None:
+        return None
+
+    guild = interaction.guild
+    if guild is None:
+        return (
+            "Could not verify your current roles with Discord. "
+            "Nothing was charged — please try again."
+        )
+    old_role = guild.get_role(old_role_id)
+    if old_role is None:
+        return None
+
+    fetch = getattr(guild, "fetch_member", None)
+    if not callable(fetch):
+        return (
+            "Could not verify your current roles with Discord. "
+            "Nothing was charged — please try again."
+        )
+    try:
+        verified_member = await fetch(user_id)
+    except Exception:
+        return (
+            "Could not verify your current roles with Discord. "
+            "Nothing was charged — please try again."
+        )
+    if verified_member is None:
+        return (
+            "Could not verify your current roles with Discord. "
+            "Nothing was charged — please try again."
+        )
+    if old_role not in (getattr(verified_member, "roles", None) or ()):
+        return None
+
+    if current.get("role_added") is None and current.get("role_added_role_id") is None:
+        from utils.timed_ownership import non_slot_role_entitlement
+        try:
+            entitled = await non_slot_role_entitlement(
+                guild_id, user_id, old_role_id,
+                bot=interaction.client,
+                member=_MemberRoleView(verified_member, old_role, worn=False),
+            )
+        except Exception:
+            entitled = None
+        if entitled:
+            return None
+
+    return (
+        f"Your currently equipped role (<@&{old_role_id}>) has an unresolved "
+        f"ownership state, so it cannot be swapped out automatically. "
+        f"Nothing was charged and no timer was started — ask an admin to "
+        f"remove the role by hand, then run Unequip in `/inventory`."
+    )
+
+
 async def _process_purchase(interaction: discord.Interaction,
                             item_id: int):
     guild_id = interaction.guild.id
@@ -405,6 +578,17 @@ async def _process_purchase(interaction: discord.Interaction,
         await interaction.response.send_message("Paid Shop items require a positive price.", ephemeral=True)
         return
     free = pay_amount == 0
+
+    if itype in ("role", "temp_role", "color"):
+        if not role_id:
+            await interaction.response.send_message(
+                "This listing has no role configured.", ephemeral=True)
+            return
+        block_reason = await _check_role_purchase_block(
+            interaction, int(guild_id), int(user_id), int(role_id))
+        if block_reason:
+            await interaction.response.send_message(block_reason, ephemeral=True)
+            return
 
     # ── Purchase saga ───────────────────────────────────────────────────
     # What used to happen: stock was claimed, money was deducted and a
@@ -944,10 +1128,55 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
                           role_added=bool(granted.get("role_added")),
                           detail=f"holding {granted.get('entry_key')}")
             if granted.get("equipped") is False:
-                # Delivered but NOT worn: the previously equipped role could
-                # not be released, so the swap was refused and this role was
-                # taken back. The purchase succeeded - say what it actually
-                # bought instead of implying the role is equipped.
+                if op_id:
+                    from utils.timed_ownership import delete_timed_holding
+                    entry_key = granted.get("entry_key")
+                    removed_holding = False
+                    if entry_key:
+                        try:
+                            removed_holding = await delete_timed_holding(
+                                entry_key, event_type=None,
+                                guild_id=guild_id, user_id=user_id,
+                            )
+                        except Exception as del_exc:
+                            print(f"[SHOP] Could not roll back unequipped timed "
+                                  f"holding {entry_key} for op {op_id}: {del_exc}")
+                            removed_holding = False
+                        if removed_holding:
+                            try:
+                                hid = int(str(entry_key).split(":", 1)[1])
+                                async with aiosqlite.connect(DB_PATH) as clean_db:
+                                    await clean_db.execute(
+                                        "DELETE FROM inventory_activity "
+                                        "WHERE guild_id=? AND user_id=? AND event_key=?",
+                                        (guild_id, user_id, f"timed-grant:{hid}"),
+                                    )
+                                    await clean_db.commit()
+                            except Exception:
+                                pass
+                    uncertain_outcome = (
+                        bool(granted.get("equip_uncertain"))
+                        or bool(granted.get("role_added"))
+                        or (bool(entry_key) and not removed_holding)
+                    )
+                    result.update(
+                        success=False,
+                        expires_at=None,
+                        entry_key=None,
+                        detail=None,
+                        role_added=bool(granted.get("role_added")),
+                        uncertain=uncertain_outcome,
+                        error=(granted.get("equip_warning")
+                               or "The timed role could not be equipped."),
+                    )
+                    if uncertain_outcome:
+                        result["warning"] = (
+                            granted.get("equip_warning")
+                            or "The role swap outcome could not be confirmed; "
+                               "an admin should check this purchase."
+                        )
+                    return result
+                # Non-saga / direct helper call (op_id is None): preserve legacy contract.
                 result["warning"] = granted.get("equip_warning") or (
                     "This item is in your inventory, but it could not be "
                     "equipped.")

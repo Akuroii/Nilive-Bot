@@ -91,8 +91,8 @@ def _row(raw) -> dict:
 def describe(row: dict) -> str:
     """Short human label of what is waiting: `2× Tonic`, `Role <@&id>`."""
     payload = row.get("payload") or {}
-    if row.get("reward_type") == "item":
-        quantity = int(payload.get("amount") or 1)
+    if row.get("reward_type") in ("item", "level_claim"):
+        quantity = int(payload.get("amount") or payload.get("quantity") or 1)
         return f"{quantity}× {payload.get('item_name')}"
     if payload.get("role_id"):
         return f"Role <@&{payload['role_id']}>"
@@ -166,7 +166,44 @@ async def list_pending(guild_id: int, user_id: int | None = None) -> list[dict]:
         args.append(user_id)
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(sql + " ORDER BY id", args)
-        return [_row(raw) for raw in await cursor.fetchall()]
+        items = [_row(raw) for raw in await cursor.fetchall()]
+        stale_ids: list[int] = []
+        kept: list[dict] = []
+        for item in items:
+            if item.get("reward_type") == "level_claim":
+                payload = item.get("payload") or {}
+                try:
+                    cid = int(payload["claim_id"])
+                except (KeyError, TypeError, ValueError):
+                    cid = None
+                if cid is not None:
+                    try:
+                        c_cur = await db.execute(
+                            "SELECT status FROM level_reward_claims "
+                            "WHERE id=? AND guild_id=? AND user_id=?",
+                            (cid, int(item["guild_id"]), int(item["user_id"])),
+                        )
+                        c_row = await c_cur.fetchone()
+                    except aiosqlite.Error as exc:
+                        if "no such table" in str(exc).lower():
+                            c_row = None
+                        else:
+                            raise
+                    if c_row is None or c_row[0] == "fulfilled":
+                        stale_ids.append(int(item["id"]))
+                        continue
+            kept.append(item)
+        if stale_ids:
+            now_iso = _now()
+            marks = ",".join("?" for _ in stale_ids)
+            await db.execute(
+                f"UPDATE pending_rewards SET status=?, last_error=NULL, "
+                f"updated_at=?, delivered_at=? "
+                f"WHERE id IN ({marks}) AND status IN (?, ?, ?)",
+                (STATUS_DELIVERED, now_iso, now_iso, *stale_ids, *OPEN_STATUSES),
+            )
+            await db.commit()
+        return kept
 
 
 async def _claim(row_id: int) -> bool:
@@ -221,6 +258,68 @@ async def retry(bot, guild_id: int | None = None, user_id: int | None = None,
     for row in waiting:
         if not await _claim(row["id"]):
             continue                      # another retry owns it
+        if row["reward_type"] == "level_claim":
+            try:
+                from utils.level_claims import claim_available
+                payload = row.get("payload") or {}
+                claim_id = int(payload["claim_id"])
+                gid = int(row["guild_id"])
+                uid = int(row["user_id"])
+                async with aiosqlite.connect(DB_PATH) as check_db:
+                    cur_c = await check_db.execute(
+                        "SELECT status, last_error FROM level_reward_claims "
+                        "WHERE id=? AND guild_id=? AND user_id=?",
+                        (claim_id, gid, uid),
+                    )
+                    claim_row = await cur_c.fetchone()
+                if claim_row is None or claim_row[0] == "fulfilled":
+                    await _settle(row["id"], STATUS_DELIVERED, None)
+                    continue
+                guild = (bot.get_guild(gid)
+                         if bot is not None and callable(getattr(bot, "get_guild", None))
+                         else None)
+                member = (guild.get_member(uid)
+                          if guild is not None and callable(getattr(guild, "get_member", None))
+                          else None)
+                if member is None and guild is not None and callable(getattr(guild, "fetch_member", None)):
+                    try:
+                        member = await guild.fetch_member(uid)
+                    except Exception:
+                        member = None
+                if payload.get("role_id") and member is None:
+                    await _settle(row["id"], STATUS_PENDING,
+                                  "Waiting for member availability on Discord")
+                    outcome["still_pending"] += 1
+                    continue
+                claim_res = await claim_available(
+                    gid, uid, member=member, bot=bot, claim_ids=[claim_id]
+                )
+                if claim_id in (claim_res.get("fulfilled") or []):
+                    await _settle(row["id"], STATUS_DELIVERED, None)
+                    outcome["delivered"] += 1
+                else:
+                    async with aiosqlite.connect(DB_PATH) as err_db:
+                        cur_e = await err_db.execute(
+                            "SELECT status, last_error FROM level_reward_claims "
+                            "WHERE id=? AND guild_id=? AND user_id=?",
+                            (claim_id, gid, uid),
+                        )
+                        err_row = await cur_e.fetchone()
+                    if err_row is None or err_row[0] == "fulfilled":
+                        await _settle(row["id"], STATUS_DELIVERED, None)
+                    else:
+                        err_msg = (
+                            (err_row[1] if err_row[1] else None)
+                            or claim_res.get("blocked")
+                            or "Reward still held pending"
+                        )
+                        await _settle(row["id"], STATUS_PENDING, str(err_msg))
+                        outcome["still_pending"] += 1
+            except Exception as exc:
+                await _settle(row["id"], STATUS_NEEDS_REVIEW,
+                              f"Unexpected error during level claim retry: {exc}")
+                outcome["uncertain"] += 1
+            continue
         try:
             result = await give_reward(
                 bot, row["guild_id"], row["user_id"], row["reward_type"],
@@ -284,14 +383,45 @@ async def resolve_review(guild_id: int, row_id: int, action: str, *,
     note = (f"Marked as delivered by {actor}" if delivered
             else f"Retry requested by {actor}")
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "UPDATE pending_rewards SET status=?, last_error=?, updated_at=?, "
-            "delivered_at=? WHERE id=? AND guild_id=? AND status=?",
-            (STATUS_DELIVERED if delivered else STATUS_PENDING, note, now,
-             now if delivered else None, row_id, guild_id,
-             STATUS_NEEDS_REVIEW))
-        await db.commit()
-        return cursor.rowcount == 1
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cur_row = await (await db.execute(
+                "SELECT user_id, reward_type, payload FROM pending_rewards "
+                "WHERE id=? AND guild_id=? AND status=?",
+                (row_id, guild_id, STATUS_NEEDS_REVIEW),
+            )).fetchone()
+            cursor = await db.execute(
+                "UPDATE pending_rewards SET status=?, last_error=?, updated_at=?, "
+                "delivered_at=? WHERE id=? AND guild_id=? AND status=?",
+                (STATUS_DELIVERED if delivered else STATUS_PENDING, note, now,
+                 now if delivered else None, row_id, guild_id,
+                 STATUS_NEEDS_REVIEW))
+            changed = cursor.rowcount == 1
+            if changed and delivered and cur_row and cur_row[1] == "level_claim":
+                try:
+                    p = json.loads(cur_row[2] or "{}") or {}
+                    cid = int(p["claim_id"])
+                except (KeyError, TypeError, ValueError):
+                    cid = None
+                if cid is not None:
+                    try:
+                        await db.execute(
+                            "UPDATE level_reward_claims "
+                            "SET status='fulfilled', fulfilled_at=?, "
+                            "owner_token=NULL, processing_started_at=NULL, "
+                            "last_error=NULL "
+                            "WHERE id=? AND guild_id=? AND user_id=? "
+                            "AND status IN ('pending', 'failed', 'processing')",
+                            (now, cid, guild_id, int(cur_row[0])),
+                        )
+                    except aiosqlite.Error as exc:
+                        if "no such table" not in str(exc).lower():
+                            raise
+            await db.commit()
+            return changed
+        except BaseException:
+            await db.rollback()
+            raise
 
 
 def needs_review(row: dict) -> bool:

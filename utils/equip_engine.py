@@ -1,5 +1,6 @@
 import asyncio
 import functools
+import json
 
 import discord
 import aiosqlite
@@ -114,6 +115,467 @@ def observed_role_state(slot: dict | None) -> bool | None:
     if value == 0:
         return False
     return None
+
+
+def _is_missing_schema_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "no such table" in msg or "no such column" in msg
+
+
+async def _optional_rows(db: aiosqlite.Connection, sql: str,
+                         params: tuple = ()) -> list[tuple]:
+    try:
+        cur = await db.execute(sql, params)
+        return await cur.fetchall()
+    except Exception as exc:
+        if _is_missing_schema_error(exc):
+            return []
+        raise
+
+
+async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
+                                            slot: dict) -> bool | None:
+    """Reconcile a pre-migration `role_added IS NULL` slot from durable DB proof.
+
+    Strictly limited to legacy rows where BOTH `role_added` and
+    `role_added_role_id` are NULL. Stale or corrupted metadata (for example,
+    `role_added_role_id` naming another role) is NEVER overwritten here and
+    stays fail-closed.
+
+    Evidence hierarchy:
+      1. Delivered, unrefunded `shop_purchase_operations.delivery_intent` for
+         this `(guild_id, user_id, role_id)` with an explicit boolean
+         `role_present_before` -> persists `0` (already worn) or `1` (added).
+      2. A matching owned role entry (`timed_holdings`, `inventory_items`, or
+         legacy `temp_roles`) corroborated by an authentic bot grant/purchase
+         record (`purchase_history`, delivered `shop_purchase_operations`,
+         active `reward_grants`, `temp_roles`, completed `mission_progress`,
+         `event_winners`, `tag_mission_participants`, `tag_join_reward_log`,
+         `minigames_log`, or delivered `pending_rewards`) -> persists `1`.
+
+    Bare/uncorroborated rows (manual DB inserts or unknown provenance) return
+    `None` and remain fail-closed.
+    """
+    if not isinstance(slot, dict):
+        return None
+    existing_state = observed_role_state(slot)
+    if existing_state is not None:
+        return existing_state
+    if slot.get("role_added") is not None or slot.get("role_added_role_id") is not None:
+        return None
+    try:
+        gid = int(guild_id)
+        uid = int(user_id)
+        role_id = int(slot["role_id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    entry_key = slot.get("entry_key")
+    slot_item_name = str(slot.get("item_name") or "").strip()
+
+    async def _persist_reconciled(db, desired_added: bool) -> bool | None:
+        desired_int = 1 if desired_added else 0
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await db.execute(
+                "UPDATE equipped_roles "
+                "SET role_added=?, role_added_role_id=? "
+                "WHERE guild_id=? AND user_id=? AND role_id=? "
+                "AND role_added IS NULL AND role_added_role_id IS NULL",
+                (desired_int, role_id, gid, uid, role_id),
+            )
+            if int(getattr(cur, "rowcount", 0) or 0) == 1:
+                await db.commit()
+                slot["role_added"] = desired_int
+                slot["role_added_role_id"] = role_id
+                return desired_added
+            cur2 = await db.execute(
+                "SELECT role_id, role_added, role_added_role_id "
+                "FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                (gid, uid),
+            )
+            live = await cur2.fetchone()
+            await db.commit()
+            if live and int(live[0]) == role_id:
+                live_slot = {
+                    "role_id": live[0],
+                    "role_added": live[1],
+                    "role_added_role_id": live[2],
+                }
+                live_state = observed_role_state(live_slot)
+                if live_state is not None:
+                    slot["role_added"] = live[1]
+                    slot["role_added_role_id"] = live[2]
+                    return live_state
+            return None
+        except BaseException:
+            await db.rollback()
+            raise
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            # 1) Locate live backing owned role entry first so stale receipts
+            #    from expired/deleted holdings can never claim an unowned role
+            #    or strip an independently held Discord role.
+            sources: set[str] = set()
+            product_ids: set[int] = set()
+            item_names: set[str] = set()
+            if slot_item_name:
+                item_names.add(slot_item_name)
+            has_timed_holding = False
+            has_perm_inventory = False
+            has_temp_inventory = False
+
+            def _meta_matches_role(raw_meta, col_role=None) -> tuple[bool, int | None]:
+                parsed_meta = {}
+                if raw_meta:
+                    try:
+                        parsed_meta = json.loads(raw_meta) or {}
+                    except (TypeError, ValueError):
+                        parsed_meta = {}
+                if not isinstance(parsed_meta, dict):
+                    parsed_meta = {}
+                cand_role = col_role if col_role is not None else parsed_meta.get("role_id")
+                try:
+                    matched = int(cand_role) == role_id
+                except (TypeError, ValueError):
+                    matched = False
+                pid = parsed_meta.get("product_id")
+                try:
+                    pid_int = int(pid) if pid is not None else None
+                except (TypeError, ValueError):
+                    pid_int = None
+                return matched, pid_int
+
+            if isinstance(entry_key, str) and entry_key.startswith("h:"):
+                try:
+                    hid = int(entry_key.split(":", 1)[1])
+                except (IndexError, ValueError):
+                    hid = None
+                if hid is not None:
+                    h_rows = await _optional_rows(
+                        db,
+                        "SELECT item_name, source, product_id, role_id, metadata "
+                        "FROM timed_holdings "
+                        "WHERE id=? AND guild_id=? AND user_id=? "
+                        "AND item_type != '_role_retention'",
+                        (hid, gid, uid),
+                    )
+                    for h_name, h_src, h_pid, h_rid, h_meta in h_rows:
+                        matched, meta_pid = _meta_matches_role(h_meta, h_rid)
+                        if matched:
+                            has_timed_holding = True
+                            if h_name:
+                                item_names.add(str(h_name))
+                            if h_src:
+                                sources.add(str(h_src))
+                            for p in (h_pid, meta_pid):
+                                if p is not None:
+                                    product_ids.add(int(p))
+            elif isinstance(entry_key, str) and entry_key.startswith("i:"):
+                try:
+                    iid = int(entry_key.split(":", 1)[1])
+                except (IndexError, ValueError):
+                    iid = None
+                if iid is not None:
+                    i_rows = await _optional_rows(
+                        db,
+                        "SELECT item_name, item_type, source, metadata FROM inventory_items "
+                        "WHERE id=? AND guild_id=? AND user_id=? AND quantity > 0 "
+                        "AND item_type IN ('role', 'temp_role')",
+                        (iid, gid, uid),
+                    )
+                    for i_name, i_type, i_src, i_meta in i_rows:
+                        matched, meta_pid = _meta_matches_role(i_meta)
+                        if matched:
+                            if i_type == "role":
+                                has_perm_inventory = True
+                            else:
+                                has_temp_inventory = True
+                            if i_name:
+                                item_names.add(str(i_name))
+                            if i_src:
+                                sources.add(str(i_src))
+                            if meta_pid is not None:
+                                product_ids.add(int(meta_pid))
+            elif entry_key is None:
+                i_rows = await _optional_rows(
+                    db,
+                    "SELECT item_name, item_type, source, metadata FROM inventory_items "
+                    "WHERE guild_id=? AND user_id=? AND quantity > 0 "
+                    "AND item_type IN ('role', 'temp_role')",
+                    (gid, uid),
+                )
+                for i_name, i_type, i_src, i_meta in i_rows:
+                    matched, meta_pid = _meta_matches_role(i_meta)
+                    if matched:
+                        if i_type == "role":
+                            has_perm_inventory = True
+                        else:
+                            has_temp_inventory = True
+                        if i_name:
+                            item_names.add(str(i_name))
+                        if i_src:
+                            sources.add(str(i_src))
+                        if meta_pid is not None:
+                            product_ids.add(int(meta_pid))
+                h_rows = await _optional_rows(
+                    db,
+                    "SELECT item_name, source, product_id, role_id, metadata "
+                    "FROM timed_holdings "
+                    "WHERE guild_id=? AND user_id=? AND item_type != '_role_retention'",
+                    (gid, uid),
+                )
+                for h_name, h_src, h_pid, h_rid, h_meta in h_rows:
+                    matched, meta_pid = _meta_matches_role(h_meta, h_rid)
+                    if matched:
+                        has_timed_holding = True
+                        if h_name:
+                            item_names.add(str(h_name))
+                        if h_src:
+                            sources.add(str(h_src))
+                        for p in (h_pid, meta_pid):
+                            if p is not None:
+                                product_ids.add(int(p))
+
+            # Direct legacy temp_roles table is an explicit bot grant table when unexpired,
+            # provided the slot is not bound to a deleted timed_holdings / permanent row.
+            from utils.timed_ownership import is_expired, utcnow
+            now_dt = utcnow()
+            legacy_temp = await _optional_rows(
+                db,
+                "SELECT expires_at FROM temp_roles "
+                "WHERE guild_id=? AND user_id=? AND role_id=?",
+                (gid, uid, role_id),
+            )
+            has_live_temp_role = any(
+                tr_exp and not is_expired(tr_exp, now=now_dt)
+                for (tr_exp,) in legacy_temp
+            )
+            temp_role_backs_slot = has_live_temp_role and (
+                entry_key is None or has_temp_inventory
+            )
+            has_owned_entry = (
+                has_timed_holding or has_perm_inventory or has_temp_inventory
+            )
+            if not has_owned_entry and not temp_role_backs_slot:
+                return None
+
+            perm_only_backing = (
+                has_perm_inventory and not has_timed_holding and not temp_role_backs_slot
+            )
+
+            # 2) Exact recorded delivery_intent on finalized, unrefunded Shop ops.
+            #    Conflicting observations ({True, False}) across history stay
+            #    strictly fail-closed rather than guessing which write won.
+            #    When the live slot is backed only by a permanent role row, a
+            #    stale intent from an expired timed listing cannot authorize
+            #    role_added=1.
+            intent_rows = await _optional_rows(
+                db,
+                "SELECT op.delivery_intent, si.type, si.duration_hours "
+                "FROM shop_purchase_operations op "
+                "LEFT JOIN shop_items si ON si.id = op.item_id AND si.guild_id = op.guild_id "
+                "WHERE op.guild_id=? AND op.user_id=? AND op.status='delivered' "
+                "AND COALESCE(op.refunded, 0)=0 AND op.delivery_intent IS NOT NULL "
+                "ORDER BY op.rowid DESC",
+                (gid, uid),
+            )
+            intent_present_before: set[bool] = set()
+            has_eligible_added_intent = False
+            for raw_intent, si_type, si_dur in intent_rows:
+                try:
+                    intent = json.loads(raw_intent) if raw_intent else None
+                except (TypeError, ValueError):
+                    intent = None
+                if not isinstance(intent, dict):
+                    continue
+                if intent.get("kind") != "discord_role":
+                    continue
+                try:
+                    intent_role = int(intent.get("role_id"))
+                except (TypeError, ValueError):
+                    continue
+                if intent_role != role_id:
+                    continue
+                present_before = intent.get("role_present_before")
+                if isinstance(present_before, bool):
+                    intent_present_before.add(present_before)
+                    if present_before is False:
+                        try:
+                            timed_listing = (
+                                si_type == "temp_role"
+                                or (si_dur is not None and int(si_dur) > 0)
+                            )
+                        except (TypeError, ValueError):
+                            timed_listing = False
+                        if not (perm_only_backing and timed_listing):
+                            has_eligible_added_intent = True
+            if len(intent_present_before) > 1:
+                return None
+            if intent_present_before == {True}:
+                return await _persist_reconciled(db, False)
+            if intent_present_before == {False} and has_eligible_added_intent:
+                return await _persist_reconciled(db, True)
+
+            proven = temp_role_backs_slot
+            shop_perm_clause = (
+                "AND si.type != 'temp_role' AND COALESCE(si.duration_hours, 0) <= 0 "
+                if perm_only_backing else ""
+            )
+
+            # Shop purchase_history corroboration (strictly bound to role_id and unrefunded)
+            if not proven:
+                ph_by_role = await _optional_rows(
+                    db,
+                    f"SELECT 1 FROM purchase_history ph "
+                    f"JOIN shop_items si ON si.id = ph.item_id AND si.guild_id = ph.guild_id "
+                    f"WHERE ph.guild_id=? AND ph.user_id=? "
+                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') "
+                    f"{shop_perm_clause}"
+                    f"AND NOT EXISTS ("
+                    f"    SELECT 1 FROM shop_purchase_operations rop "
+                    f"    WHERE rop.guild_id = ph.guild_id AND rop.history_id = ph.id "
+                    f"    AND COALESCE(rop.refunded, 0) = 1"
+                    f") LIMIT 1",
+                    (gid, uid, role_id),
+                )
+                if ph_by_role:
+                    proven = True
+
+            # Delivered, unrefunded shop_purchase_operations corroboration (bound to role_id)
+            if not proven:
+                op_by_role = await _optional_rows(
+                    db,
+                    f"SELECT 1 FROM shop_purchase_operations op "
+                    f"JOIN shop_items si ON si.id = op.item_id AND si.guild_id = op.guild_id "
+                    f"WHERE op.guild_id=? AND op.user_id=? AND op.status='delivered' "
+                    f"AND COALESCE(op.refunded, 0)=0 "
+                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') "
+                    f"{shop_perm_clause}LIMIT 1",
+                    (gid, uid, role_id),
+                )
+                if op_by_role:
+                    proven = True
+
+            # Level/reward grant ledger corroboration (bound to claim payload role_id)
+            if not proven and item_names:
+                placeholders = ",".join("?" for _ in item_names)
+                rg_rows = await _optional_rows(
+                    db,
+                    f"SELECT lrc.payload_json FROM reward_grants rg "
+                    f"JOIN level_reward_claims lrc ON lrc.id = rg.claim_id "
+                    f"AND lrc.guild_id = rg.guild_id AND lrc.user_id = rg.user_id "
+                    f"WHERE rg.guild_id=? AND rg.user_id=? "
+                    f"AND COALESCE(rg.remaining_quantity, 0) > 0 "
+                    f"AND lrc.status = 'fulfilled' "
+                    f"AND rg.kind IN ('role', 'temp_role', 'inventory_item') "
+                    f"AND NOT EXISTS ("
+                    f"    SELECT 1 FROM reward_reversals rr "
+                    f"    WHERE rr.guild_id = rg.guild_id AND rr.user_id = rg.user_id "
+                    f"    AND rr.grant_id = rg.grant_id"
+                    f") "
+                    f"AND rg.item_name IN ({placeholders})",
+                    (gid, uid, *sorted(item_names)),
+                )
+                for (raw_claim_payload,) in rg_rows:
+                    try:
+                        c_payload = json.loads(raw_claim_payload) if raw_claim_payload else {}
+                        if int((c_payload or {}).get("role_id")) == role_id:
+                            proven = True
+                            break
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+
+            # Completed Mission reward corroboration
+            if not proven:
+                m_rows = await _optional_rows(
+                    db,
+                    "SELECT md.reward_value FROM mission_progress mp "
+                    "JOIN missions_definitions md ON md.id = mp.mission_id "
+                    "AND md.guild_id = mp.guild_id "
+                    "WHERE mp.guild_id=? AND mp.user_id=? AND mp.completed=1 "
+                    "AND md.reward_type IN ('role', 'temp_role')",
+                    (gid, uid),
+                )
+                for (rval,) in m_rows:
+                    try:
+                        if int(str(rval).strip()) == role_id:
+                            proven = True
+                            break
+                    except (TypeError, ValueError):
+                        continue
+
+            # Event winner reward corroboration
+            if not proven:
+                ev_rows = await _optional_rows(
+                    db,
+                    "SELECT e.reward_value FROM event_winners ew "
+                    "JOIN events e ON e.id = ew.event_id AND e.guild_id = ew.guild_id "
+                    "WHERE ew.guild_id=? AND ew.user_id=? "
+                    "AND e.reward_type IN ('role', 'temp_role')",
+                    (gid, uid),
+                )
+                for (rval,) in ev_rows:
+                    try:
+                        if int(str(rval).strip()) == role_id:
+                            proven = True
+                            break
+                    except (TypeError, ValueError):
+                        continue
+
+            # Tag mission & partner join reward corroboration
+            if not proven:
+                tm_rows = await _optional_rows(
+                    db,
+                    "SELECT 1 FROM tag_mission_participants tmp "
+                    "JOIN tag_missions tm ON tm.id = tmp.mission_id "
+                    "AND tm.guild_id = tmp.guild_id "
+                    "WHERE tmp.guild_id=? AND tmp.user_id=? "
+                    "AND tmp.outcome='rewarded' AND tm.reward_role_id=? LIMIT 1",
+                    (gid, uid, role_id),
+                )
+                if tm_rows:
+                    proven = True
+            if not proven:
+                tp_rows = await _optional_rows(
+                    db,
+                    "SELECT 1 FROM tag_join_reward_log tj "
+                    "JOIN tag_partner_rewards tpr ON tpr.guild_id = tj.guild_id "
+                    "AND tpr.partner_guild_id = tj.partner_guild_id "
+                    "WHERE tj.guild_id=? AND tj.user_id=? "
+                    "AND tpr.reward_role_id=? LIMIT 1",
+                    (gid, uid, role_id),
+                )
+                if tp_rows:
+                    proven = True
+
+            # Delivered pending_rewards corroboration (bound to payload role_id)
+            if not proven:
+                pr_rows = await _optional_rows(
+                    db,
+                    "SELECT payload FROM pending_rewards "
+                    "WHERE guild_id=? AND user_id=? AND status='delivered' "
+                    "AND reward_type IN ('role', 'temp_role', 'level_claim')",
+                    (gid, uid),
+                )
+                for (raw_payload,) in pr_rows:
+                    try:
+                        payload = json.loads(raw_payload) if raw_payload else {}
+                        if int((payload or {}).get("role_id")) == role_id:
+                            proven = True
+                            break
+                    except (TypeError, ValueError, AttributeError):
+                        continue
+
+            if not proven:
+                return None
+
+            return await _persist_reconciled(db, True)
+    except Exception as exc:
+        print(f"[EQUIP] Legacy observation reconciliation failed for role "
+              f"{role_id} on {user_id} in {guild_id}; staying fail-closed: {exc}")
+        return None
 
 
 def _observation_to_store(previous: dict | None, role_id: int,
@@ -334,6 +796,31 @@ async def _release_role(bot, guild_id: int, user_id: int, slot: dict, *,
         return back("absent", role=role, member=verified_member)
 
     state = observed_role_state(slot)
+    if state is None and (
+        isinstance(slot, dict)
+        and slot.get("role_added") is None
+        and slot.get("role_added_role_id") is None
+    ):
+        state = await reconcile_legacy_slot_observation(guild_id, user_id, slot)
+        if state is None:
+            # Even when legacy ownership cannot be attributed to this slot, an
+            # active independent entitlement (e.g. Level claim, Prestige, MVP,
+            # Booster) proves the Discord role must stay on the member anyway,
+            # allowing the slot itself to release safely without touching Discord.
+            from utils.timed_ownership import non_slot_role_entitlement
+            try:
+                entitled = await non_slot_role_entitlement(
+                    guild_id, user_id, role_id, bot=bot,
+                    member=_MemberRoleView(verified_member, role, worn=False))
+            except Exception as e:
+                print(f"[EQUIP] Could not verify other entitlements to role "
+                      f"{role_id} for {user_id} in {guild_id}; role and slot "
+                      f"left as they are: {e}")
+                return back("unresolved", uncertain=True, member=verified_member,
+                            error=f"Could not verify role entitlements: {e}")
+            if entitled:
+                return back("kept", detail=f"entitled by {entitled}",
+                            member=verified_member)
     if state is None:
         print(f"[EQUIP] Role {role_id} on {user_id} in {guild_id} has no usable "
               f"record of who added it (legacy or stale metadata); the role "
@@ -475,6 +962,12 @@ async def swap_and_record_equipped(bot: discord.Client | None,
                         "error": (released["error"] or
                                   "The previously equipped role could not be "
                                   "removed, so nothing was changed.")}
+        elif (
+            int(current["role_id"]) == int(role_id)
+            and current.get("role_added") is None
+            and current.get("role_added_role_id") is None
+        ):
+            await reconcile_legacy_slot_observation(guild_id, user_id, current)
 
     try:
         await record_equipped(guild_id, user_id, item_name,

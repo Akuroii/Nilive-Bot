@@ -181,9 +181,10 @@ class FreePurchaseEngineTests(unittest.IsolatedAsyncioTestCase):
                         [(f"Free {kind}", expected_type)], f"{kind}: reward not delivered")
                 elif artefact == "temp":
                     self.assertEqual(
-                        rows("SELECT item_type FROM inventory_items"), [(expected_type,)])
-                    self.assertEqual(rows("SELECT COUNT(*) FROM temp_roles"), [(1,)],
-                                     "temp_role: the normal expiry row must still be written")
+                        rows("SELECT item_type FROM timed_holdings WHERE item_type != '_role_retention'"),
+                        [(expected_type,)],
+                        "temp_role: the timed holding row must still be written",
+                    )
                 else:
                     self.assertEqual(
                         rows("SELECT COUNT(*) FROM leveling_active_boosts"), [(1,)],
@@ -264,7 +265,10 @@ class FreePurchaseEngineTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(2):
             itx, _ = purchase_context(granted_role=role_stub(55, "Cape"))
             await process_purchase(itx, item)
-        self.assertEqual(rows("SELECT COUNT(*) FROM temp_roles"), [(2,)])
+        self.assertEqual(
+            rows("SELECT COUNT(*) FROM timed_holdings WHERE item_type='temp_role'"),
+            [(2,)],
+        )
         self.assertEqual(len(history()), 2)
 
 
@@ -390,8 +394,10 @@ class FreeListingApiTests(unittest.TestCase):
         self.assertEqual(mutation_snapshot(), before)
 
     def test_prestige_rules_are_untouched_by_the_general_free_rule(self):
-        # I–V still require a positive Coin price; VI is its own explicit zero.
-        for tier in range(1, 6):
+        # Prestige I allows 0 (Free); II–V require a positive Coin price; VI is 0.
+        self.assertEqual(self.post(dict(name="PI", type="prestige",
+                                        prestige_tier=1, price=0)).status_code, 200)
+        for tier in range(2, 6):
             before = mutation_snapshot()
             response = self.post(dict(name=f"P{tier}", type="prestige",
                                       prestige_tier=tier, price=0))
@@ -399,7 +405,10 @@ class FreeListingApiTests(unittest.TestCase):
             self.assertEqual(mutation_snapshot(), before, f"tier {tier} was persisted")
         self.assertEqual(self.post(dict(name="PVI", type="prestige",
                                         prestige_tier=6, price=0)).status_code, 200)
-        self.assertEqual(rows("SELECT price, prestige_tier FROM shop_items"), [(0, 6)])
+        self.assertEqual(
+            rows("SELECT price, prestige_tier FROM shop_items ORDER BY prestige_tier"),
+            [(0, 1), (0, 6)],
+        )
 
     def test_free_listing_renders_free_in_the_admin_page_and_catalog(self):
         self.assertEqual(self.post(dict(name="Free Booster", type="custom", price=0)).status_code, 200)
