@@ -1466,7 +1466,9 @@ def build_item_embed(guild: discord.Guild, tab: str, item: dict,
     embed.add_field(name="Rarity",
                     value=_rarity_label(item["rarity"]), inline=True)
 
-    if tab == TAB_POTIONS:
+    # By item type, not tab: a potion in the Colors category is also listed
+    # there, and its panel still offers Activate, so it must show the effect.
+    if item["item_type"] == POTION_ITEM_TYPE:
         embed.add_field(name="Type", value="Consumable", inline=True)
         embed.add_field(name="Effect",
                         value=describe_potion(item.get("metadata")),
