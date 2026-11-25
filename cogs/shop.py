@@ -1528,6 +1528,163 @@ async def _compensate_failed_purchase(interaction: discord.Interaction, *,
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ─── /shop rendering ────────────────────────────────────────────────────
+# Discord allows 5 buttons per row and 25 embed fields per message, so a shop
+# with more products than one message can hold is shown in pages. Up to
+# SHOP_BUTTON_LIMIT products keep the original one-button-per-product layout;
+# beyond that a page carries a Select whose values are the same
+# `shop_buy_<id>` handle the buttons use, so every purchase still goes through
+# Shop.on_interaction -> process_purchase and nothing about buying changes.
+SHOP_BUTTON_LIMIT = 5
+SHOP_PAGE_SIZE = 10
+SHOP_EMBED_BUDGET = 5000   # Discord caps one embed at 6000 characters in total
+
+_SHOP_ITEMS_SQL = """
+    SELECT id, name, description, price,
+           type, duration_hours, featured,
+           CASE WHEN type='prestige' AND prestige_tier=6 THEN 0 ELSE required_level END,
+           CASE WHEN type='prestige' AND prestige_tier=6 THEN NULL ELSE max_stock END,
+           CASE WHEN type='prestige' AND prestige_tier=6 THEN NULL ELSE current_stock END,
+           price_diamonds, xp_boost_multiplier, prestige_tier
+    FROM shop_items
+    WHERE guild_id = ? AND enabled = 1
+      AND option_of_id IS NULL
+    ORDER BY featured DESC, price ASC
+"""
+
+
+def _shop_entry(row, cc: dict, cd: dict) -> dict:
+    """One product's embed field and purchase-control data."""
+    (iid, name, desc, price, itype, dur, featured, req_lvl, max_s, curr_s,
+     price_diamonds, boost_mult, prestige_tier) = row
+    vi = itype == "prestige" and prestige_tier == 6
+    stock_info = ""
+    if not vi and max_s:
+        stock_info = (f" • {curr_s or 0}/{max_s} left"
+                      if curr_s else " • **Out of stock**")
+    if itype == "xp_boost" and boost_mult:
+        dur_info = f" • {boost_mult:g}× XP for {dur}h" if dur else f" • {boost_mult:g}× XP"
+    elif itype == "prestige" and prestige_tier:
+        from utils.prestige import tier_label
+        dur_info = f" • Prestige {tier_label(prestige_tier)}"
+        if int(prestige_tier) == 6:
+            dur_info += " • Booster only"
+    else:
+        dur_info = f" • {dur}h temp" if dur else ""
+    lvl_info = f" • Req. Level {req_lvl}" if req_lvl else ""
+    # Free = zero charge: no diamond price and an explicit coin price
+    # of 0, plus Prestige VI by its own rule. Explicit comparison, not
+    # truthiness, so nothing else can drift into looking free.
+    free = vi or (not price_diamonds and price == 0)
+    price_str = "Free" if free else (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
+                 else f"{price:,} {cc['emoji']} {cc['name']}")
+    return {
+        "id": iid, "name": name, "vi": vi, "free": free, "price_str": price_str,
+        "in_stock": vi or not max_s or bool(curr_s),
+        # Discord rejects an embed field over these sizes.
+        "field_name": f"{'⭐ ' if featured else ''}{name} — {price_str}"[:256],
+        "field_value": (f"{desc or ''}{dur_info}{lvl_info}{stock_info}")[:1024] or "\u200b",
+    }
+
+
+def _shop_pages(entries: list, title: str = "") -> list:
+    """Split products into pages that fit one Discord message each."""
+    pages, current, used = [], [], len(title) + 40   # 40: footer + slack
+    for entry in entries:
+        cost = len(entry["field_name"]) + len(entry["field_value"])
+        if current and (len(current) >= SHOP_PAGE_SIZE
+                        or used + cost > SHOP_EMBED_BUDGET):
+            pages.append(current)
+            current, used = [], len(title) + 40
+        current.append(entry)
+        used += cost
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _shop_button(entry: dict, user) -> discord.ui.Button:
+    # Label only — the custom_id (the purchase handle) is untouched.
+    if entry["vi"]:
+        label = f"Activate {entry['name']} — Free"
+    elif entry["free"]:
+        label = f"Buy {entry['name']} — Free"
+    else:
+        label = f"Buy {entry['name']}"
+    btn = discord.ui.Button(label=label, style=discord.ButtonStyle.green,
+                            custom_id=f"shop_buy_{entry['id']}")
+    if entry["vi"]:
+        from utils.prestige import is_booster
+        if not is_booster(user):
+            btn.disabled = True
+            btn.style = discord.ButtonStyle.gray
+            btn.label = f"{entry['name']} — Booster only"
+    return btn
+
+
+class _ShopNavButton(discord.ui.Button):
+    def __init__(self, label: str, target: int, disabled: bool):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary,
+                         disabled=disabled)
+        self.target = target
+
+    async def callback(self, interaction: discord.Interaction):
+        await _show_shop_page(interaction, self.target, edit=True)
+
+
+async def _show_shop_page(interaction: discord.Interaction, page: int, *,
+                          edit: bool = False):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(_SHOP_ITEMS_SQL, (interaction.guild.id,))
+        items = await cursor.fetchall()
+
+    if not items:
+        await interaction.response.send_message(
+            "The shop is empty right now.", ephemeral=True)
+        return
+
+    cur = await get_currency_config(interaction.guild.id)
+    cc, cd = cur["coins"], cur["diamonds"]
+    entries = [_shop_entry(row, cc, cd) for row in items]
+    title = f"🛒 {interaction.guild.name} Shop"
+    embed = discord.Embed(title=title, color=SHOP_COLOR)
+    view = discord.ui.View()
+
+    if len(entries) <= SHOP_BUTTON_LIMIT:
+        for e in entries:
+            embed.add_field(name=e["field_name"], value=e["field_value"], inline=False)
+        for e in entries:
+            if not e["in_stock"]:
+                continue
+            view.add_item(_shop_button(e, interaction.user))
+    else:
+        pages = _shop_pages(entries, title)
+        page = max(0, min(page, len(pages) - 1))
+        shown = pages[page]
+        for e in shown:
+            embed.add_field(name=e["field_name"], value=e["field_value"], inline=False)
+        embed.set_footer(text=f"Page {page + 1}/{len(pages)} · {len(entries)} products")
+        from utils.prestige import is_booster
+        options = [
+            discord.SelectOption(label=e["name"][:100], value=f"shop_buy_{e['id']}",
+                                 description=e["price_str"][:100])
+            for e in shown
+            if e["in_stock"] and not (e["vi"] and not is_booster(interaction.user))
+        ]
+        if options:
+            view.add_item(discord.ui.Select(
+                custom_id=f"shop_buy_sel_{page}", placeholder="Choose a product to buy…",
+                options=options))
+        if len(pages) > 1:
+            view.add_item(_ShopNavButton("◀ Prev", page - 1, page == 0))
+            view.add_item(_ShopNavButton("Next ▶", page + 1, page >= len(pages) - 1))
+
+    if edit:
+        await interaction.response.edit_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
 class Shop(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -1715,91 +1872,7 @@ class Shop(commands.Cog):
     @app_commands.command(name="shop",
                           description="View the server shop")
     async def shop(self, interaction: discord.Interaction):
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute("""
-                SELECT id, name, description, price,
-                       type, duration_hours, featured,
-                       CASE WHEN type='prestige' AND prestige_tier=6 THEN 0 ELSE required_level END,
-                       CASE WHEN type='prestige' AND prestige_tier=6 THEN NULL ELSE max_stock END,
-                       CASE WHEN type='prestige' AND prestige_tier=6 THEN NULL ELSE current_stock END,
-                       price_diamonds, xp_boost_multiplier, prestige_tier
-                FROM shop_items
-                WHERE guild_id = ? AND enabled = 1
-                  AND option_of_id IS NULL
-                ORDER BY featured DESC, price ASC
-            """, (interaction.guild.id,))
-            items = await cursor.fetchall()
-
-        if not items:
-            await interaction.response.send_message(
-                "The shop is empty right now.", ephemeral=True)
-            return
-
-        cur = await get_currency_config(interaction.guild.id)
-        cc, cd = cur["coins"], cur["diamonds"]
-        embed    = discord.Embed(
-            title=f"🛒 {interaction.guild.name} Shop",
-            color=SHOP_COLOR)
-
-        for (iid, name, desc, price, itype,
-             dur, featured, req_lvl, max_s, curr_s,
-             price_diamonds, boost_mult, prestige_tier) in items:
-            vi = itype == "prestige" and prestige_tier == 6
-            stock_info = ""
-            if not vi and max_s:
-                stock_info = (f" • {curr_s or 0}/{max_s} left"
-                              if curr_s else " • **Out of stock**")
-            if itype == "xp_boost" and boost_mult:
-                dur_info = f" • {boost_mult:g}× XP for {dur}h" if dur else f" • {boost_mult:g}× XP"
-            elif itype == "prestige" and prestige_tier:
-                from utils.prestige import tier_label
-                dur_info = f" • Prestige {tier_label(prestige_tier)}"
-                if int(prestige_tier) == 6:
-                    dur_info += " • Booster only"
-            else:
-                dur_info = f" • {dur}h temp" if dur else ""
-            lvl_info  = f" • Req. Level {req_lvl}" if req_lvl else ""
-            # Free = zero charge: no diamond price and an explicit coin price
-            # of 0, plus Prestige VI by its own rule. Explicit comparison, not
-            # truthiness, so nothing else can drift into looking free.
-            free = vi or (not price_diamonds and price == 0)
-            price_str = "Free" if free else (f"{price_diamonds:,} {cd['emoji']}" if price_diamonds
-                         else f"{price:,} {cc['emoji']} {cc['name']}")
-            embed.add_field(
-                name=f"{'⭐ ' if featured else ''}{name} — {price_str}",
-                value=(f"{desc or ''}{dur_info}{lvl_info}{stock_info}"),
-                inline=False)
-
-        view = discord.ui.View()
-        for (iid, name, desc, price, itype,
-             dur, featured, req_lvl, max_s, curr_s,
-             price_diamonds, boost_mult, prestige_tier) in items[:5]:
-            vi = itype == "prestige" and prestige_tier == 6
-            if not vi and max_s and not curr_s:
-                continue
-            # Label only — the custom_id (the purchase handle) is untouched.
-            free = vi or (not price_diamonds and price == 0)
-            if vi:
-                btn_label = f"Activate {name} — Free"
-            elif free:
-                btn_label = f"Buy {name} — Free"
-            else:
-                btn_label = f"Buy {name}"
-            btn = discord.ui.Button(
-                label=btn_label,
-                style=discord.ButtonStyle.green,
-                custom_id=f"shop_buy_{iid}")
-            if (itype == "prestige" and prestige_tier
-                    and int(prestige_tier) == 6):
-                from utils.prestige import is_booster
-                if not is_booster(interaction.user):
-                    btn.disabled = True
-                    btn.style = discord.ButtonStyle.gray
-                    btn.label = f"{name} — Booster only"
-            view.add_item(btn)
-
-        await interaction.response.send_message(
-            embed=embed, view=view, ephemeral=True)
+        await _show_shop_page(interaction, 0)
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
