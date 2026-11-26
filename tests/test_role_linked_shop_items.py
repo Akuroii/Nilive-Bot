@@ -1233,6 +1233,160 @@ class RoleLinkedShopItemTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
         self.assertEqual(rows("SELECT COUNT(*) FROM inventory_items"), [(0,)])
 
+    # ── 11. Entitlement DB Failure in Reversed Role-Linked Item Reconciler ──
+
+    async def test_11_entitlement_db_failure_during_reversed_role_linked_item_reconciliation(self):
+        import aiosqlite
+        from database import DB_PATH
+        from utils import level_claims, level_ops as ops
+
+        execute("UPDATE levels SET xp=0, level=0 WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        crest_pid = _seed_shop_item("Fault Seal", kind="custom", price=200, role_id=SNOWFLAKE_ROLE)
+        execute(
+            "INSERT INTO leveling_shop_rewards (guild_id, level, item_id, quantity, audience) "
+            "VALUES (?, 10, ?, 1, 'everyone')",
+            (GUILD, crest_pid),
+        )
+        execute(
+            "INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level) VALUES (?, ?, 50000, 15)",
+            (GUILD, USER),
+        )
+        async with aiosqlite.connect(DB_PATH) as db:
+            await level_claims.ensure_tables(db)
+            await level_claims.record_crossing(
+                db, GUILD, USER, 0, 50000,
+                source="setlevel", operation_id="admin-grant-ent-fault",
+            )
+            await db.commit()
+
+        claimed = await level_claims.claim_available(GUILD, USER, member=self.member, bot=self.bot)
+        self.assertEqual(len(claimed["fulfilled"]), 1)
+        claim_id = int(claimed["fulfilled"][0])
+
+        eq = await equip_engine.equip_role(self.bot, GUILD, USER, "Fault Seal")
+        self.assertTrue(eq["success"], eq)
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+
+        execute("UPDATE levels SET xp=0, level=1 WHERE guild_id=? AND user_id=?", (GUILD, USER))
+
+        # Break the real SQLite `timed_holdings` table so `_role_granted_elsewhere()`
+        # hits a genuine OperationalError after `ops.reverse_inventory` succeeds.
+        execute("ALTER TABLE timed_holdings RENAME TO _timed_holdings_fault")
+        table_renamed = True
+        try:
+            # 11a. Prove `_role_granted_elsewhere()` raises `EntitlementCheckError` on DB failure.
+            async with aiosqlite.connect(DB_PATH) as db:
+                with self.assertRaises(timed_ownership.EntitlementCheckError) as ctx:
+                    await level_claims._role_granted_elsewhere(
+                        db,
+                        GUILD,
+                        USER,
+                        SNOWFLAKE_ROLE,
+                        exclude_claim_id=claim_id,
+                        exclude_item="Fault Seal",
+                    )
+            self.assertIn("Failed to verify timed_holdings entitlement", str(ctx.exception))
+
+            # 11b. End-to-end level-drop caller: `ops.reverse_inventory` succeeds, then
+            # `reconcile_reversed_role_linked_item` catches `EntitlementCheckError` (no NameError),
+            # preserves the equipped slot and Discord role, and caller records `KIND_ROLE`
+            # as `STATUS_OUTSTANDING` + `kept_unresolved`.
+            drop_fail = await level_claims.reconcile_level_drop(
+                GUILD,
+                USER,
+                1,
+                operation_id="corr-ent-fail-1",
+                member=self.member,
+                reason="admin setlevel",
+            )
+            self.assertEqual(
+                rows(
+                    "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='Fault Seal'",
+                    (GUILD, USER),
+                ),
+                [(0,)],
+            )
+            self.assertEqual(len(drop_fail["kept_unresolved"]), 1)
+            unresolved = drop_fail["kept_unresolved"][0]
+            self.assertEqual(unresolved["claim_id"], claim_id)
+            self.assertEqual(unresolved["kind"], ops.KIND_ROLE)
+            self.assertEqual(unresolved["role_id"], SNOWFLAKE_ROLE)
+            self.assertIn("Failed to verify timed_holdings entitlement", unresolved["reason"])
+            self.assertEqual(drop_fail["deleted_claims"], [])
+
+            slot_during_fault = await equip_engine.get_equipped(GUILD, USER)
+            self.assertIsNotNone(slot_during_fault)
+            self.assertEqual(slot_during_fault["item_name"], "Fault Seal")
+            self.assertEqual(int(slot_during_fault["role_id"]), SNOWFLAKE_ROLE)
+            self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+
+            rev_rows = rows(
+                "SELECT kind, status, reason FROM reward_reversals "
+                "WHERE guild_id=? AND user_id=? AND claim_id=? ORDER BY kind",
+                (GUILD, USER, claim_id),
+            )
+            self.assertEqual([(r[0], r[1]) for r in rev_rows], [
+                (ops.KIND_INVENTORY, ops.STATUS_APPLIED),
+                (ops.KIND_ROLE, ops.STATUS_OUTSTANDING),
+            ])
+            self.assertIn("Failed to verify timed_holdings entitlement", rev_rows[1][2])
+            self.assertEqual(
+                rows("SELECT id FROM level_reward_claims WHERE id=?", (claim_id,)),
+                [(claim_id,)],
+            )
+
+            # 11c. Direct reconciler assertion on the already-emptied inventory row:
+            # returns `ok=False` with the error message and leaves slot + Discord role intact.
+            rec_direct = await level_claims.reconcile_reversed_role_linked_item(
+                GUILD,
+                USER,
+                item_name="Fault Seal",
+                role_id=SNOWFLAKE_ROLE,
+                member=self.member,
+                exclude_claim_id=claim_id,
+            )
+            self.assertFalse(rec_direct["ok"])
+            self.assertFalse(rec_direct["role_removed"])
+            self.assertIn("Failed to verify timed_holdings entitlement", rec_direct["error"])
+            self.assertIsNotNone(await equip_engine.get_equipped(GUILD, USER))
+            self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+
+            # 11d. Restore `timed_holdings` and verify safe retry resolves the open
+            # `KIND_ROLE` reversal, removes the Discord role, clears `equipped_roles`,
+            # and retires the claim row.
+            execute("ALTER TABLE _timed_holdings_fault RENAME TO timed_holdings")
+            table_renamed = False
+
+            drop_retry = await level_claims.reconcile_level_drop(
+                GUILD,
+                USER,
+                1,
+                operation_id="corr-ent-retry-1",
+                member=self.member,
+                reason="admin setlevel retry",
+            )
+            self.assertEqual(drop_retry["kept_unresolved"], [])
+            self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
+            self.assertEqual(set(worn_ids(self.member)), set())
+            self.assertEqual(
+                rows(
+                    "SELECT kind, status FROM reward_reversals "
+                    "WHERE guild_id=? AND user_id=? AND claim_id=? ORDER BY kind",
+                    (GUILD, USER, claim_id),
+                ),
+                [
+                    (ops.KIND_INVENTORY, ops.STATUS_APPLIED),
+                    (ops.KIND_ROLE, ops.STATUS_APPLIED),
+                ],
+            )
+            self.assertEqual(
+                rows("SELECT id FROM level_reward_claims WHERE id=?", (claim_id,)),
+                [],
+            )
+        finally:
+            if table_renamed:
+                execute("ALTER TABLE _timed_holdings_fault RENAME TO timed_holdings")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

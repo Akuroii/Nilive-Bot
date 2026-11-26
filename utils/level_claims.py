@@ -2397,7 +2397,7 @@ async def reconcile_reversed_role_linked_item(
         reconcile_legacy_slot_observation,
         slot_lock,
     )
-    from utils.timed_ownership import _resolve_guild_role
+    from utils.timed_ownership import EntitlementCheckError, _resolve_guild_role
 
     gid = int(guild_id)
     uid = int(user_id)
