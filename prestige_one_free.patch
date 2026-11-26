@@ -1,0 +1,385 @@
+diff --git a/dashboard/templates/systems/shop.html b/dashboard/templates/systems/shop.html
+index 6a44127..99e2a2b 100644
+--- a/dashboard/templates/systems/shop.html
++++ b/dashboard/templates/systems/shop.html
+@@ -464,8 +464,10 @@ function applyFreeVIFields() {
+         document.getElementById('item-duration').value =
+             String(editingLegacyViDuration);
+     }
++    // Prestige I is Free (typed 0 allowed); II-V need a positive Coin price.
+     document.getElementById('item-price').min =
+-        document.getElementById('item-type').value === 'prestige' && !free ? '1' : '0';
++        document.getElementById('item-type').value === 'prestige' && !free
++        && document.getElementById('item-prestige-tier').value !== '1' ? '1' : '0';
+     if (free) {
+         document.getElementById('item-duration-label').textContent = 'VI: Free while boosting';
+         document.getElementById('item-duration-hint').textContent =
+@@ -671,7 +673,15 @@ async function addItem() {
+             showToast(`Prestige is purchased with ${currencyNameFor('coins')} — do not set a ${currencyNameFor('diamonds')} price`, 'danger');
+             return;
+         }
+-        if (!freeVI && (!payload.price || payload.price <= 0)) {
++        // Prestige I is Free: a TYPED 0 is accepted, but a blank/invalid field
++        // is not (priceValue stays null) so an unfinished form never creates
++        // a Free tier. II-V still require a positive price.
++        if (!freeVI && payload.prestige_tier === 1) {
++            if (priceValue === null) {
++                showToast(`Prestige I needs a ${currencyNameFor('coins')} price — type 0 for Free`, 'danger');
++                return;
++            }
++        } else if (!freeVI && (!payload.price || payload.price <= 0)) {
+             showToast(`Prestige items need a ${currencyNameFor('coins')} price (the minimum ${currencyNameFor('coins')} required)`, 'danger');
+             return;
+         }
+diff --git a/scripts/test_phase1_prestige.py b/scripts/test_phase1_prestige.py
+index cbea05a..8f55c53 100644
+--- a/scripts/test_phase1_prestige.py
++++ b/scripts/test_phase1_prestige.py
+@@ -184,7 +184,9 @@ class PrestigePurchaseTests(unittest.IsolatedAsyncioTestCase):
+             self.assertEqual(rows("SELECT xp,level,prestige FROM levels"),
+                              [(2700055, 84, tier)])
+             self.assertEqual(rows("SELECT balance,diamonds FROM economy"), [(0, 138)])
+-        self.assertEqual(rows("SELECT price_paid FROM purchase_history"), [(9000,)] * 5)
++        # Prestige I is Free (receipt 0); II-V keep the pre-reset balance.
++        self.assertEqual(rows("SELECT price_paid FROM purchase_history"),
++                         [(0,)] + [(9000,)] * 4)
+         before = mutation_snapshot()
+         with self.assertRaises(PrestigeError):
+             await purchase_prestige(GUILD, USER, 6, 2500)
+diff --git a/scripts/test_prestige_one_free.py b/scripts/test_prestige_one_free.py
+new file mode 100644
+index 0000000..bda7122
+--- /dev/null
++++ b/scripts/test_prestige_one_free.py
+@@ -0,0 +1,218 @@
++"""Prestige I is Free (price 0) — and still resets Coins like every I-V tier.
++
++Two independent facts are proven separately:
++  1. PURCHASE PRICE: Prestige I costs 0 Coins / 0 Diamonds (a buyer with an
++     empty wallet can take it; nothing is charged as a price).
++  2. PRESTIGE RESET: buying I-V still sets the Coins balance to 0 (unchanged
++     lifecycle); Level/XP/Diamonds are untouched. The Prestige I history
++     receipt records price_paid = 0 (Free); II-V keep the pre-reset balance.
++Plus: dashboard API create/edit + DB round-trip, Free display, II-V still
++paid, VI untouched, repeated/failed purchases safe.
++
++Run: python scripts/test_prestige_one_free.py
++"""
++import asyncio
++import time
++import unittest
++
++from phase1_support import (
++    GUILD, USER, execute, rows, reset_database, seed_member, mutation_snapshot,
++)
++import dashboard.app as dashboard
++from utils import prestige
++from utils.prestige import PrestigeError
++
++app = dashboard.app
++app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
++
++
++class PrestigeOneApiTests(unittest.TestCase):
++    def setUp(self):
++        asyncio.run(reset_database())
++        execute("INSERT INTO dashboard_users (guild_id,user_id,permission_level,enabled) "
++                "VALUES (?,?,'admin',1)", (GUILD, USER))
++        self.client = app.test_client()
++        with self.client.session_transaction() as session:
++            session.update(user={"id": USER, "username": "P1 Test", "avatar": None},
++                           guild_id=GUILD, expires_at=time.time() + 7200,
++                           csrf_token="p1-csrf")
++
++    def post(self, payload):
++        return self.client.post("/api/shop/item", json=payload,
++                                headers={"X-CSRF-Token": "p1-csrf"})
++
++    def put(self, item_id, payload):
++        return self.client.put(f"/api/shop/item/{item_id}", json=payload,
++                               headers={"X-CSRF-Token": "p1-csrf"})
++
++    @staticmethod
++    def body(tier, price, **extra):
++        return dict(name=f"Prestige {tier}", type="prestige", prestige_tier=tier,
++                    price=price, **extra)
++
++    def test_create_prestige_one_at_zero_persists_as_zero(self):
++        response = self.post(self.body(1, 0))
++        self.assertEqual(response.status_code, 200, response.get_json())
++        self.assertEqual(rows("SELECT price, price_diamonds, prestige_tier FROM shop_items"),
++                         [(0, None, 1)])
++
++    def test_edit_prestige_one_to_zero_round_trips(self):
++        self.assertEqual(self.post(self.body(1, 750)).status_code, 200)
++        item_id = rows("SELECT id FROM shop_items")[0][0]
++        response = self.put(item_id, self.body(1, 0))
++        self.assertEqual(response.status_code, 200, response.get_json())
++        self.assertEqual(rows("SELECT price, prestige_tier FROM shop_items WHERE id=?",
++                              (item_id,)), [(0, 1)])
++        # and back to a (still allowed) positive price, then to 0 again
++        self.assertEqual(self.put(item_id, self.body(1, 40)).status_code, 200)
++        self.assertEqual(self.put(item_id, self.body(1, 0)).status_code, 200)
++        self.assertEqual(rows("SELECT price FROM shop_items WHERE id=?", (item_id,)), [(0,)])
++
++    def test_prestige_one_missing_blank_or_invalid_price_is_rejected(self):
++        for bad in (None, "", "free", -1, 2.5, True):
++            with self.subTest(price=bad):
++                before = mutation_snapshot()
++                response = self.post(self.body(1, bad))
++                self.assertEqual(response.status_code, 400, (bad, response.get_json()))
++                self.assertEqual(mutation_snapshot(), before)
++        before = mutation_snapshot()
++        response = self.post(dict(name="No price", type="prestige", prestige_tier=1))
++        self.assertEqual(response.status_code, 400, response.get_json())
++        self.assertEqual(mutation_snapshot(), before)
++
++    def test_prestige_two_to_five_reject_zero_negative_missing_and_keep_prices(self):
++        prices = {2: 30, 3: 140, 4: 270, 5: 450}
++        ids = {}
++        for tier, price in prices.items():
++            self.assertEqual(self.post(self.body(tier, price)).status_code, 200)
++            ids[tier] = rows("SELECT id FROM shop_items WHERE prestige_tier=?", (tier,))[0][0]
++        for tier in prices:
++            for bad in (0, "0", -5, None, "", "x"):
++                with self.subTest(tier=tier, price=bad):
++                    before = mutation_snapshot()
++                    self.assertEqual(self.post(self.body(tier, bad)).status_code, 400)
++                    self.assertEqual(self.put(ids[tier], self.body(tier, bad)).status_code, 400)
++                    self.assertEqual(mutation_snapshot(), before)
++        self.assertEqual(dict(rows("SELECT prestige_tier, price FROM shop_items")), prices)
++
++    def test_prestige_six_keeps_its_special_free_rules(self):
++        self.assertEqual(self.post(self.body(6, 0)).status_code, 200)
++        before = mutation_snapshot()
++        self.assertEqual(self.post(self.body(6, 100)).status_code, 400)
++        self.assertEqual(self.post(self.body(6, 0, max_stock=5)).status_code, 400)
++        self.assertEqual(mutation_snapshot(), before)
++        self.assertEqual(rows("SELECT price, prestige_tier FROM shop_items"), [(0, 6)])
++
++    def test_prestige_one_displays_as_free_and_paid_tiers_show_their_price(self):
++        self.assertEqual(self.post(self.body(1, 0)).status_code, 200)
++        self.assertEqual(self.post(self.body(2, 30)).status_code, 200)
++        for url in ("/shop", "/api/shop/items"):
++            with self.subTest(url=url):
++                html = self.client.get(url).get_data(as_text=True)
++                start = html.index("Prestige 1")
++                self.assertIn("Free", html[start:html.index("</tr>", start)])
++                start = html.index("Prestige 2")
++                row = html[start:html.index("</tr>", start)]
++                self.assertIn("30", row)
++                self.assertNotIn("Free", row)
++
++    def test_purchase_history_shows_prestige_one_as_free_and_ii_with_its_amount(self):
++        seed_member(balance=500, tier=0)
++        asyncio.run(prestige.purchase_prestige(GUILD, USER, 1, 0, item_name="Prestige One"))
++        execute("UPDATE economy SET balance=35 WHERE guild_id=? AND user_id=?", (GUILD, USER))
++        asyncio.run(prestige.purchase_prestige(GUILD, USER, 2, 30, item_name="Prestige Two"))
++        html = self.client.get("/api/shop/purchase-history").get_data(as_text=True)
++        row_one = html[html.index("Prestige One"):]
++        row_one = row_one[:row_one.index("</tr>")]
++        row_two = html[html.index("Prestige Two"):]
++        row_two = row_two[:row_two.index("</tr>")]
++        self.assertIn("Free", row_one)
++        self.assertNotIn("500", row_one)
++        self.assertIn("35", row_two)
++        self.assertNotIn("Free", row_two)
++
++
++class PrestigeOnePurchaseTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        await reset_database()
++
++    def state(self):
++        return (rows("SELECT balance, diamonds FROM economy WHERE guild_id=? AND user_id=?",
++                     (GUILD, USER)),
++                rows("SELECT xp, level, prestige FROM levels WHERE guild_id=? AND user_id=?",
++                     (GUILD, USER)))
++
++    async def test_fact_1_prestige_one_costs_nothing_to_purchase(self):
++        # Empty wallet: a free listing must not require or spend any price.
++        seed_member(balance=0, tier=0)
++        result = await prestige.purchase_prestige(GUILD, USER, 1, 0)
++        self.assertEqual(result["new_tier"], 1)
++        (eco, lvl) = self.state()
++        self.assertEqual(eco, [(0, 138)], "no Coin/Diamond charge")
++        self.assertEqual(lvl, [(2700055, 84, 1)])
++        self.assertEqual(rows("SELECT price_paid FROM purchase_history"), [(0,)])
++
++    async def test_fact_2_prestige_one_still_resets_coins_like_i_to_v(self):
++        seed_member(balance=500, tier=0)
++        result = await prestige.purchase_prestige(GUILD, USER, 1, 0)
++        self.assertEqual((result["old_balance"], result["new_balance"]), (500, 0))
++        (eco, lvl) = self.state()
++        self.assertEqual(eco, [(0, 138)], "Coins reset to 0, Diamonds untouched")
++        self.assertEqual(lvl, [(2700055, 84, 1)], "XP/Level untouched, tier set")
++        # II-V keep the same reset after their own positive minimum balance.
++        execute("UPDATE economy SET balance=35 WHERE guild_id=? AND user_id=?", (GUILD, USER))
++        await prestige.purchase_prestige(GUILD, USER, 2, 30)
++        self.assertEqual(self.state()[0], [(0, 138)])
++
++    async def test_prestige_one_receipt_is_zero_while_reset_still_wipes_coins(self):
++        seed_member(balance=500, tier=0)
++        item = execute("INSERT INTO shop_items (guild_id,name,price,type,prestige_tier,enabled) "
++                       "VALUES (?,'Prestige I',0,'prestige',1,1)", (GUILD,))
++        await prestige.purchase_prestige(GUILD, USER, 1, 0, item_id=item)
++        # Free receipt ...
++        self.assertEqual(rows("SELECT item_id, price_paid, currency_paid FROM purchase_history"),
++                         [(item, 0, "balance")])
++        # ... while the reset is unchanged and still auditable in the ledger.
++        self.assertEqual(self.state()[0], [(0, 138)])
++        self.assertEqual(rows("SELECT amount, balance_after FROM transaction_ledger"),
++                         [(-500, 0)])
++        # II keeps its pre-reset-balance receipt semantics.
++        execute("UPDATE economy SET balance=35 WHERE guild_id=? AND user_id=?", (GUILD, USER))
++        await prestige.purchase_prestige(GUILD, USER, 2, 30)
++        self.assertEqual(rows("SELECT price_paid FROM purchase_history ORDER BY id"),
++                         [(0,), (35,)])
++        self.assertEqual(self.state()[0], [(0, 138)])
++
++    async def test_ii_to_v_still_need_their_positive_minimum_balance(self):
++        seed_member(balance=29, tier=1)
++        before = self.state()
++        with self.assertRaises(PrestigeError):
++            await prestige.purchase_prestige(GUILD, USER, 2, 30)
++        self.assertEqual(self.state(), before)
++
++    async def test_repeated_purchase_is_refused_and_changes_nothing(self):
++        seed_member(balance=500, tier=0)
++        await prestige.purchase_prestige(GUILD, USER, 1, 0)
++        execute("UPDATE economy SET balance=77 WHERE guild_id=? AND user_id=?", (GUILD, USER))
++        before = (self.state(), rows("SELECT COUNT(*) FROM purchase_history"))
++        with self.assertRaises(PrestigeError):
++            await prestige.purchase_prestige(GUILD, USER, 1, 0)
++        self.assertEqual((self.state(), rows("SELECT COUNT(*) FROM purchase_history")), before)
++
++    async def test_failure_inside_the_transaction_rolls_everything_back(self):
++        seed_member(balance=500, tier=0)
++        execute("CREATE TRIGGER boom BEFORE INSERT ON purchase_history "
++                "BEGIN SELECT RAISE(ABORT,'boom'); END")
++        before = self.state()
++        with self.assertRaises(Exception):
++            await prestige.purchase_prestige(GUILD, USER, 1, 0)
++        self.assertEqual(self.state(), before, "no reset, no tier, on failure")
++        self.assertEqual(rows("SELECT COUNT(*) FROM purchase_history"), [(0,)])
++        execute("DROP TRIGGER boom")
++        await prestige.purchase_prestige(GUILD, USER, 1, 0)   # retry is safe
++        self.assertEqual(self.state()[1], [(2700055, 84, 1)])
++        self.assertEqual(rows("SELECT COUNT(*) FROM purchase_history"), [(1,)])
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+diff --git a/scripts/test_prestige_one_free_form.js b/scripts/test_prestige_one_free_form.js
+new file mode 100644
+index 0000000..a3fe27e
+--- /dev/null
++++ b/scripts/test_prestige_one_free_form.js
+@@ -0,0 +1,81 @@
++// Prestige I (Free) on the actual Shop form: a TYPED 0 is accepted, a blank or
++// invalid price is not; II-V still need a positive price; VI keeps its lock.
++// Executes the real template script in a small DOM harness (no browser/server).
++const fs = require('node:fs');
++const vm = require('node:vm');
++const assert = require('node:assert/strict');
++const path = require('node:path');
++const source = fs.readFileSync(path.join(__dirname, '../dashboard/templates/systems/shop.html'), 'utf8');
++const script = source.split('<script>')[1].split('</script>')[0];
++const elements = new Map();
++function element(id) {
++  if (!elements.has(id)) elements.set(id, {
++    value: '', disabled: false, checked: false, dataset: {}, style: {}, textContent: '',
++    classList: { add() {}, remove() {} },
++  });
++  return elements.get(id);
++}
++element('item-type').value = 'prestige';
++element('item-name').value = 'Prestige';
++element('item-stock').value = '0';
++element('item-level').value = '0';
++element('item-duration').value = '0';
++element('item-rarity').value = 'common';
++const sent = [], toasts = [];
++const context = vm.createContext({
++  document: { getElementById: element, querySelectorAll: () => [] },
++  showToast: (...args) => toasts.push(args), currencyNameFor: key => key,
++  fetch: async (url, opts) => { sent.push({ url, data: JSON.parse(opts.body) }); return { json: async () => ({ success: true }) }; },
++  setTimeout: () => {}, location: { reload() {} }, console,
++});
++vm.runInContext(script, context);
++
++async function submit(tier, price) {
++  element('item-prestige-tier').value = String(tier);
++  context.toggleItemTypeFields();
++  element('item-price').value = price;
++  const before = sent.length;
++  await context.addItem();
++  return sent.length > before ? sent.at(-1).data : null;
++}
++
++(async () => {
++  // Prestige I: typed 0 is Free and is sent as exactly 0.
++  const free = await submit(1, '0');
++  assert.ok(free, 'Prestige I with a typed 0 must be sent');
++  assert.equal(free.price, 0);
++  assert.equal(free.prestige_tier, 1);
++  assert.equal(free.price_diamonds, null);
++  assert.equal(element('item-price').min, '0', 'Prestige I price input allows 0');
++  // Prestige I with a positive minimum balance is still allowed (unchanged).
++  assert.equal((await submit(1, '25')).price, 25);
++
++  // Prestige I: blank / junk / negative / decimal must NOT become Free.
++  for (const bad of ['', '   ', 'free', '-5', '2.5']) {
++    assert.equal(await submit(1, bad), null, `Prestige I ${JSON.stringify(bad)} must not send`);
++    assert.match(toasts.at(-1)[0], /price/);
++  }
++
++  // Prestige II-V: zero / blank / junk rejected, positive accepted, min stays 1.
++  for (const tier of [2, 3, 4, 5]) {
++    for (const bad of ['0', '', '-1', 'x']) {
++      assert.equal(await submit(tier, bad), null, `tier ${tier} ${JSON.stringify(bad)} must not send`);
++      assert.match(toasts.at(-1)[0], /price/);
++    }
++    assert.equal((await submit(tier, '140')).price, 140);
++    assert.equal(element('item-price').min, '1', `tier ${tier} price input needs >= 1`);
++  }
++
++  // Prestige VI: unchanged locked Free listing.
++  const vi = await submit(6, '999');
++  assert.equal(vi.price, 0);
++  assert.equal(vi.prestige_tier, 6);
++  assert.equal(element('item-price').disabled, true);
++
++  // Switching back from VI to I restores an editable, typable zero.
++  element('item-prestige-tier').value = '1';
++  context.toggleItemTypeFields();
++  assert.equal(element('item-price').disabled, false);
++  assert.equal(element('item-price').min, '0');
++  console.log('PASS: Shop form — Prestige I typed 0 accepted, blank rejected; II-V paid; VI locked');
++})().catch(error => { console.error(error); process.exitCode = 1; });
+diff --git a/utils/prestige.py b/utils/prestige.py
+index b8bcaf6..b729a2d 100644
+--- a/utils/prestige.py
++++ b/utils/prestige.py
+@@ -450,6 +450,12 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
+             # caller didn't supply a real shop item id.
+             if item_id is None:
+                 item_id = 0
++            # The receipt records the purchase PRICE. Prestige I is Free, so
++            # it records 0 even though the reset below still wipes Coins (the
++            # wipe stays visible in the ledger). II-V keep recording the
++            # pre-reset balance. Informational only: nothing reads this
++            # column for the reset, rollback, tier or idempotency checks.
++            price_paid = 0 if target_tier == 1 else old_balance
+             await db.execute(
+                 """
+                 INSERT INTO purchase_history
+@@ -458,7 +464,7 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
+                 VALUES (?, ?, ?, ?, ?, ?, 'balance')
+                 """,
+                 (guild_id, user_id, display_name or "",
+-                 item_id, item_name, old_balance),
++                 item_id, item_name, price_paid),
+             )
+ 
+             await db.commit()

@@ -184,7 +184,9 @@ class PrestigePurchaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rows("SELECT xp,level,prestige FROM levels"),
                              [(2700055, 84, tier)])
             self.assertEqual(rows("SELECT balance,diamonds FROM economy"), [(0, 138)])
-        self.assertEqual(rows("SELECT price_paid FROM purchase_history"), [(9000,)] * 5)
+        # Prestige I is Free (receipt 0); II-V keep the pre-reset balance.
+        self.assertEqual(rows("SELECT price_paid FROM purchase_history"),
+                         [(0,)] + [(9000,)] * 4)
         before = mutation_snapshot()
         with self.assertRaises(PrestigeError):
             await purchase_prestige(GUILD, USER, 6, 2500)
