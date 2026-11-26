@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nero Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;family=Instrument+Serif&amp;display=swap" rel="stylesheet">
 <!-- SECURITY FIX (dark-fixes pass #2, CDN SRI): pins this CSS to the
      exact bytes of select2@4.1.0-rc.0 (hash computed from the real
      published npm package, not guessed). Loaded BEFORE main.css so our
@@ -13,19 +13,20 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css"
       integrity="sha384-OXVF05DQEe311p6ohU11NwlnX08FzMCsyoXzGOaL+83dKAb3qS17yZJxESl8YrJQ"
       crossorigin="anonymous">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css', v='20261112') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/tokens.css', v='20261125') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/main.css', v='20261125') }}">
 <!-- Shared embed composer styles (per-embed editor card + Discord
      preview chrome + engine component rows) — used by both
      manage/embedbuilder.html and systems/minigame_builder.html. -->
-<link rel="stylesheet" href="{{ url_for('static', filename='css/embed-composer.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/embed-composer.css', v='20261125') }}">
 <!-- Command Manager styles — strictly scoped to #command-manager-page and .cmd-restrict-modal -->
-<link rel="stylesheet" href="{{ url_for('static', filename='css/command-manager.css', v='20261026') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/command-manager.css', v='20261125') }}">
 <style>
 .select2-container--default .select2-selection--single,
 .select2-container--default .select2-selection--multiple {
     background: var(--bg3);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-2);
     color: var(--text);
     min-height: 38px;
     display: flex;
@@ -68,18 +69,18 @@
     flex: 0 0 40px;
     display: grid;
     place-items: center;
-    border: 1px solid rgba(210, 190, 255, .26);
-    border-radius: 12px;
-    color: #e8ddff;
-    background: linear-gradient(145deg, #9a68f5, #6332b9);
-    box-shadow: 0 6px 18px rgba(112, 65, 206, .32), inset 0 1px 0 rgba(255,255,255,.22);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-3);
+    color: var(--on-accent);
+    background: var(--grad-accent);
+    box-shadow: var(--shadow-2);
 }
 .nav-section-title {
     padding: 12px 10px 6px;
     color: var(--text3);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: .12em;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: .06em;
     text-transform: uppercase;
 }
 .nav-link {
@@ -89,7 +90,7 @@
     min-height: 44px;
     padding: 9px 10px;
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: var(--radius-2);
     text-decoration: none;
     color: var(--text2);
     font-size: 13px;
@@ -99,23 +100,16 @@
 }
 .nav-link:hover { background: var(--bg4); color: var(--text); border-color: var(--border-soft, var(--border)); }
 .nav-link.active {
-    background: linear-gradient(100deg, rgba(139,92,246,.28), rgba(124,58,237,.12));
-    border-color: rgba(158,126,255,.24);
-    color: #fff;
-    box-shadow: inset 2px 0 0 var(--accent), 0 6px 18px rgba(74, 41, 145, .12);
+    background: var(--accent-soft);
+    border-color: transparent;
+    color: var(--text);
+    box-shadow: inset 2px 0 0 var(--accent-text);
 }
 :root[data-theme="dark"] .sidebar {
-    background: linear-gradient(180deg, rgba(13, 19, 34, .99), rgba(8, 13, 25, .99));
+    background: var(--bg2);
     border-right-color: var(--border-soft);
-    box-shadow: 8px 0 30px rgba(0, 0, 0, .18);
 }
-:root[data-theme="light"] .nav-link.active {
-    color: #392861;
-    background: linear-gradient(100deg, rgba(139,92,246,.16), rgba(124,58,237,.07));
-    border-color: rgba(124,92,237,.2);
-    box-shadow: inset 2px 0 0 var(--accent), 0 5px 14px rgba(89,57,143,.07);
-}
-:root[data-theme="light"] .nav-link.active .nav-icon { color: #6949a9; }
+.nav-link.active .nav-icon { color: var(--accent-text); }
 .nav-link-legacy { opacity: .62; }
 .nero-icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
 .nav-icon { display: grid; width: 18px; height: 18px; flex: 0 0 18px; place-items: center; color: var(--text3); transition: color .16s ease; }
@@ -711,7 +705,7 @@ window.__GUILD_ID__ = {{ (session.get('guild_id')|string if session.get('guild_i
 </div>
 <div id="edit-modal" class="modal-overlay" style="display:none;">
     <div class="modal">
-        <div class="modal-title">Edit Member — <span id="edit-uid-label" style="color:var(--accent)"></span></div>
+        <div class="modal-title">Edit Member — <span id="edit-uid-label" style="color:var(--accent-text)"></span></div>
         <div class="form-group">
             <label class="form-label">XP</label>
             <input class="form-input" id="edit-xp" type="number" min="0">

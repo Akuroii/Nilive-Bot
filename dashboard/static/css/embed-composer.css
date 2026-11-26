@@ -14,7 +14,7 @@
 
 .eb-field-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
 .eb-field-label { font-size:11px; font-weight:700; letter-spacing:.05em; color:var(--text3); }
-.eb-counter { font-size:11px; color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; }
+.eb-counter { font-size:11px; color:var(--text3); font-family:var(--font-mono); }
 .eb-counter.eb-counter-warn { color:var(--warning); }
 .eb-counter.eb-counter-danger { color:var(--danger); }
 
@@ -38,7 +38,7 @@
     transition:all .15s; margin-bottom:12px; cursor:pointer;
 }
 .eb-dropzone.eb-dragover { border-color:var(--accent); background:rgba(124,92,191,.08); }
-.eb-link-btn { background:none; border:none; color:var(--accent); font-size:13px; cursor:pointer; text-decoration:underline; padding:0; }
+.eb-link-btn { background:none; border:none; color: var(--accent-text); font-size:13px; cursor:pointer; text-decoration:underline; padding:0; }
 
 .eb-attach-grid { display:flex; flex-wrap:wrap; gap:10px; }
 .eb-attach-item {
@@ -66,7 +66,7 @@
 .eb-attach-hint { padding:0 6px 4px; font-size:10px; color:var(--text3); line-height:1.25; }
 .eb-attach-retry {
     background:none; border:1px solid var(--border); border-radius:5px;
-    color:var(--accent); font-size:10px; padding:1px 6px; cursor:pointer;
+    color: var(--accent-text); font-size:10px; padding:1px 6px; cursor:pointer;
 }
 .eb-attach-retry:hover { border-color:var(--accent); }
 .eb-pe-pending { opacity:.75; font-style:italic; }
@@ -142,7 +142,7 @@
 .eb-emoji-cell img { width:26px; height:26px; object-fit:contain; }
 .eb-emoji-empty { text-align:center; color:var(--text3); font-size:12px; padding:24px 0; }
 .eb-emoji-ext-toggle {
-    background:none; border:none; color:var(--accent); font-size:11px; font-weight:600;
+    background:none; border:none; color: var(--accent-text); font-size:11px; font-weight:600;
     cursor:pointer; padding:6px 2px; text-align:left; width:100%;
 }
 .eb-emoji-ext-toggle:hover { text-decoration:underline; }
@@ -156,7 +156,7 @@
 .eb-emoji-hover-bar img { width:20px; height:20px; object-fit:contain; }
 .eb-emoji-hover-empty { color:var(--text3); }
 .eb-emoji-hover-name { font-weight:600; color:var(--text); }
-.eb-emoji-hover-id { color:var(--text3); font-family:'JetBrains Mono','Fira Code',monospace; font-size:11px; }
+.eb-emoji-hover-id { color:var(--text3); font-family:var(--font-mono); font-size:11px; }
 
 /* ── Live Preview — mirrors real Discord message chrome so this is a
    preview of the actual send, not a generic mock. ─────────────────── */
@@ -371,7 +371,7 @@
 .mb-answer-row { display:grid; grid-template-columns:28px 1fr 24px; gap:8px; margin-bottom:6px; align-items:center; }
 .mb-answer-key {
     font-size:12px; font-weight:700; color:var(--text3); text-align:center;
-    font-family:'JetBrains Mono','Fira Code',monospace;
+    font-family:var(--font-mono);
 }
 .mb-correct-mark {
     background:none; border:1px solid var(--border); border-radius:50%;
@@ -393,7 +393,7 @@
 @media (max-width: 700px) { .mb-reward-row { grid-template-columns:1fr 1fr; } }
 .mb-reward-pct {
     display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text3);
-    font-family:'JetBrains Mono','Fira Code',monospace;
+    font-family:var(--font-mono);
 }
 .mb-reward-pct-bar { flex:1; height:4px; border-radius:2px; background:var(--bg4); overflow:hidden; }
 .mb-reward-pct-fill { height:100%; background:var(--accent); border-radius:2px; }
@@ -436,7 +436,7 @@
 .mg-node-name { font-size:14px; font-weight:600; flex:1; min-width:0;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .mg-node-meta { font-size:11px; color:var(--text3); white-space:nowrap;
-    font-family:'JetBrains Mono','Fira Code',monospace; }
+    font-family:var(--font-mono); }
 .mg-node-actions { display:flex; gap:6px; align-items:center; }
 .mg-node-body { display:none; border-top:1px solid var(--border); padding:10px 14px; background:var(--bg2); }
 .mg-node-open .mg-node-body { display:block; }
@@ -463,7 +463,7 @@
 .mg-tpl-meta { font-size:11px; color:var(--text3); }
 .mg-tpl-actions { display:flex; gap:6px; margin-left:auto; flex-wrap:wrap; }
 .mg-breadcrumbs { font-size:12px; color:var(--text3); margin-bottom:10px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
-.mg-breadcrumbs a { color:var(--accent); text-decoration:none; cursor:pointer; }
+.mg-breadcrumbs a { color: var(--accent-text); text-decoration:none; cursor:pointer; }
 .mg-breadcrumbs a:hover { text-decoration:underline; }
 .mg-breadcrumbs .mg-crumb-sep { color:var(--text3); }
 
@@ -722,7 +722,7 @@
 }
 .eb-json-code-area {
     width: 100%;
-    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.5;
     background: #0e1015;
@@ -781,7 +781,7 @@
     border-top: 1px solid var(--border);
 }
 .eb-json-warning-path {
-    font-family: monospace;
+    font-family: var(--font-mono);
     color: var(--warning);
     font-weight: 600;
     white-space: nowrap;

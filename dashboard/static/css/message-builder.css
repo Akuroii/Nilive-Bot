@@ -283,7 +283,7 @@
     border-radius: 8px;
     background: var(--bg3);
     color: var(--text2);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     margin: 0;
     resize: vertical;
