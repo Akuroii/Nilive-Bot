@@ -450,6 +450,12 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
             # caller didn't supply a real shop item id.
             if item_id is None:
                 item_id = 0
+            # The receipt records the purchase PRICE. Prestige I is Free, so
+            # it records 0 even though the reset below still wipes Coins (the
+            # wipe stays visible in the ledger). II-V keep recording the
+            # pre-reset balance. Informational only: nothing reads this
+            # column for the reset, rollback, tier or idempotency checks.
+            price_paid = 0 if target_tier == 1 else old_balance
             await db.execute(
                 """
                 INSERT INTO purchase_history
@@ -458,7 +464,7 @@ async def purchase_prestige(guild_id: int, user_id: int, target_tier: int,
                 VALUES (?, ?, ?, ?, ?, ?, 'balance')
                 """,
                 (guild_id, user_id, display_name or "",
-                 item_id, item_name, old_balance),
+                 item_id, item_name, price_paid),
             )
 
             await db.commit()
