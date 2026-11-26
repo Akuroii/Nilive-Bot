@@ -589,6 +589,42 @@ async def _process_purchase(interaction: discord.Interaction,
         if block_reason:
             await interaction.response.send_message(block_reason, ephemeral=True)
             return
+    elif itype in ("custom", "shop_custom", "item") and role_id not in (None, "", 0):
+        linked_rid = int(role_id)
+        guild_obj = interaction.guild
+        if guild_obj is None and getattr(interaction, "client", None) is not None:
+            guild_obj = interaction.client.get_guild(int(guild_id))
+        if guild_obj is None:
+            await interaction.response.send_message(
+                "Could not verify this item's role on the server right now. "
+                "Nothing was charged — please try again.",
+                ephemeral=True,
+            )
+            return
+        from utils.timed_ownership import _resolve_guild_role
+        from utils.permissions import check_bot_role_position
+        role_obj, role_deleted, role_lookup_err = await _resolve_guild_role(
+            guild_obj, linked_rid,
+        )
+        if role_lookup_err is not None:
+            await interaction.response.send_message(
+                "Could not verify this item's role with Discord right now. "
+                "Nothing was charged — please try again.",
+                ephemeral=True,
+            )
+            return
+        if role_deleted or role_obj is None:
+            await interaction.response.send_message(
+                f"**{name}**'s linked role no longer exists or cannot be "
+                f"verified on this server. Nothing was charged — ask an admin "
+                f"to check its setup.",
+                ephemeral=True,
+            )
+            return
+        can_assign, warning = check_bot_role_position(guild_obj, role_obj)
+        if not can_assign:
+            await interaction.response.send_message(warning, ephemeral=True)
+            return
 
     # ── Purchase saga ───────────────────────────────────────────────────
     # What used to happen: stock was claimed, money was deducted and a
@@ -773,7 +809,9 @@ async def _process_purchase(interaction: discord.Interaction,
         "category": str(category) if category is not None else None,
         "role_id": int(role_id) if role_id is not None else None,
         "entry_key": str(delivery["entry_key"]) if delivery.get("entry_key") else None,
-        "role_added": bool(delivery.get("role_added", True)),
+        "role_added": bool(
+            delivery.get("role_added", internal_type in ("role", "temp_role"))
+        ),
         "prior_inventory": (
             list(delivery["prior_inventory"])
             if delivery.get("prior_inventory") is not None else None
@@ -964,16 +1002,23 @@ async def _process_purchase(interaction: discord.Interaction,
         embed.add_field(
             name="🏷️ Title unlocked",
             value="Equip it from `/wallet` → Inventory → Titles.")
-    elif delivery.get("expires_at"):
-        # The countdown is read back from the ownership record, so what the
-        # buyer sees is exactly what the cleanup loop will act on.
-        embed.add_field(
-            name="⏳ Temporary ownership",
-            value=(f"Remaining: **{format_remaining(delivery['expires_at'])}** "
-                   f"(<t:{_expiry_epoch(delivery['expires_at'])}:R>). "
-                   f"The duration starts at this delivery."))
-    elif duration_hours:
-        embed.set_footer(text=f"This role expires in {duration_hours} hours")
+    else:
+        if itype == "custom" and role_id:
+            embed.add_field(
+                name="🎭 Role-linked item",
+                value="Open `/inventory` → **Items** to manually equip or unequip its role.",
+                inline=False,
+            )
+        if delivery.get("expires_at"):
+            # The countdown is read back from the ownership record, so what the
+            # buyer sees is exactly what the cleanup loop will act on.
+            embed.add_field(
+                name="⏳ Temporary ownership",
+                value=(f"Remaining: **{format_remaining(delivery['expires_at'])}** "
+                       f"(<t:{_expiry_epoch(delivery['expires_at'])}:R>). "
+                       f"The duration starts at this delivery."))
+        elif duration_hours:
+            embed.set_footer(text=f"This role expires in {duration_hours} hours")
     if delivery.get("warning"):
         embed.add_field(name="Note", value=delivery["warning"], inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1331,27 +1376,25 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
         return result
 
     if itype in ("custom", "shop_custom", "item"):
+        linked_role_id = int(role_id) if role_id not in (None, "", 0) else None
         if timed:
             from utils.timed_ownership import grant_timed_product
             granted = await grant_timed_product(
                 bot, guild_id, user_id, item_name=name,
                 duration_hours=duration_hours, item_type="shop_custom",
-                category=category, product_id=product_id, source=source,
-                op_id=op_id, reason=f"Shop purchase: {name}")
+                category=category, product_id=product_id,
+                role_id=linked_role_id, assign_role_now=False,
+                source=source, op_id=op_id, reason=f"Shop purchase: {name}")
             if not granted["success"]:
                 result.update(error=granted.get("error"),
+                              role_added=False,
                               uncertain=granted.get("uncertain", False))
                 return result
             result.update(success=True, expires_at=granted.get("expires_at"),
                           entry_key=granted.get("entry_key"),
-                          role_added=bool(granted.get("role_added")),
+                          role_added=False,
                           detail=f"holding {granted.get('entry_key')}")
             if granted.get("equipped") is False:
-                # Same contract as the role branch above. A custom timed
-                # product carries no role today (`grant_timed_product` is
-                # called without one), so this cannot fire yet; it is here so
-                # a role-bearing custom product could never be reported as
-                # equipped when it was delivered but not worn.
                 result["warning"] = granted.get("equip_warning") or (
                     "This item is in your inventory, but it could not be "
                     "equipped.")
@@ -1362,20 +1405,28 @@ async def _deliver_purchase_effects(interaction: discord.Interaction, *,
             return result
 
         from utils.reward_engine import give_reward
+        custom_meta = None
+        if linked_role_id is not None:
+            custom_meta = {"role_id": linked_role_id}
+            if product_id is not None:
+                custom_meta["product_id"] = int(product_id)
         granted = await give_reward(
             bot, guild_id, user_id, "item",
             amount=1, item_name=name, item_type="shop_custom",
+            item_metadata=custom_meta,
             reason=f"Shop purchase: {name}", source=source,
             op_id=str(op_id) if op_id else None)
         if not granted.get("success"):
             result.update(
                 error=granted.get("error") or "Item delivery failed.",
+                role_added=False,
                 uncertain=bool(granted.get("uncertain", False)),
             )
             return result
         result.update(
             success=True,
             item_name=granted.get("item_name") or name,
+            role_added=False,
             prior_inventory=granted.get("prior_inventory"),
             delivered_inventory=granted.get("delivered_inventory"),
         )

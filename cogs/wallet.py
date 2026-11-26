@@ -14,6 +14,7 @@ from utils.currency import (
 from utils.emoji import as_partial_emoji
 from utils.inventory import get_inventory, get_inventory_entries, find_entry
 from utils.equip_engine import get_equipped, equip_role, unequip_role
+from utils.timed_ownership import is_role_equippable_entry
 from utils.title_engine import (
     TITLE_ITEM_TYPE, get_equipped_title, equip_title, unequip_title,
     cleanup_unowned_title,
@@ -872,7 +873,7 @@ def _entry_emoji(item: dict) -> str:
 
 def _is_equipped_entry(it: dict, equipped_role: str | None,
                        equipped_title_name: str | None) -> bool:
-    if it["item_type"] in EQUIPPABLE_TYPES and _role_entry_is_equipped(it, equipped_role):
+    if is_role_equippable_entry(it) and _role_entry_is_equipped(it, equipped_role):
         return True
     return (it["item_type"] == TITLE_ITEM_TYPE and it["item_name"] == equipped_title_name)
 
@@ -1319,7 +1320,7 @@ def _equipped_slots(decorated_all, equipped, equipped_title_name):
         match = None
         role_key = equipped.get("entry_key")
         for it in decorated_all:
-            if it["item_type"] not in EQUIPPABLE_TYPES:
+            if not is_role_equippable_entry(it):
                 continue
             if role_key:
                 if it.get("entry_key") == role_key:
@@ -1420,8 +1421,9 @@ async def open_inventory_panel(interaction: discord.Interaction,
     if tab == TAB_EQUIPPED:
         role_key = equipped.get("entry_key") if equipped else None
         entries = [it for it in decorated_all if
-                   (equipped and (it.get("entry_key") == role_key if role_key else
-                    not it.get("timed") and it["item_name"] == equipped_role_name)) or
+                   (equipped and is_role_equippable_entry(it) and (
+                       it.get("entry_key") == role_key if role_key else
+                       not it.get("timed") and it["item_name"] == equipped_role_name)) or
                    (it["item_type"] == TITLE_ITEM_TYPE and it["item_name"] == equipped_title_name)]
     else:
         entries = split_by_tab(decorated_all)[tab]
@@ -1477,7 +1479,7 @@ def build_item_embed(guild: discord.Guild, tab: str, item: dict,
             embed.add_field(name="Active XP boost",
                             value="\n".join(_active_effect_lines(active_effects)),
                             inline=False)
-    elif item["item_type"] == TITLE_ITEM_TYPE or item["item_type"] in EQUIPPABLE_TYPES:
+    elif item["item_type"] == TITLE_ITEM_TYPE or is_role_equippable_entry(item):
         embed.add_field(
             name="Status",
             value=("**Equipped**" if equipped else "Not equipped"),
@@ -1491,7 +1493,7 @@ def build_item_embed(guild: discord.Guild, tab: str, item: dict,
     # can see what wearing it grants — but the DB row is the source
     # of truth, not the role itself. No "Expires" / "Paid" / "Bought"
     # per spec — that data is admin-side and clutters the member view.
-    if item["item_type"] in EQUIPPABLE_TYPES:
+    if is_role_equippable_entry(item):
         role_id = (item.get("metadata") or {}).get("role_id") or item.get("role_id")
         try:
             role = guild.get_role(int(role_id)) if guild and role_id else None
@@ -1530,6 +1532,7 @@ class ItemPanelView(WalletBaseView):
         self.tab = tab
         self.item_name = item["item_name"]
         self.item_type = item["item_type"]
+        self.role_equippable = is_role_equippable_entry(item)
         self.entry_key = item.get("entry_key")
         self.page = item.get("_page", 0)
         # The stack size this panel was rendered with: Activate sends it back
@@ -1541,7 +1544,7 @@ class ItemPanelView(WalletBaseView):
         if item["item_type"] == POTION_ITEM_TYPE:
             self.add_item(ActivateButton(
                 enabled=potion_is_usable(item.get("metadata"))))
-        elif item["item_type"] == TITLE_ITEM_TYPE or item["item_type"] in EQUIPPABLE_TYPES:
+        elif item["item_type"] == TITLE_ITEM_TYPE or self.role_equippable:
             self.add_item(EquipToggleButton(equipped))
 
         self.add_item(ItemBackButton())
@@ -1627,7 +1630,7 @@ class EquipToggleButton(discord.ui.Button):
                     options["expected_title"] = view.slot_snapshot
                 result = await equip_title(
                     view.guild_id, view.user_id, view.item_name, **options)
-        elif view.item_type in EQUIPPABLE_TYPES:
+        elif view.role_equippable:
             if self.equipped:
                 result = await unequip_role(
                     interaction.client, view.guild_id, view.user_id,
@@ -1673,7 +1676,7 @@ async def open_item_panel(interaction: discord.Interaction, guild_id: int,
         equipped = bool(current and current["item_name"] == item["item_name"])
         item["_slot_checked"] = True
         item["_slot_snapshot"] = current["item_name"] if current else None
-    elif item["item_type"] in EQUIPPABLE_TYPES:
+    elif is_role_equippable_entry(item):
         from utils.equip_engine import slot_identity
         current = await get_equipped(guild_id, user_id)
         item["_slot_checked"] = True

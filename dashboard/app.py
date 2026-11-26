@@ -1665,13 +1665,14 @@ def inventory_user_page(user_id: int):
         # bot's Discord session and stays in the bot.
         from utils.inventory import get_inventory_entries
         from utils.equip_engine import get_equipped
+        from utils.timed_ownership import is_role_equippable_entry
         from utils.title_engine import get_equipped_title, TITLE_ITEM_TYPE
         from utils.potion_engine import get_active_effects
         entries = await get_inventory_entries(guild_id, user_id)
         role_slot = await get_equipped(guild_id, user_id)
         title_slot = await get_equipped_title(guild_id, user_id)
         for it in entries:
-            if it.get("item_type") in ("role", "temp_role") and role_slot:
+            if is_role_equippable_entry(it) and role_slot:
                 if role_slot.get("entry_key"):
                     it["equipped"] = it["entry_key"] == role_slot["entry_key"]
                 else:

@@ -313,6 +313,11 @@ async def _definitions(db: aiosqlite.Connection, guild_id: int,
             from utils.potion_engine import EFFECT_XP_BOOST, build_metadata
             raw["metadata"] = build_metadata(
                 EFFECT_XP_BOOST, float(multiplier), int(duration_hours))
+        elif item_type == "custom" and role_id:
+            if duration_hours and int(duration_hours) > 0:
+                continue
+            raw["metadata"] = {"role_id": int(role_id), "product_id": int(item_id)}
+            raw["duration_hours"] = 0
         identities[(int(level), TRACK_SHOP, prefix + str(int(item_id)))] = raw
     cursor = await db.execute("""
         SELECT level, multiplier, duration_hours
@@ -344,6 +349,8 @@ def _payload(track: str, raw: dict, multipliers: dict | None) -> str:
         }
         if raw["type"] == "temp_role":
             body["role_id"] = int(raw["role_id"])
+            body["duration_hours"] = int(raw["duration_hours"])
+        elif raw["type"] == "custom" and "duration_hours" in raw:
             body["duration_hours"] = int(raw["duration_hours"])
         if raw.get("metadata"):
             body["metadata"] = raw["metadata"]
@@ -1125,13 +1132,34 @@ async def _strip_booster_roles_locked(member, guild_id: int, user_id: int) -> di
 
 async def _grant_inventory(db, guild_id: int, user_id: int, payload: dict,
                           metadata: dict | None = None) -> None:
-    from utils.inventory import give_item
+    from utils.inventory import _metadata_role_id, give_item
+    eff_metadata = metadata if metadata is not None else payload.get("metadata")
+    if (
+        str(payload.get("type") or "") == "custom"
+        and _metadata_role_id(eff_metadata) is not None
+    ):
+        frozen_dur = payload.get("duration_hours")
+        if frozen_dur is not None:
+            if int(frozen_dur) > 0:
+                raise ValueError(
+                    "Timed role-linked Items cannot be delivered as permanent Leveling rewards"
+                )
+        elif payload.get("item_id") is not None:
+            cur = await db.execute(
+                "SELECT duration_hours FROM shop_items WHERE guild_id=? AND id=?",
+                (guild_id, int(payload["item_id"])),
+            )
+            shop_row = await cur.fetchone()
+            if shop_row and shop_row[0] is not None and int(shop_row[0]) > 0:
+                raise ValueError(
+                    "Timed role-linked Items cannot be delivered as permanent Leveling rewards"
+                )
     item_type = _INVENTORY_TYPE[payload["type"]]
     await give_item(
         guild_id, user_id, payload["name"],
         quantity=int(payload["quantity"]),
         item_type=item_type,
-        metadata=metadata if metadata is not None else payload.get("metadata"),
+        metadata=eff_metadata,
         source="level_claim", db=db)
 
 
@@ -1838,7 +1866,10 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
     # raises `EntitlementCheckError` so a transient lock or DB failure is never
     # mistaken for "no timed holding exists".
     try:
-        from utils.timed_ownership import RETENTION_ITEM_TYPE
+        from utils.timed_ownership import (
+            RETENTION_ITEM_TYPE,
+            _equipped_role_linked_item_entitlement,
+        )
         cursor = await db.execute(
             "SELECT id, item_type, item_name, expires_at FROM timed_holdings "
             "WHERE guild_id=? AND user_id=? AND role_id=?",
@@ -1856,7 +1887,26 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
             return f"a pending role-retention obligation (#{holding_id})"
         if _th_is_expired(expires_at):
             continue
+        if str(item_type or "") not in ("role", "temp_role"):
+            continue
         return f"timed holding '{item_name}' (#{holding_id})"
+    try:
+        eq_reason = await _equipped_role_linked_item_entitlement(
+            db, guild_id, user_id, int(role_id),
+            exclude_claim_ids=excluded,
+            exclude_item=exclude_item,
+        )
+        if eq_reason:
+            return eq_reason
+    except aiosqlite.OperationalError as exc:
+        if "no such table: equipped_roles" not in str(exc).lower():
+            raise EntitlementCheckError(
+                f"Failed to verify equipped_roles entitlement: {exc}"
+            ) from exc
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify equipped_roles entitlement: {exc}"
+        ) from exc
     return None
 
 
@@ -2309,6 +2359,211 @@ async def _settle_reached_reversals(guild_id: int, user_id: int,
     return settled
 
 
+async def reconcile_reversed_role_linked_item(
+    guild_id: int,
+    user_id: int,
+    *,
+    item_name: str,
+    role_id: int,
+    member=None,
+    exclude_claim_id: int | None = None,
+    exclude_claim_ids=None,
+    reason: str = "level reward reversed",
+) -> dict:
+    """Reconcile `equipped_roles` and the Discord role after reversing a
+    role-linked `custom` Shop Item claim.
+
+    Called AFTER `ops.reverse_inventory` has succeeded (`STATUS_APPLIED` or
+    `STATUS_ALREADY`). Holds `slot_lock(guild_id, user_id)` across the entire
+    inspection and mutation:
+    - If `inventory_items.quantity > 0` still holds units of `item_name` (e.g.
+      from a Shop purchase or a surviving lower-level claim), neither
+      `equipped_roles` nor the Discord role is touched.
+    - If `quantity <= 0` and `equipped_roles` points to this permanent item
+      (`i:<id>` or legacy `NULL` key for `item_name`):
+      * Fails closed without deleting `equipped_roles` if `slot.role_id` does
+        not match `role_id` or `observed_role_state(slot)` is unknown (`None`).
+      * If `observed_role_state(slot)` is `False` (role was worn before equip)
+        or another surviving entitlement grants `role_id`, clears
+        `equipped_roles` while leaving the Discord role on the member.
+      * Otherwise verifies/removes the Discord role (failing closed and keeping
+        `equipped_roles` intact if removal fails so retries are idempotent),
+        and clears `equipped_roles` only once absence/removal is confirmed.
+    """
+    import discord
+    from utils.equip_engine import (
+        get_equipped,
+        observed_role_state,
+        reconcile_legacy_slot_observation,
+        slot_lock,
+    )
+    from utils.timed_ownership import EntitlementCheckError, _resolve_guild_role
+
+    gid = int(guild_id)
+    uid = int(user_id)
+    rid = int(role_id)
+
+    async with slot_lock(gid, uid):
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            cur = await db.execute(
+                "SELECT id, quantity FROM inventory_items "
+                "WHERE guild_id=? AND user_id=? AND item_name=?",
+                (gid, uid, item_name),
+            )
+            inv_row = await cur.fetchone()
+        inv_id = int(inv_row[0]) if inv_row else None
+        remaining_qty = int(inv_row[1] or 0) if inv_row else 0
+        if remaining_qty > 0:
+            return {"ok": True, "action": "kept_remaining_units", "role_removed": False}
+
+        slot = await get_equipped(gid, uid)
+        if not slot:
+            return {"ok": True, "action": "not_equipped", "role_removed": False}
+
+        ekey = slot.get("entry_key")
+        matches_item = False
+        if ekey is None:
+            matches_item = str(slot.get("item_name") or "") == str(item_name)
+        elif str(ekey).startswith("i:"):
+            if inv_id is not None and str(ekey) == f"i:{inv_id}":
+                matches_item = True
+            elif str(slot.get("item_name") or "") == str(item_name):
+                matches_item = True
+        if not matches_item:
+            return {"ok": True, "action": "other_slot", "role_removed": False}
+
+        try:
+            slot_rid = int(slot.get("role_id") or 0)
+        except (TypeError, ValueError):
+            slot_rid = 0
+        if slot_rid != rid:
+            return {
+                "ok": False,
+                "error": (
+                    f"equipped_roles slot role {slot.get('role_id')} does not "
+                    f"match reversed item role {rid}"
+                ),
+                "role_removed": False,
+            }
+
+        obs = observed_role_state(slot)
+        if obs is None:
+            obs = await reconcile_legacy_slot_observation(gid, uid, slot)
+        if obs is None:
+            return {
+                "ok": False,
+                "error": "equipped_roles observation state is unknown; refusing unsafe removal",
+                "role_removed": False,
+            }
+
+        if obs is False:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute(
+                    "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                    (gid, uid),
+                )
+                await db.commit()
+            return {"ok": True, "action": "kept_preexisting_role", "role_removed": False}
+
+        try:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                shared = await _role_granted_elsewhere(
+                    db,
+                    gid,
+                    uid,
+                    rid,
+                    exclude_claim_id=exclude_claim_id,
+                    exclude_claim_ids=exclude_claim_ids,
+                    exclude_item=item_name,
+                )
+        except EntitlementCheckError as exc:
+            return {"ok": False, "error": str(exc), "role_removed": False}
+
+        if shared:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute(
+                    "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                    (gid, uid),
+                )
+                await db.commit()
+            return {
+                "ok": True,
+                "action": "kept_shared",
+                "shared": shared,
+                "role_removed": False,
+            }
+
+        guild = getattr(member, "guild", None) if member is not None else None
+        if member is None or guild is None:
+            return {
+                "ok": False,
+                "error": "no member object supplied to remove equipped Discord role",
+                "role_removed": False,
+            }
+
+        role_obj, role_deleted, role_err = await _resolve_guild_role(guild, rid)
+        if role_err is not None:
+            return {
+                "ok": False,
+                "error": f"could not verify role {rid} in guild: {role_err}",
+                "role_removed": False,
+            }
+        if role_deleted:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute(
+                    "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                    (gid, uid),
+                )
+                await db.commit()
+            return {"ok": True, "action": "role_deleted", "role_removed": False}
+        if role_obj is None:
+            return {
+                "ok": False,
+                "error": f"role {rid} not found or unverified in guild",
+                "role_removed": False,
+            }
+
+        target_member = member
+        has_role = any(
+            int(getattr(r, "id", 0) or 0) == rid
+            for r in (getattr(target_member, "roles", None) or [])
+        )
+        if not has_role and callable(getattr(guild, "fetch_member", None)):
+            try:
+                fetched = await guild.fetch_member(uid)
+                if fetched is not None:
+                    target_member = fetched
+                    has_role = any(
+                        int(getattr(r, "id", 0) or 0) == rid
+                        for r in (getattr(target_member, "roles", None) or [])
+                    )
+            except discord.NotFound:
+                # Member left the guild; role is no longer worn in this guild.
+                has_role = False
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "error": f"could not verify member roles in Discord: {exc}",
+                    "role_removed": False,
+                }
+
+        role_removed = False
+        if has_role:
+            try:
+                await target_member.remove_roles(role_obj, reason=reason)
+                role_removed = True
+            except Exception as exc:
+                return {"ok": False, "error": str(exc), "role_removed": False}
+
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            await db.execute(
+                "DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                (gid, uid),
+            )
+            await db.commit()
+        return {"ok": True, "action": "removed", "role_removed": role_removed}
+
+
 async def _reverse_correction_claim(claim: dict, report: dict, *,
                                     guild_id: int, user_id: int, level: int,
                                     operation_id: str, member,
@@ -2404,8 +2659,18 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
                              "the frozen payload has no item or quantity",
                              detail=detail)
             return
+        from utils.inventory import _metadata_role_id
         is_temp_role = str(payload.get("type") or "") == "temp_role"
-        role_id = payload.get("role_id") if is_temp_role else None
+        linked_custom_rid = (
+            _metadata_role_id(payload.get("metadata"))
+            if str(payload.get("type") or "") == "custom"
+            else None
+        )
+        role_id = (
+            payload.get("role_id")
+            if is_temp_role
+            else linked_custom_rid
+        )
         if is_temp_role:
             role_outcome = await _reverse_correction_role(
                 claim, report, guild_id=guild_id, user_id=user_id,
@@ -2420,6 +2685,62 @@ async def _reverse_correction_claim(claim: dict, report: dict, *,
             item_name=item_name, quantity=quantity, operation_id=operation_id,
             reason="level correction: reward above the corrected level")
         if outcome["status"] in (ops.STATUS_APPLIED, ops.STATUS_ALREADY):
+            if linked_custom_rid is not None:
+                rec = await reconcile_reversed_role_linked_item(
+                    guild_id,
+                    user_id,
+                    item_name=item_name,
+                    role_id=int(linked_custom_rid),
+                    member=member,
+                    exclude_claim_id=claim_id,
+                    exclude_claim_ids=exclude_claim_ids,
+                    reason="level correction: role-linked reward item reversed",
+                )
+                if not rec["ok"]:
+                    await ops.note_reversal(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        claim_id=claim_id,
+                        kind=ops.KIND_ROLE,
+                        quantity=1,
+                        operation_id=operation_id,
+                        status=ops.STATUS_OUTSTANDING,
+                        role_id=int(linked_custom_rid),
+                        item_name=item_name,
+                        reason=rec["error"],
+                    )
+                    report["kept_unresolved"].append(dict(
+                        _claim_brief(claim),
+                        kind=ops.KIND_ROLE,
+                        role_id=int(linked_custom_rid),
+                        reason=rec["error"],
+                    ))
+                    return
+                await ops.note_reversal(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    claim_id=claim_id,
+                    kind=ops.KIND_ROLE,
+                    quantity=1,
+                    operation_id=operation_id,
+                    status=ops.STATUS_APPLIED,
+                    role_id=int(linked_custom_rid),
+                    reason="role-linked reward item role reconciled",
+                )
+                if rec.get("role_removed"):
+                    report["reversed"]["role"].append({
+                        "claim_id": claim_id,
+                        "reward_level": claim["reward_level"],
+                        "role_id": int(linked_custom_rid),
+                        "status": ops.STATUS_APPLIED,
+                    })
+                elif rec.get("action") == "kept_shared":
+                    report.setdefault("roles_retained", []).append({
+                        "claim_id": claim_id,
+                        "reward_level": claim["reward_level"],
+                        "role_id": int(linked_custom_rid),
+                        "also_granted_by": rec.get("shared"),
+                    })
             report["reversed"]["inventory"].append(dict(
                 detail, claim_id=claim_id, reward_level=claim["reward_level"],
                 status=outcome["status"]))

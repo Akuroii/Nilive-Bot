@@ -92,6 +92,56 @@ vm.runInContext(script, context);
   assert.equal(sent.at(-1).data.price, 0);
   assert.equal(sent.at(-1).data.price_diamonds, 5,
     'a blank Coin price is still ignored when a Diamond price is set (existing precedence)');
+
+  // Item (custom) supports an OPTIONAL Discord Role ID: blank/0 -> null,
+  // 64-bit snowflake preserved as exact string (never rounded by parseInt),
+  // and non-numeric junk rejected with a toast.
+  element('item-price-diamonds').value = '';
+  element('item-price').value = '250';
+  element('item-duration').value = '0';
+  element('item-type').value = 'custom';
+  context.toggleItemTypeFields();
+  assert.equal(element('item-role-field').style.display, 'block',
+    'Item (custom) must display the optional Role ID field');
+  assert.equal(element('item-role-label').textContent, 'Role ID (optional)');
+  assert.match(element('item-role-hint').textContent, /manually equip\/unequip/);
+
+  element('item-name').value = 'Plain Collectible';
+  element('item-role').value = '   ';
+  await context.addItem();
+  assert.equal(sent.at(-1).data.type, 'custom');
+  assert.equal(sent.at(-1).data.role_id, null, 'blank Role ID on Item sends null');
+
+  element('item-role').value = '0';
+  await context.addItem();
+  assert.equal(sent.at(-1).data.role_id, null, '0 Role ID on Item sends null');
+
+  const SNOWFLAKE_64 = '1309876543210987654'; // exceeds Number.MAX_SAFE_INTEGER
+  element('item-name').value = 'Knight Crest';
+  element('item-role').value = `  ${SNOWFLAKE_64}  `;
+  await context.addItem();
+  assert.equal(sent.at(-1).data.type, 'custom');
+  assert.equal(sent.at(-1).data.role_id, SNOWFLAKE_64,
+    '64-bit Discord snowflake must stay an exact string without float rounding');
+
+  for (const badRole of ['abc', '-42', '12.34']) {
+    element('item-role').value = badRole;
+    const beforeBad = sent.length;
+    await context.addItem();
+    assert.equal(sent.length, beforeBad, `invalid Role ID ${badRole} must be rejected`);
+    assert.match(toasts.at(-1)[0], /Role ID/);
+  }
+
+  // Color restores required Role ID label/hint; Title hides Role ID field.
+  element('item-type').value = 'color';
+  context.toggleItemTypeFields();
+  assert.equal(element('item-role-field').style.display, 'block');
+  assert.equal(element('item-role-label').textContent, 'Role ID');
+  element('item-type').value = 'title';
+  context.toggleItemTypeFields();
+  assert.equal(element('item-role-field').style.display, 'none');
+
   console.log('PASS: actual Shop form — paid values preserved; VI Free/unmetered; '
-    + 'explicit 0 = Free; blank/junk rejected; paid zero rejected');
+    + 'explicit 0 = Free; blank/junk rejected; paid zero rejected; '
+    + 'optional 64-bit Role ID on Item');
 })().catch(error => { console.error(error); process.exitCode = 1; });

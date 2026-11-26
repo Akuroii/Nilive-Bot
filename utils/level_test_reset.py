@@ -443,12 +443,44 @@ async def inspect_member(guild_id: int, user_id: int, *,
                     continue
                 if _th_is_expired(expires_at):
                     continue
+                if str(item_type or "") not in ("role", "temp_role"):
+                    eq_cur = await db.execute(
+                        "SELECT entry_key, role_id FROM equipped_roles "
+                        "WHERE guild_id=? AND user_id=?",
+                        (guild_id, user_id),
+                    )
+                    eq_row = await eq_cur.fetchone()
+                    if not eq_row or eq_row[0] != f"h:{int(holding_id)}" or int(eq_row[1] or 0) != int(role_id):
+                        continue
                 report["role_other_grants"].setdefault(
                     str(int(role_id)), set()
                 ).add(f"timed holding '{item_name}' (#{holding_id})")
         except aiosqlite.OperationalError as exc:
             if "no such table: timed_holdings" not in str(exc).lower():
                 raise
+        try:
+            from utils.timed_ownership import _equipped_role_linked_item_entitlement
+            eq_cur = await db.execute(
+                "SELECT role_id FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            )
+            eq_row = await eq_cur.fetchone()
+            if eq_row and eq_row[0]:
+                eq_rid = int(eq_row[0])
+                reset_claim_ids = {int(c["id"]) for c in report["claims"]}
+                eq_reason = await _equipped_role_linked_item_entitlement(
+                    db,
+                    guild_id,
+                    user_id,
+                    eq_rid,
+                    exclude_claim_ids=reset_claim_ids,
+                )
+                if eq_reason:
+                    report["role_other_grants"].setdefault(
+                        str(eq_rid), set()
+                    ).add(eq_reason)
+        except aiosqlite.OperationalError:
+            pass
         report["role_other_grants"] = {
             k: sorted(v) for k, v in report["role_other_grants"].items()}
 
@@ -1068,6 +1100,60 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
             else:
                 report["unreversed"].append(dict(outcome, kind="inventory"))
 
+        from utils.inventory import _metadata_role_id
+        from utils.level_claims import reconcile_reversed_role_linked_item
+        reversed_inv_claim_ids = (
+            {int(e["claim_id"]) for e in report["reversed_inventory"]}
+            | {
+                int(e["claim_id"])
+                for e in (plan.get("already_reversed") or [])
+                if e.get("kind") == "inventory"
+            }
+        )
+        failed_linked_claim_ids: set[int] = set()
+        for claim in report["claims"]:
+            if int(claim["id"]) not in reversed_inv_claim_ids:
+                continue
+            if claim.get("track") != "shop":
+                continue
+            cp = claim.get("payload") or {}
+            if str(cp.get("type") or "") != "custom":
+                continue
+            linked_rid = _metadata_role_id(cp.get("metadata"))
+            if linked_rid is None:
+                continue
+            rec = await reconcile_reversed_role_linked_item(
+                guild_id,
+                user_id,
+                item_name=str(cp.get("name") or ""),
+                role_id=int(linked_rid),
+                member=member,
+                exclude_claim_id=int(claim["id"]),
+                exclude_claim_ids=inspected_claim_ids,
+                reason="level test reset: role-linked reward item reversed",
+            )
+            if not rec["ok"]:
+                failed_linked_claim_ids.add(int(claim["id"]))
+                report["role_failures"].append({
+                    "role_id": int(linked_rid),
+                    "claim_id": int(claim["id"]),
+                    "error": rec["error"],
+                })
+            else:
+                await ops.note_reversal(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    claim_id=int(claim["id"]),
+                    kind=ops.KIND_ROLE,
+                    quantity=1,
+                    operation_id=operation_id,
+                    status=ops.STATUS_APPLIED,
+                    role_id=int(linked_rid),
+                    reason="role-linked reward item role reconciled",
+                )
+                if rec.get("role_removed") and int(linked_rid) not in report["roles_removed"]:
+                    report["roles_removed"].append(int(linked_rid))
+
         # Anything the plan already knew could not be reversed is reported too,
         # and recorded, so the case is on the queue rather than only in a message.
         known = {(e["claim_id"], e["kind"]) for e in report["unreversed"]}
@@ -1100,6 +1186,7 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
         role_preserved = [c for c in report["claims"]
                           if c.get("role_id") in failed_roles]
         kept_ids = {c["id"] for c in role_preserved}
+        kept_ids |= failed_linked_claim_ids
         kept_ids |= {e["claim_id"] for e in report["unreversed"]}
         kept_ids |= in_flight_ids
 
@@ -1126,7 +1213,7 @@ async def reset_member(guild_id: int, user_id: int, *, apply: bool = False,
                         "reset is NOT complete"
                         if c["id"] in in_flight_ids
                         else "a Discord role could not be removed"
-                        if c.get("role_id") in failed_roles
+                        if (c.get("role_id") in failed_roles or c["id"] in failed_linked_claim_ids)
                         else "its delivered effect could not be reversed")}
             for c in preserved]
         report["claims_preserved"] += [
@@ -1601,6 +1688,72 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                 report["reversed_inventory"].append(outcome)
             else:
                 report["unreversed"].append(dict(outcome, kind="inventory"))
+        from utils.inventory import _metadata_role_id
+        from utils.level_claims import reconcile_reversed_role_linked_item
+        rollback_inv_ids = {int(e["claim_id"]) for e in report["reversed_inventory"]}
+        failed_rollback_linked_ids: set[int] = set()
+        for claim in report["claims"]:
+            if int(claim["id"]) not in rollback_inv_ids or int(claim["id"]) not in caused_ids:
+                continue
+            if claim.get("track") != "shop":
+                continue
+            cp = claim.get("payload") or {}
+            if str(cp.get("type") or "") != "custom":
+                continue
+            linked_rid = _metadata_role_id(cp.get("metadata"))
+            if linked_rid is None:
+                continue
+            rec = await reconcile_reversed_role_linked_item(
+                guild_id,
+                user_id,
+                item_name=str(cp.get("name") or ""),
+                role_id=int(linked_rid),
+                member=member,
+                exclude_claim_id=int(claim["id"]),
+                exclude_claim_ids=caused_ids,
+                reason=f"xp rollback {operation_id}: role-linked reward item reversed",
+            )
+            if not rec["ok"]:
+                failed_rollback_linked_ids.add(int(claim["id"]))
+                failed_roles.add(int(linked_rid))
+                await ops.note_reversal(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    claim_id=int(claim["id"]),
+                    kind=ops.KIND_ROLE,
+                    quantity=1,
+                    operation_id=rollback_operation_id,
+                    status=ops.STATUS_OUTSTANDING,
+                    role_id=int(linked_rid),
+                    reason=f"Role-linked reward item role reconciliation failed: {rec['error']}",
+                )
+                report["unreversed"].append({
+                    "claim_id": int(claim["id"]),
+                    "reward_level": claim["reward_level"],
+                    "kind": ops.KIND_ROLE,
+                    "role_id": int(linked_rid),
+                    "status": ops.STATUS_OUTSTANDING,
+                    "reason": rec["error"],
+                })
+                report["role_failures"].append({
+                    "role_id": int(linked_rid),
+                    "claim_id": int(claim["id"]),
+                    "error": rec["error"],
+                })
+            else:
+                await ops.note_reversal(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    claim_id=int(claim["id"]),
+                    kind=ops.KIND_ROLE,
+                    quantity=1,
+                    operation_id=rollback_operation_id,
+                    status=ops.STATUS_APPLIED,
+                    role_id=int(linked_rid),
+                    reason=f"role-linked reward item role reconciled by rollback of {operation_id}",
+                )
+                if rec.get("role_removed") and int(linked_rid) not in report["roles_removed"]:
+                    report["roles_removed"].append(int(linked_rid))
         known = {(e["claim_id"], e["kind"]) for e in report["unreversed"]}
         for entry in plan["cannot_reverse"]:
             if (entry["claim_id"], entry["kind"]) in known:
@@ -1633,8 +1786,10 @@ async def rollback_xp_operation(guild_id: int, user_id: int, *,
                        if c["id"] in caused_ids and c["id"] in reversed_ok}
         # A role that could not be taken off keeps its claim row and its temp-role
         # unit, whatever else the rollback decided about that claim.
-        failed_claim_ids = {c["id"] for c in report["claims"]
-                            if c.get("role_id") in failed_roles}
+        failed_claim_ids = (
+            {c["id"] for c in report["claims"] if c.get("role_id") in failed_roles}
+            | failed_rollback_linked_ids
+        )
         delete_ids -= failed_claim_ids
         retained_role_ids = {int(r["role_id"])
                              for r in plan.get("roles_left_on_member") or []}

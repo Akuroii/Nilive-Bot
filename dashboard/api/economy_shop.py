@@ -478,7 +478,12 @@ def add_shop_item():
     # cannot coexist with a different kind of item of the same name.
     from utils.item_identity import find_name_conflict, kind_of_shop_type
     name_conflict = run_async(find_name_conflict(
-        guild_id, data["name"], kind_of_shop_type(data.get("type", "role"))))
+        guild_id,
+        data["name"],
+        kind_of_shop_type(data.get("type", "role"), role_id=data.get("role_id")),
+        role_id=data.get("role_id"),
+        shop_type=data.get("type", "role"),
+    ))
     if name_conflict:
         return jsonify({"success": False, "error": name_conflict}), 400
 
@@ -791,15 +796,57 @@ def update_shop_item(item_id: int):
     price_val = data["price"]
     price_diamonds_val = data["price_diamonds"]
     new_name = data["name"]
-    # Only a RENAME can introduce a name clash (the type is immutable), so a
-    # listing that already clashes stays editable in every other field.
-    if new_name != existing["name"]:
-        from utils.item_identity import find_name_conflict, kind_of_shop_type
+    # A rename, kind change, or role_id change (e.g. adding, clearing, or
+    # switching role_id on an Item) can introduce a name or role-identity clash
+    # against existing definitions, permanent inventory stacks, or unexpired
+    # timed holdings; an unchanged listing stays editable in every other field.
+    from utils.item_identity import find_name_conflict, kind_of_shop_type
+    old_kind = kind_of_shop_type(existing["type"], role_id=existing.get("role_id"))
+    new_kind = kind_of_shop_type(existing["type"], role_id=data.get("role_id"))
+    if (
+        new_name != existing["name"]
+        or new_kind != old_kind
+        or data.get("role_id") != existing.get("role_id")
+    ):
         name_conflict = run_async(find_name_conflict(
-            guild_id, new_name, kind_of_shop_type(existing["type"]),
-            exclude_shop_item_id=item_id))
+            guild_id,
+            new_name,
+            new_kind,
+            role_id=data.get("role_id"),
+            shop_type=existing["type"],
+            exclude_shop_item_id=item_id,
+        ))
         if name_conflict:
             return jsonify({"success": False, "error": name_conflict}), 400
+    if (
+        existing["type"] == "custom"
+        and data.get("role_id")
+        and duration_val
+        and int(duration_val) > 0
+    ):
+        async def _used_as_level_reward():
+            async with aiosqlite.connect(DB_PATH) as db:
+                try:
+                    cur = await db.execute(
+                        "SELECT 1 FROM leveling_shop_rewards "
+                        "WHERE guild_id=? AND item_id=? LIMIT 1",
+                        (guild_id, item_id),
+                    )
+                    return await cur.fetchone() is not None
+                except aiosqlite.OperationalError as exc:
+                    if "no such table" in str(exc).lower():
+                        return False
+                    raise
+
+        if run_async(_used_as_level_reward()):
+            return jsonify({
+                "success": False,
+                "error": (
+                    "This Shop Item is attached to a Leveling reward and cannot "
+                    "combine a Role ID with a temporary duration. Remove it from "
+                    "Leveling rewards first, or keep it permanent."
+                ),
+            }), 400
     from utils.item_catalog import is_valid_rarity, upsert_catalog_entry
     rarity = (data.get("rarity") or "common").strip().lower()
     if not is_valid_rarity(rarity):

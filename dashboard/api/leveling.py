@@ -538,7 +538,8 @@ def get_leveling_shop_rewards():
             "id": p[0], "name": p[1], "type": p[2],
             "role_id": str(p[3]) if p[3] is not None else None,
             "duration_hours": p[4], "enabled": p[5],
-        } for p in products],
+        } for p in products
+          if not (p[2] == "custom" and p[3] and p[4] and int(p[4]) > 0)],
     })
 
 
@@ -571,6 +572,11 @@ def add_leveling_shop_reward():
             item_type, role_id, duration_hours, multiplier = item
             if item_type not in _SHOP_REWARD_TYPES:
                 return "Only custom, title, potion, and temporary role products can be level rewards."
+            if item_type == "custom" and role_id and duration_hours and int(duration_hours) > 0:
+                return (
+                    "Timed role-linked Items cannot be used as Leveling rewards. "
+                    "Use a permanent role-linked Item or a temporary role product instead."
+                )
             if item_type == "temp_role" and (not role_id or not duration_hours or int(duration_hours) <= 0):
                 return "That temporary role product needs a role and a positive duration."
             if item_type == "potion" and (not multiplier or float(multiplier) <= 1 or not duration_hours):
