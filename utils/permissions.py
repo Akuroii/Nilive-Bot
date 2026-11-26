@@ -107,7 +107,13 @@ def check_bot_role_position(guild, role) -> tuple[bool, str]:
     # Fallback explicit checks (for mocks, dict-like roles, or legacy objects):
     guild_id = getattr(guild, "id", None)
     role_id = getattr(role, "id", None)
-    if guild_id and role_id and str(role_id) == str(guild_id):
+    is_default_role = False
+    if hasattr(role, "is_default") and callable(role.is_default):
+        try:
+            is_default_role = bool(role.is_default())
+        except Exception:
+            is_default_role = False
+    if is_default_role or (guild_id and role_id and str(role_id) == str(guild_id)):
         return False, "⚠️ The @everyone role cannot be assigned."
 
     if getattr(role, "managed", False):

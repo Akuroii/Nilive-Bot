@@ -211,12 +211,17 @@ async def _definitions(db, guild_id: int, name: str, *,
 
 
 async def find_name_conflict(guild_id: int, name: str, kind: str | None, *,
+                             role_id=None,
+                             shop_type: str | None = None,
                              exclude_shop_item_id: int | None = None,
                              db: aiosqlite.Connection | None = None) -> str | None:
-    """Admin-facing reason this name cannot be used for `kind`, or None."""
+    """Admin-facing reason this name cannot be used for `kind` / `role_id`, or None."""
     name = str(name or "").strip()
     if not name or not kind:
         return None
+    normalized_rid = _normalize_positive_role_id(role_id)
+    norm_shop_type = (shop_type or "").strip().lower()
+    is_custom_role = norm_shop_type in ("custom", "shop_custom", "item")
 
     async def check(connection):
         for other_kind, where in await _definitions(
@@ -228,6 +233,97 @@ async def find_name_conflict(guild_id: int, name: str, kind: str | None, *,
                         f"{_KIND_LABEL[kind]} cannot share a name with a "
                         f"different kind of item, because a member could not "
                         f"hold both. Use a different name.")
+
+        if kind == KIND_ROLE and normalized_rid is not None:
+            for other_id, other_type, other_rid_raw in await _query(
+                connection,
+                "SELECT id, type, role_id FROM shop_items WHERE guild_id=? AND name=?",
+                (guild_id, name),
+            ):
+                if exclude_shop_item_id is not None and int(other_id) == int(exclude_shop_item_id):
+                    continue
+                if kind_of_shop_type(other_type, role_id=other_rid_raw) != KIND_ROLE:
+                    continue
+                other_is_custom = (other_type or "").strip().lower() in (
+                    "custom", "shop_custom", "item",
+                )
+                if norm_shop_type and is_custom_role != other_is_custom:
+                    return (
+                        f"“{name}” is already used by Shop product #{other_id} "
+                        f"with a different role-product type. A manual-equip "
+                        f"Item and an auto-equip Color/Role cannot share a name. "
+                        f"Use a different name."
+                    )
+                other_rid = _normalize_positive_role_id(other_rid_raw)
+                if other_rid != normalized_rid:
+                    return (
+                        f"“{name}” is already linked to a different Role ID in "
+                        f"Shop product #{other_id}. Same-name role items must "
+                        f"use the same Role ID, or use a different name."
+                    )
+
+            for inv_type, raw_meta in await _query(
+                connection,
+                "SELECT item_type, metadata FROM inventory_items "
+                "WHERE guild_id=? AND item_name=? AND quantity > 0",
+                (guild_id, name),
+            ):
+                if kind_of_inventory_type(inv_type, metadata=raw_meta) != KIND_ROLE:
+                    continue
+                if is_custom_role and (inv_type or "") in ("role", "temp_role"):
+                    return (
+                        f"“{name}” is already owned by member(s) as a Color/Role "
+                        f"product and cannot stack with a role-linked Item. Use "
+                        f"a different name."
+                    )
+                if norm_shop_type and not is_custom_role and (inv_type or "") not in ("role", "temp_role"):
+                    return (
+                        f"“{name}” is already owned by member(s) as a role-linked "
+                        f"Item and cannot share a name with a Color/Role product. "
+                        f"Use a different name."
+                    )
+                owned_rid = _metadata_role_id(raw_meta)
+                if owned_rid != normalized_rid:
+                    return (
+                        f"“{name}” is already owned by member(s) with a different "
+                        f"role setup. Use a different name instead of binding it "
+                        f"to another Role ID."
+                    )
+
+            from utils.timed_ownership import RETENTION_ITEM_TYPE, is_expired
+            for th_type, th_rid_raw, th_meta, expires_at in await _query(
+                connection,
+                "SELECT item_type, role_id, metadata, expires_at "
+                "FROM timed_holdings WHERE guild_id=? AND item_name=? "
+                "AND item_type != ?",
+                (guild_id, name, RETENTION_ITEM_TYPE),
+            ):
+                if is_expired(expires_at):
+                    continue
+                if kind_of_inventory_type(th_type, metadata=th_meta, role_id=th_rid_raw) != KIND_ROLE:
+                    continue
+                if is_custom_role and (th_type or "") in ("role", "temp_role"):
+                    return (
+                        f"“{name}” is currently held as an active timed Color/Role "
+                        f"and cannot share a name with a role-linked Item. Use a "
+                        f"different name."
+                    )
+                if norm_shop_type and not is_custom_role and (th_type or "") not in ("role", "temp_role"):
+                    return (
+                        f"“{name}” is currently held as an active timed role-linked "
+                        f"Item and cannot share a name with a Color/Role product. "
+                        f"Use a different name."
+                    )
+                live_rid = (
+                    _normalize_positive_role_id(th_rid_raw)
+                    or _metadata_role_id(th_meta)
+                )
+                if live_rid != normalized_rid:
+                    return (
+                        f"“{name}” is currently held as an active timed item with "
+                        f"a different Role ID. Wait until active holdings expire "
+                        f"or use a different name."
+                    )
         return None
 
     if db is not None:

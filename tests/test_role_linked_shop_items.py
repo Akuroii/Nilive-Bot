@@ -95,6 +95,13 @@ def _seed_shop_item(
 class RoleLinkedShopItemTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await reset_database()
+        import database
+        self._prev_db_env = os.environ.get("DATABASE_PATH")
+        self._prev_prod_db_env = os.environ.get("PRODUCTION_DATABASE_PATH")
+        self._prev_nero_env = os.environ.get("NERO_ENVIRONMENT")
+        os.environ["DATABASE_PATH"] = database.DB_PATH
+        os.environ["PRODUCTION_DATABASE_PATH"] = database.DB_PATH
+        os.environ["NERO_ENVIRONMENT"] = "production"
         seed_member(user=USER, guild=GUILD, balance=100_000)
         self.bot, self.guild, self.member, self.roles = make_discord_env()
         self.guild.name = "Test Guild"
@@ -114,6 +121,17 @@ class RoleLinkedShopItemTests(unittest.IsolatedAsyncioTestCase):
             sess["expires_at"] = time.time() + 7200
             sess["csrf_token"] = "test-csrf"
         self.headers = {"X-CSRF-Token": "test-csrf"}
+
+    async def asyncTearDown(self):
+        for k, v in (
+            ("DATABASE_PATH", self._prev_db_env),
+            ("PRODUCTION_DATABASE_PATH", self._prev_prod_db_env),
+            ("NERO_ENVIRONMENT", self._prev_nero_env),
+        ):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     def _panel_ix(self):
         ix = make_interaction(self.bot, self.guild, self.member)
@@ -528,6 +546,692 @@ class RoleLinkedShopItemTests(unittest.IsolatedAsyncioTestCase):
                     for e in await inventory.get_inventory_entries(GUILD, USER)
                 )
             )
+
+    # ── 6. Adversarial Fail-Closed Late-Delivery Rollback & Concurrency ───
+
+    async def test_06_adversarial_late_delivery_rollback_fail_closed_and_cold_restart(self):
+        import asyncio
+        import json
+
+        # 6a. Failed remove_roles -> incomplete rollback + retirement blocked + cold-restart retry
+        perm_pid = _seed_shop_item("FailClosed Crest", kind="custom", price=200, role_id=SNOWFLAKE_ROLE)
+        real_deliver = shop_cog._deliver_purchase_effects
+        captured = {}
+
+        orig_remove = self.member.remove_roles
+
+        async def _fail_remove(*args, **kwargs):
+            raise RuntimeError("Simulated Discord 500 on remove_roles")
+
+        async def _deliver_equip_and_fail_remove(interaction, **kw):
+            op_id = kw["op_id"]
+            captured["op_id"] = op_id
+            execute(
+                "UPDATE shop_purchase_operations SET status='pending', "
+                "delivery_intent=NULL, provenance_tracked=0 WHERE op_id=?",
+                (op_id,),
+            )
+            await timed_ownership.claim_purchase_transition(
+                op_id,
+                from_statuses=(timed_ownership.PURCHASE_PENDING,),
+                to_status=timed_ownership.PURCHASE_UNCERTAIN,
+                detail="operator timeout",
+            )
+            await timed_ownership.resolve_purchase_operation(
+                op_id,
+                action="refund",
+                confirmed=True,
+                note="refunded before late delivery returned",
+            )
+            res = await real_deliver(interaction, **kw)
+            await equip_engine.equip_role(self.bot, GUILD, USER, "FailClosed Crest")
+            self.member.remove_roles = AsyncMock(side_effect=_fail_remove)
+            return res
+
+        with patch.object(shop_cog, "_deliver_purchase", side_effect=_deliver_equip_and_fail_remove):
+            await self._buy(perm_pid)
+
+        op_id = captured["op_id"]
+        # Role is STILL worn on Discord; rollback MUST NOT be marked complete!
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+        raw_rb = rows(
+            "SELECT delivery_rollback FROM shop_purchase_operations WHERE op_id=?",
+            (op_id,),
+        )[0][0]
+        self.assertTrue(raw_rb and raw_rb != "", f"Expected pending rollback JSON, got {raw_rb!r}")
+        persisted_spec = json.loads(raw_rb)
+        self.assertTrue(persisted_spec.get("role_added"))
+        self.assertFalse(persisted_spec.get("role_reconciled"))
+
+        # Retirement evidence MUST refuse (even with accept_unprovable=True)!
+        verdict = await timed_ownership.rollback_retirement_evidence(op_id)
+        self.assertFalse(verdict["safe"], verdict)
+        self.assertEqual(verdict["code"], "discord_state_unobservable")
+        retired_ok, _ = await timed_ownership.retire_pending_rollback(
+            op_id, confirmed=True, note="operator attempt", accept_unprovable=True
+        )
+        self.assertFalse(retired_ok)
+
+        # Uncached guild role (get_role -> None without fetch_roles confirmation) MUST fail closed!
+        self.member.remove_roles = orig_remove
+        orig_get_role = self.guild.get_role
+        self.guild.get_role = lambda _rid: None
+        timed_ownership._PENDING_DELIVERY_ROLLBACKS.clear()
+        caller_stale_spec = dict(persisted_spec, role_added=False)
+        res_uncached = await timed_ownership.compensate_late_delivery(
+            op_id, caller_stale_spec, bot=self.bot
+        )
+        self.assertFalse(res_uncached["complete"], res_uncached)
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+
+        # Uncached get_role WITH working guild.fetch_roles + stale cached member.roles == []
+        # while fetch_member returns the fresh member wearing SNOWFLAKE_ROLE:
+        fresh_member = SimpleNamespace(
+            id=USER,
+            guild=self.guild,
+            roles=[self.roles[SNOWFLAKE_ROLE]],
+        )
+
+        async def _fresh_remove(role, reason=None):
+            if role in fresh_member.roles:
+                fresh_member.roles.remove(role)
+            if role in self.member.roles:
+                self.member.roles.remove(role)
+
+        fresh_member.remove_roles = AsyncMock(side_effect=_fresh_remove)
+        self.member.roles.clear()  # Stale cache claims role is absent!
+        self.guild.fetch_roles = AsyncMock(return_value=list(self.guild.roles))
+        self.guild.fetch_member = AsyncMock(return_value=fresh_member)
+
+        # Simulate cold restart: empty in-memory cache + caller spec has role_added=False
+        timed_ownership._PENDING_DELIVERY_ROLLBACKS.clear()
+        res_cold = await timed_ownership.compensate_late_delivery(
+            op_id, dict(persisted_spec, role_added=False), bot=self.bot
+        )
+        self.assertTrue(res_cold["complete"], res_cold)
+        self.assertEqual([r.id for r in fresh_member.roles], [])
+        self.assertEqual(
+            rows("SELECT delivery_rollback FROM shop_purchase_operations WHERE op_id=?", (op_id,))[0][0],
+            "",
+        )
+        self.guild.get_role = orig_get_role
+        delattr(self.guild, "fetch_roles")
+
+        # 6b. Unknown/corrupt equipped_roles observation & mismatched slot.role_id fail closed
+        for mode in ("corrupt_obs", "wrong_role"):
+            bad_name = f"CorruptSlot_{mode}"
+            bad_op = f"op-{mode}"
+            execute(
+                "INSERT INTO shop_purchase_operations "
+                "(op_id, guild_id, user_id, item_id, item_name, currency, amount, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'coins', 100, 'refunded', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (bad_op, GUILD, USER, perm_pid, bad_name),
+            )
+            await inventory.give_item(
+                GUILD, USER, bad_name, 1, item_type="shop_custom",
+                metadata={"role_id": SNOWFLAKE_ROLE},
+            )
+            inv_id = rows(
+                "SELECT id FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name=?",
+                (GUILD, USER, bad_name),
+            )[0][0]
+            from utils import level_ops
+            import aiosqlite
+            from database import DB_PATH
+            async with aiosqlite.connect(DB_PATH) as db:
+                await level_ops.record_purchase_grant(
+                    db, operation_id=bad_op, guild_id=GUILD, user_id=USER,
+                    item_name=bad_name, quantity=1,
+                )
+                await db.commit()
+            slot_rid = SNOWFLAKE_ROLE if mode == "corrupt_obs" else ALT_ROLE
+            bound_rid = ALT_ROLE  # Deliberately mismatched/corrupt for corrupt_obs!
+            self.member.roles = [self.roles[slot_rid]]
+            execute(
+                "INSERT OR REPLACE INTO equipped_roles "
+                "(guild_id, user_id, item_name, role_id, equipped_at, entry_key, role_added, role_added_role_id) "
+                "VALUES (?, ?, ?, ?, '2026-01-01T00:00:00+00:00', ?, 1, ?)",
+                (GUILD, USER, bad_name, slot_rid, f"i:{inv_id}", bound_rid),
+            )
+            bad_spec = {
+                "guild_id": GUILD,
+                "user_id": USER,
+                "item_id": perm_pid,
+                "item_name": bad_name,
+                "internal_type": "shop_custom",
+                "role_id": SNOWFLAKE_ROLE,
+                "entry_key": f"i:{inv_id}",
+                "role_added": False,
+                "inventory_rolled_back": False,
+                "equip_reconciled": False,
+                "role_reconciled": False,
+            }
+            await timed_ownership.record_pending_delivery_rollback(bad_op, bad_spec, bot=None)
+            res_bad = await timed_ownership.compensate_late_delivery(bad_op, bad_spec, bot=self.bot)
+            self.assertFalse(res_bad["complete"], res_bad)
+            # Slot and worn role MUST remain untouched!
+            self.assertIsNotNone(await equip_engine.get_equipped(GUILD, USER))
+            self.assertEqual(set(worn_ids(self.member)), {slot_rid})
+            bad_ev = await timed_ownership.rollback_retirement_evidence(bad_op)
+            self.assertFalse(bad_ev["safe"], bad_ev)
+            execute("DELETE FROM equipped_roles WHERE guild_id=? AND user_id=?", (GUILD, USER))
+            self.member.roles.clear()
+
+        # 6c. Concurrent equip_role() vs timed-holding rollback race under slot_lock
+        for equip_first in (True, False):
+            race_op = f"op-timed-race-{equip_first}"
+            execute(
+                "INSERT INTO shop_purchase_operations "
+                "(op_id, guild_id, user_id, item_id, item_name, currency, amount, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'RaceTimedPass', 'coins', 100, 'refunded', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (race_op, GUILD, USER, perm_pid),
+            )
+            grant = await timed_ownership.grant_timed_product(
+                self.bot, GUILD, USER,
+                item_name="RaceTimedPass",
+                item_type="shop_custom",
+                duration_hours=24,
+                role_id=SNOWFLAKE_ROLE,
+                assign_role_now=False,
+                source="shop",
+                product_id=perm_pid,
+                metadata={"role_id": SNOWFLAKE_ROLE, "op_id": race_op, "origin_op_id": race_op},
+            )
+            h_key = grant["entry_key"]
+            t_spec = {
+                "guild_id": GUILD,
+                "user_id": USER,
+                "item_id": perm_pid,
+                "item_name": "RaceTimedPass",
+                "internal_type": "shop_custom",
+                "role_id": SNOWFLAKE_ROLE,
+                "entry_key": h_key,
+                "role_added": False,
+                "inventory_rolled_back": False,
+                "equip_reconciled": False,
+                "role_reconciled": False,
+            }
+            await timed_ownership.record_pending_delivery_rollback(race_op, t_spec, bot=None)
+            self.guild.fetch_member = AsyncMock(return_value=self.member)
+            if equip_first:
+                t1 = asyncio.create_task(
+                    equip_engine.equip_role(self.bot, GUILD, USER, "RaceTimedPass")
+                )
+                await asyncio.sleep(0)
+                t2 = asyncio.create_task(
+                    timed_ownership.compensate_late_delivery(race_op, t_spec, bot=self.bot)
+                )
+            else:
+                t2 = asyncio.create_task(
+                    timed_ownership.compensate_late_delivery(race_op, t_spec, bot=self.bot)
+                )
+                await asyncio.sleep(0)
+                t1 = asyncio.create_task(
+                    equip_engine.equip_role(self.bot, GUILD, USER, "RaceTimedPass")
+                )
+            _, rb_out = await asyncio.gather(t1, t2)
+            self.assertTrue(rb_out["complete"], rb_out)
+            self.assertEqual(set(worn_ids(self.member)), set())
+            self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
+            self.assertEqual(
+                rows("SELECT id FROM timed_holdings WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+                [],
+            )
+
+    # ── 7. Timed Role-Linked Items Blocked from Leveling Rewards ───────────
+
+    async def test_07_timed_role_linked_item_blocked_from_permanent_leveling_rewards(self):
+        import json
+        from utils import level_claims
+
+        timed_id = _seed_shop_item(
+            "24h Level Crest", kind="custom", price=200, role_id=SNOWFLAKE_ROLE, duration_hours=24
+        )
+        perm_id = _seed_shop_item(
+            "Permanent Level Crest", kind="custom", price=200, role_id=ALT_ROLE, duration_hours=None
+        )
+
+        # GET /api/leveling/shop-rewards excludes timed role-linked custom items
+        listed = self.client.get("/api/leveling/shop-rewards").get_json()
+        product_ids = {p["id"] for p in listed["products"]}
+        self.assertNotIn(timed_id, product_ids)
+        self.assertIn(perm_id, product_ids)
+
+        # POST /api/leveling/shop-reward rejects timed role-linked custom item
+        r_bad = self.client.post(
+            "/api/leveling/shop-reward",
+            json={"level": 5, "item_id": timed_id, "quantity": 1, "audience": "everyone"},
+            headers=self.headers,
+        )
+        bad_json = r_bad.get_json()
+        self.assertFalse(bad_json["success"], bad_json)
+        self.assertIn("Timed role-linked Items cannot be used", bad_json["error"])
+
+        # Permanent role-linked custom item is accepted, and cannot later be edited into timed!
+        r_ok = self.client.post(
+            "/api/leveling/shop-reward",
+            json={"level": 5, "item_id": perm_id, "quantity": 1, "audience": "everyone"},
+            headers=self.headers,
+        )
+        self.assertEqual(r_ok.status_code, 200, r_ok.get_data(as_text=True))
+        self.assertTrue(r_ok.get_json()["success"], r_ok.get_json())
+        r_edit_timed = self.client.put(
+            f"/api/shop/item/{perm_id}",
+            json={"duration_hours": 24},
+            headers=self.headers,
+        )
+        self.assertEqual(r_edit_timed.status_code, 400, r_edit_timed.get_data(as_text=True))
+
+        # Direct DB bypass into leveling_shop_rewards is skipped by _definitions / record_crossing
+        execute(
+            "INSERT INTO leveling_shop_rewards (guild_id, level, item_id, quantity, audience) "
+            "VALUES (?, 10, ?, 1, 'everyone')",
+            (GUILD, timed_id),
+        )
+        import aiosqlite
+        from database import DB_PATH
+        async with aiosqlite.connect(DB_PATH) as db:
+            await level_claims.ensure_tables(db)
+            await level_claims.record_crossing(
+                db, GUILD, USER, 0, 50_000, source="message"
+            )
+            await db.commit()
+        claim_refs = [
+            r[0] for r in rows(
+                "SELECT reward_ref FROM level_reward_claims WHERE guild_id=? AND user_id=?",
+                (GUILD, USER),
+            )
+        ]
+        self.assertNotIn(str(timed_id), claim_refs)
+
+        # Even a stale/forged level_reward_claims row fails closed in claim_available!
+        forged_payload = json.dumps({
+            "item_id": timed_id,
+            "name": "24h Level Crest",
+            "type": "custom",
+            "quantity": 1,
+            "metadata": {"role_id": SNOWFLAKE_ROLE, "product_id": timed_id},
+        })
+        forged_cid = execute(
+            "INSERT INTO level_reward_claims "
+            "(guild_id, user_id, reward_level, track, reward_ref, status, payload_json, created_at) "
+            "VALUES (?, ?, 10, 'shop', ?, 'pending', ?, '2026-01-01T00:00:00+00:00')",
+            (GUILD, USER, str(timed_id), forged_payload),
+        )
+        claimed = await level_claims.claim_available(
+            GUILD, USER, member=self.member, bot=self.bot, claim_ids=[forged_cid]
+        )
+        self.assertEqual(claimed["fulfilled"], [])
+        self.assertEqual(claimed["failed"], [forged_cid])
+        self.assertEqual(
+            rows(
+                "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='24h Level Crest'",
+                (GUILD, USER),
+            ),
+            [],
+        )
+
+    # ── 8. Level-Drop & XP-Reset Reversal of Role-Linked Items ─────────────
+
+    async def test_08_level_drop_and_xp_reset_reconcile_role_linked_items_and_provenance(self):
+        import aiosqlite
+        from database import DB_PATH
+        from utils import level_claims, level_test_reset
+
+        async def _award_to_11(op_tag: str = "admin-grant-1"):
+            target_xp = 50_000
+            execute(
+                "INSERT OR REPLACE INTO levels (guild_id, user_id, xp, level) VALUES (?, ?, ?, 15)",
+                (GUILD, USER, target_xp),
+            )
+            async with aiosqlite.connect(DB_PATH) as db:
+                await level_claims.ensure_tables(db)
+                await level_claims.record_crossing(
+                    db, GUILD, USER, 0, target_xp,
+                    source="setlevel", operation_id=op_tag,
+                )
+                await db.commit()
+
+        self.guild.fetch_member = AsyncMock(return_value=self.member)
+        crest_pid = _seed_shop_item("Order Seal", kind="custom", price=200, role_id=SNOWFLAKE_ROLE)
+        shadow_pid = _seed_shop_item("Shadow Seal", kind="custom", price=200, role_id=ALT_ROLE)
+
+        # 8a. Claimed + equipped Role-Linked Item reversed by level-drop (including retry after failed remove_roles)
+        execute(
+            "INSERT INTO leveling_shop_rewards (guild_id, level, item_id, quantity, audience) "
+            "VALUES (?, 10, ?, 1, 'everyone')",
+            (GUILD, crest_pid),
+        )
+        await _award_to_11()
+        await level_claims.claim_available(GUILD, USER, member=self.member, bot=self.bot)
+        eq = await equip_engine.equip_role(self.bot, GUILD, USER, "Order Seal")
+        self.assertTrue(eq["success"], eq)
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+
+        orig_remove = self.member.remove_roles
+        self.member.remove_roles = AsyncMock(side_effect=RuntimeError("Discord 503"))
+        execute("UPDATE levels SET xp=0, level=1 WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        drop_fail = await level_claims.reconcile_level_drop(
+            GUILD, USER, 1, operation_id="corr-fail-1", member=self.member, reason="admin setlevel"
+        )
+        self.assertEqual(len(drop_fail["kept_unresolved"]), 1)
+        self.assertIsNotNone(await equip_engine.get_equipped(GUILD, USER))
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+
+        # Retry once Discord recovers removes role, clears slot, and deletes claim!
+        self.member.remove_roles = orig_remove
+        drop_ok = await level_claims.reconcile_level_drop(
+            GUILD, USER, 1, operation_id="corr-retry-1", member=self.member, reason="admin setlevel retry"
+        )
+        self.assertEqual(drop_ok["kept_unresolved"], [])
+        self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
+        self.assertEqual(set(worn_ids(self.member)), set())
+        self.assertEqual(
+            rows("SELECT id FROM level_reward_claims WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+            [],
+        )
+
+        # 8b. Same scenario reversed via /xp_reset (reset_member apply=True)
+        await _award_to_11()
+        await level_claims.claim_available(GUILD, USER, member=self.member, bot=self.bot)
+        await equip_engine.equip_role(self.bot, GUILD, USER, "Order Seal")
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+        reset_rep = await level_test_reset.reset_member(
+            GUILD, USER, apply=True, allow_production=True,
+            member=self.member, reason="qa reset"
+        )
+        self.assertTrue(reset_rep["applied"], reset_rep)
+        self.assertTrue(reset_rep["new_game_complete"], reset_rep)
+        self.assertEqual(set(worn_ids(self.member)), set())
+        self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
+
+        # 8b2. Same scenario reversed via /xp_rollback (rollback_xp_operation apply=True)
+        rb_grant_op = "admin-grant-rb"
+        await _award_to_11(rb_grant_op)
+        execute(
+            "INSERT INTO xp_mutations "
+            "(operation_id, guild_id, user_id, source, actor_id, reason, "
+            "xp_before, xp_after, level_before, level_after, delta, created_at) "
+            "VALUES (?, ?, ?, 'setlevel', ?, 'test grant', 0, 50000, 0, 15, 50000, '2026-01-01T00:00:00+00:00')",
+            (rb_grant_op, GUILD, USER, 999999999),
+        )
+        await level_claims.claim_available(GUILD, USER, member=self.member, bot=self.bot)
+        await equip_engine.equip_role(self.bot, GUILD, USER, "Order Seal")
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+        rb_res = await level_test_reset.rollback_xp_operation(
+            GUILD, USER, operation_id=rb_grant_op, apply=True, member=self.member,
+        )
+        self.assertTrue(rb_res["applied"], rb_res)
+        self.assertEqual(rb_res["role_failures"], [])
+        self.assertEqual(set(worn_ids(self.member)), set())
+        self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
+        self.assertEqual(await inventory.get_inventory(GUILD, USER), [])
+
+        # 8c. Level Role reward + Role-Linked Shop Item granting SAME role in one correction cycle
+        # Test BOTH orderings: (Role @ L8, Item @ L10) AND (Role @ L12, Item @ L10)
+        for role_lvl in (8, 12):
+            execute("DELETE FROM leveling_rewards WHERE guild_id=?", (GUILD,))
+            execute(
+                "INSERT INTO leveling_rewards (guild_id, level, role_id, audience) VALUES (?, ?, ?, 'everyone')",
+                (GUILD, role_lvl, SNOWFLAKE_ROLE),
+            )
+            await _award_to_11()
+            await level_claims.claim_available(GUILD, USER, member=self.member, bot=self.bot)
+            await equip_engine.equip_role(self.bot, GUILD, USER, "Order Seal")
+            self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+            execute("UPDATE levels SET xp=0, level=1 WHERE guild_id=? AND user_id=?", (GUILD, USER))
+            same_role_drop = await level_claims.reconcile_level_drop(
+                GUILD, USER, 1, operation_id=f"corr-same-{role_lvl}",
+                member=self.member, reason=f"drop both role@{role_lvl} and item@10"
+            )
+            self.assertEqual(same_role_drop["kept_unresolved"], [])
+            self.assertEqual(set(worn_ids(self.member)), set())
+            self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
+            self.assertEqual(
+                rows("SELECT id FROM level_reward_claims WHERE guild_id=? AND user_id=?", (GUILD, USER)),
+                [],
+            )
+        execute("DELETE FROM leveling_rewards WHERE guild_id=?", (GUILD,))
+
+        # 8d. Mixed Leveling Reward + Shop purchase ownership (stack source == 'level_claim')
+        await _award_to_11()
+        await level_claims.claim_available(GUILD, USER, member=self.member, bot=self.bot)
+        await self._buy(crest_pid)  # Merges into stack whose source remains 'level_claim'!
+        src_row = rows(
+            "SELECT quantity, source FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='Order Seal'",
+            (GUILD, USER),
+        )[0]
+        self.assertEqual(src_row, (2, "level_claim"))
+        await equip_engine.equip_role(self.bot, GUILD, USER, "Order Seal")
+        execute("UPDATE levels SET xp=0, level=1 WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        mixed_drop = await level_claims.reconcile_level_drop(
+            GUILD, USER, 1, operation_id="corr-mixed-1",
+            member=self.member, reason="drop level claims but keep shop unit"
+        )
+        self.assertEqual(mixed_drop["kept_unresolved"], [])
+        # Purchased unit (quantity == 1), equipped slot, and Discord role MUST remain intact!
+        self.assertEqual(
+            rows(
+                "SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name='Order Seal'",
+                (GUILD, USER),
+            ),
+            [(1,)],
+        )
+        self.assertEqual((await equip_engine.get_equipped(GUILD, USER))["item_name"], "Order Seal")
+        self.assertEqual(set(worn_ids(self.member)), {SNOWFLAKE_ROLE})
+        await equip_engine.unequip_role(self.bot, GUILD, USER, "Order Seal")
+        await inventory.remove_item(GUILD, USER, "Order Seal", 1)
+        execute("DELETE FROM leveling_rewards WHERE guild_id=?", (GUILD,))
+        execute("DELETE FROM leveling_shop_rewards WHERE guild_id=?", (GUILD,))
+
+        # 8e. Independently held Discord role (role_added == 0) is NEVER removed by level-drop
+        execute(
+            "INSERT INTO leveling_shop_rewards (guild_id, level, item_id, quantity, audience) "
+            "VALUES (?, 10, ?, 1, 'everyone')",
+            (GUILD, shadow_pid),
+        )
+        self.member.roles = [self.roles[ALT_ROLE]]
+        await _award_to_11()
+        await level_claims.claim_available(GUILD, USER, member=self.member, bot=self.bot)
+        await equip_engine.equip_role(self.bot, GUILD, USER, "Shadow Seal")
+        self.assertEqual((await equip_engine.get_equipped(GUILD, USER))["role_added"], 0)
+        execute("UPDATE levels SET xp=0, level=1 WHERE guild_id=? AND user_id=?", (GUILD, USER))
+        indep_drop = await level_claims.reconcile_level_drop(
+            GUILD, USER, 1, operation_id="corr-indep-1",
+            member=self.member, reason="drop shadow seal"
+        )
+        self.assertEqual(indep_drop["kept_unresolved"], [])
+        self.assertIsNone(await equip_engine.get_equipped(GUILD, USER))
+        self.assertEqual(set(worn_ids(self.member)), {ALT_ROLE})
+
+    # ── 9. Role ID Consistency Across Definitions & Timed Holdings ─────────
+
+    async def test_09_role_id_consistency_across_definitions_and_timed_holdings(self):
+        # Create timed Role-Linked Item bound to SNOWFLAKE_ROLE and grant an active timed holding
+        r_create = self.client.post(
+            "/api/shop/item",
+            json={
+                "name": "Timed Sovereign Crest",
+                "type": "custom",
+                "price": 300,
+                "duration_hours": 24,
+                "role_id": str(SNOWFLAKE_ROLE),
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_create.status_code, 200, r_create.get_data(as_text=True))
+        timed_id = rows(
+            "SELECT id FROM shop_items WHERE guild_id=? AND name='Timed Sovereign Crest'",
+            (GUILD,),
+        )[0][0]
+
+        # POST same-name item with a DIFFERENT role_id conflicts with existing definition
+        r_def_conflict = self.client.post(
+            "/api/shop/item",
+            json={
+                "name": "Timed Sovereign Crest",
+                "type": "custom",
+                "price": 500,
+                "role_id": str(ALT_ROLE),
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_def_conflict.status_code, 400, r_def_conflict.get_data(as_text=True))
+
+        # Same-name product with the SAME 64-bit role_id IS compatible and allowed!
+        r_same_role = self.client.post(
+            "/api/shop/item",
+            json={
+                "name": "Timed Sovereign Crest",
+                "type": "custom",
+                "price": 900,
+                "role_id": str(SNOWFLAKE_ROLE),
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_same_role.status_code, 200, r_same_role.get_data(as_text=True))
+        sibling_id = rows(
+            "SELECT id FROM shop_items WHERE guild_id=? AND name='Timed Sovereign Crest' AND id != ?",
+            (GUILD, timed_id),
+        )[0][0]
+        self.client.delete(f"/api/shop/item/{sibling_id}", headers=self.headers)
+
+        # Grant active timed holding for Timed Sovereign Crest
+        await self._buy(timed_id)
+
+        # PUT changing R1 -> R2 while active timed holding exists -> rejected (400)!
+        r_put_r2 = self.client.put(
+            f"/api/shop/item/{timed_id}",
+            json={"role_id": str(ALT_ROLE)},
+            headers=self.headers,
+        )
+        self.assertEqual(r_put_r2.status_code, 400, r_put_r2.get_data(as_text=True))
+
+        # PUT clearing role_id (R1 -> None) while active timed holding exists -> rejected (400)!
+        r_put_clear = self.client.put(
+            f"/api/shop/item/{timed_id}",
+            json={"role_id": None},
+            headers=self.headers,
+        )
+        self.assertEqual(r_put_clear.status_code, 400, r_put_clear.get_data(as_text=True))
+
+        # Delete the shop listing so only member holdings remain: POST with R2 STILL conflicts
+        # against both active timed_holdings AND owned permanent inventory_items!
+        self.client.delete(f"/api/shop/item/{timed_id}", headers=self.headers)
+        r_post_timed_conflict = self.client.post(
+            "/api/shop/item",
+            json={
+                "name": "Timed Sovereign Crest",
+                "type": "custom",
+                "price": 300,
+                "role_id": str(ALT_ROLE),
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_post_timed_conflict.status_code, 400, r_post_timed_conflict.get_data(as_text=True))
+
+        await inventory.give_item(
+            GUILD, USER, "PermOwnedCrest", 1, item_type="shop_custom",
+            metadata={"role_id": SNOWFLAKE_ROLE},
+        )
+        r_post_perm_conflict = self.client.post(
+            "/api/shop/item",
+            json={
+                "name": "PermOwnedCrest",
+                "type": "custom",
+                "price": 300,
+                "role_id": str(ALT_ROLE),
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_post_perm_conflict.status_code, 400, r_post_perm_conflict.get_data(as_text=True))
+
+        # Once the timed holding is EXPIRED, it no longer blocks creating/editing to ALT_ROLE or plain!
+        past = (timed_ownership.utcnow() - timedelta(hours=2)).isoformat()
+        execute("UPDATE timed_holdings SET expires_at=?", (past,))
+        r_after_exp = self.client.post(
+            "/api/shop/item",
+            json={
+                "name": "Timed Sovereign Crest",
+                "type": "custom",
+                "price": 300,
+                "role_id": str(ALT_ROLE),
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(r_after_exp.status_code, 200, r_after_exp.get_data(as_text=True))
+        new_id = rows(
+            "SELECT id, role_id FROM shop_items WHERE guild_id=? AND name='Timed Sovereign Crest'",
+            (GUILD,),
+        )[0]
+        self.assertEqual(new_id[1], ALT_ROLE)
+        r_clear_after_exp = self.client.put(
+            f"/api/shop/item/{new_id[0]}",
+            json={"role_id": None},
+            headers=self.headers,
+        )
+        self.assertEqual(r_clear_after_exp.status_code, 200, r_clear_after_exp.get_data(as_text=True))
+
+    # ── 10. Pre-Charge Role Assignability Validation ───────────────────────
+
+    async def test_10_pre_charge_role_assignability_validation(self):
+        everyone_role = _add_role_to_env(self.guild, self.roles, GUILD, "@everyone", position=0)
+        everyone_role.is_default = lambda: True
+        managed_role = _add_role_to_env(self.guild, self.roles, 990001, "BotManaged", position=3)
+        managed_role.managed = True
+        high_role = _add_role_to_env(self.guild, self.roles, 990002, "AboveBot", position=999)
+
+        cases = [
+            ("MissingRoleCrest", 999999999999999999, 24),
+            ("EveryoneCrest", GUILD, None),
+            ("ManagedCrest", 990001, 24),
+            ("HierarchyCrest", 990002, 24),
+        ]
+        for cname, crid, cdur in cases:
+            pid = execute(
+                "INSERT INTO shop_items "
+                "(guild_id, name, type, price, role_id, duration_hours, max_stock, current_stock, enabled) "
+                "VALUES (?, ?, 'custom', 500, ?, ?, 3, 3, 1)",
+                (GUILD, cname, crid, cdur),
+            )
+            msg = await self._buy(pid)
+            self.assertTrue(msg.get("ephemeral"), f"Expected ephemeral refusal for {cname}")
+            # Zero coins deducted, zero stock consumed, zero purchase ops, zero holdings/items!
+            bal = rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0]
+            stock = rows("SELECT current_stock FROM shop_items WHERE id=?", (pid,))[0][0]
+            self.assertEqual(bal, 100_000, f"{cname} charged buyer!")
+            self.assertEqual(stock, 3, f"{cname} consumed stock!")
+
+        # Also fail closed when bot lacks Manage Roles permission!
+        valid_pid = execute(
+            "INSERT INTO shop_items "
+            "(guild_id, name, type, price, role_id, duration_hours, max_stock, current_stock, enabled) "
+            "VALUES (?, 'NoPermCrest', 'custom', 500, ?, 24, 3, 3, 1)",
+            (GUILD, SNOWFLAKE_ROLE),
+        )
+        self.guild.me.guild_permissions.manage_roles = False
+        self.guild.me.guild_permissions.administrator = False
+        await self._buy(valid_pid)
+        # Also fail closed when role verification hits a Discord error on an uncached role!
+        self.guild.me.guild_permissions.manage_roles = True
+        orig_get_role = self.guild.get_role
+        self.guild.get_role = lambda _rid: None
+        self.guild.fetch_roles = AsyncMock(side_effect=RuntimeError("Discord 503"))
+        await self._buy(valid_pid)
+        self.guild.get_role = orig_get_role
+        delattr(self.guild, "fetch_roles")
+
+        self.assertEqual(
+            rows("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (GUILD, USER))[0][0],
+            100_000,
+        )
+        self.assertEqual(
+            rows("SELECT current_stock FROM shop_items WHERE id=?", (valid_pid,))[0][0],
+            3,
+        )
+        self.assertEqual(rows("SELECT COUNT(*) FROM shop_purchase_operations"), [(0,)])
+        self.assertEqual(rows("SELECT COUNT(*) FROM timed_holdings"), [(0,)])
+        self.assertEqual(rows("SELECT COUNT(*) FROM inventory_items"), [(0,)])
 
 
 if __name__ == "__main__":

@@ -589,6 +589,42 @@ async def _process_purchase(interaction: discord.Interaction,
         if block_reason:
             await interaction.response.send_message(block_reason, ephemeral=True)
             return
+    elif itype in ("custom", "shop_custom", "item") and role_id not in (None, "", 0):
+        linked_rid = int(role_id)
+        guild_obj = interaction.guild
+        if guild_obj is None and getattr(interaction, "client", None) is not None:
+            guild_obj = interaction.client.get_guild(int(guild_id))
+        if guild_obj is None:
+            await interaction.response.send_message(
+                "Could not verify this item's role on the server right now. "
+                "Nothing was charged — please try again.",
+                ephemeral=True,
+            )
+            return
+        from utils.timed_ownership import _resolve_guild_role
+        from utils.permissions import check_bot_role_position
+        role_obj, role_deleted, role_lookup_err = await _resolve_guild_role(
+            guild_obj, linked_rid,
+        )
+        if role_lookup_err is not None:
+            await interaction.response.send_message(
+                "Could not verify this item's role with Discord right now. "
+                "Nothing was charged — please try again.",
+                ephemeral=True,
+            )
+            return
+        if role_deleted or role_obj is None:
+            await interaction.response.send_message(
+                f"**{name}**'s linked role no longer exists or cannot be "
+                f"verified on this server. Nothing was charged — ask an admin "
+                f"to check its setup.",
+                ephemeral=True,
+            )
+            return
+        can_assign, warning = check_bot_role_position(guild_obj, role_obj)
+        if not can_assign:
+            await interaction.response.send_message(warning, ephemeral=True)
+            return
 
     # ── Purchase saga ───────────────────────────────────────────────────
     # What used to happen: stock was claimed, money was deducted and a
