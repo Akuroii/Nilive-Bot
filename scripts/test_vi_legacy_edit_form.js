@@ -107,6 +107,15 @@ ITEMS[5] = {
 ITEMS[6] = Object.assign({}, ITEMS[5], {
   id: 6, name: 'Old II 12h', prestige_tier: 2, duration_hours: 12 });
 
+// Role-linked Item (custom) carrying a full 64-bit Discord snowflake string.
+ITEMS[7] = {
+  id: 7, name: 'Guild Crest', type: 'custom', prestige_tier: null, price: 400,
+  price_diamonds: null, role_id: '1309876543210987654', duration_hours: 24,
+  max_stock: 10, current_stock: 8, required_level: 0, required_role_id: null,
+  xp_boost_multiplier: null, icon_url: null, rarity: 'rare', featured: 0,
+  description: 'Crest', category_id: null, option_of_id: null,
+};
+
 function fresh() {
   const els = new Map();
   const el = (id) => {
@@ -812,6 +821,30 @@ async function scenario(name, fn) {
     await t.ctx.addItem();
     assert.equal(t.lastWrite().method, 'PUT');
     assert.equal(t.lastWrite().body.duration_hours, 96);
+  });
+
+  await scenario('30. Edit: Role-linked Item (custom) prefills, clears, and preserves 64-bit role_id', async () => {
+    const t = fresh();
+    await t.ctx.editItem(7);
+    assert.equal(t.el('item-role-field').style.display, 'block');
+    assert.equal(t.el('item-role-label').textContent, 'Role ID (optional)');
+    assert.equal(t.el('item-role').value, '1309876543210987654');
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().method, 'PUT');
+    assert.equal(t.lastWrite().url, '/api/shop/item/7');
+    assert.equal(t.lastWrite().body.role_id, '1309876543210987654');
+    assert.equal(t.lastWrite().body.duration_hours, 24);
+
+    // Clearing the optional Role ID on PUT sends null.
+    t.el('item-role').value = '';
+    await t.ctx.addItem();
+    assert.equal(t.lastWrite().body.role_id, null);
+
+    // Cancel resets #item-role and keeps Role ID field visible on default 'custom'.
+    t.ctx.cancelShopEdit();
+    assert.equal(t.el('item-type').value, 'custom');
+    assert.equal(t.el('item-role').value, '');
+    assert.equal(t.el('item-role-field').style.display, 'block');
   });
 
   // ── report ────────────────────────────────────────────────────────────

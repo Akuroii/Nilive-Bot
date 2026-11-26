@@ -30,7 +30,7 @@ import json
 import aiosqlite
 
 from database import DB_PATH
-from utils.inventory import FUNCTIONAL_ITEM_TYPES
+from utils.inventory import FUNCTIONAL_ITEM_TYPES, _metadata_role_id
 
 KIND_POTION = "potion"
 KIND_TITLE = "title"
@@ -49,20 +49,38 @@ class ItemNameConflict(ValueError):
     """A definition would share its name with a different kind of item."""
 
 
-def kind_of_inventory_type(item_type: str | None) -> str:
+def _normalize_positive_role_id(role_id) -> int | None:
+    if role_id in (None, "", 0, "0") or isinstance(role_id, bool):
+        return None
+    try:
+        parsed = int(role_id)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def kind_of_inventory_type(item_type: str | None, *,
+                           metadata=None, role_id=None) -> str:
     item_type = item_type or "custom"
     if item_type in ("role", "temp_role"):
         return KIND_ROLE
     if item_type in FUNCTIONAL_ITEM_TYPES:
         return item_type
+    resolved_rid = _normalize_positive_role_id(role_id)
+    if resolved_rid is None:
+        resolved_rid = _metadata_role_id(metadata)
+    if resolved_rid is not None:
+        return KIND_ROLE
     return KIND_PLAIN
 
 
-def kind_of_shop_type(shop_type: str | None) -> str | None:
+def kind_of_shop_type(shop_type: str | None, *, role_id=None) -> str | None:
     """Kind a Shop product becomes in the Inventory; None if it never does.
 
     Prestige is a rank and a legacy xp_boost is applied at purchase: neither
-    is ever an Inventory item, so neither can collide.
+    is ever an Inventory item, so neither can collide. A `custom` Shop Item
+    with a `role_id` becomes an equippable role item (`KIND_ROLE`); without a
+    `role_id` it is a plain collectible (`KIND_PLAIN`).
     """
     shop_type = (shop_type or "").strip().lower()
     if shop_type in ("prestige", "xp_boost"):
@@ -71,6 +89,8 @@ def kind_of_shop_type(shop_type: str | None) -> str | None:
         return KIND_ROLE
     if shop_type in (KIND_POTION, KIND_TITLE):
         return shop_type
+    if shop_type in ("custom", "shop_custom", "item") and _normalize_positive_role_id(role_id) is not None:
+        return KIND_ROLE
     return KIND_PLAIN
 
 
@@ -122,12 +142,12 @@ async def _definitions(db, guild_id: int, name: str, *,
     """(kind, where) for everything in this guild already using `name`."""
     found: list[tuple[str, str]] = []
 
-    for item_id, shop_type in await _query(
-            db, "SELECT id, type FROM shop_items WHERE guild_id=? AND name=?",
+    for item_id, shop_type, shop_role_id in await _query(
+            db, "SELECT id, type, role_id FROM shop_items WHERE guild_id=? AND name=?",
             (guild_id, name)):
         if exclude_shop_item_id is not None and int(item_id) == int(exclude_shop_item_id):
             continue
-        kind = kind_of_shop_type(shop_type)
+        kind = kind_of_shop_type(shop_type, role_id=shop_role_id)
         if kind:
             found.append((kind, f"Shop product #{item_id}"))
 
@@ -164,12 +184,29 @@ async def _definitions(db, guild_id: int, name: str, *,
 
     # What members already hold is the collision itself, whatever defined it
     # (a renamed or deleted listing, an old event).
-    for item_type, members in await _query(
-            db, "SELECT item_type, COUNT(*) FROM inventory_items "
-                "WHERE guild_id=? AND item_name=? AND quantity > 0 "
-                "GROUP BY item_type", (guild_id, name)):
-        found.append((kind_of_inventory_type(item_type),
-                      f"an item {members} member(s) already own"))
+    owned_by_kind: dict[str, int] = {}
+    for item_type, metadata in await _query(
+            db, "SELECT item_type, metadata FROM inventory_items "
+                "WHERE guild_id=? AND item_name=? AND quantity > 0",
+            (guild_id, name)):
+        k = kind_of_inventory_type(item_type, metadata=metadata)
+        owned_by_kind[k] = owned_by_kind.get(k, 0) + 1
+    for k, members in owned_by_kind.items():
+        found.append((k, f"an item {members} member(s) already own"))
+
+    from utils.timed_ownership import RETENTION_ITEM_TYPE, is_expired
+    timed_by_kind: dict[str, int] = {}
+    for item_type, h_role_id, h_meta, expires_at in await _query(
+            db, "SELECT item_type, role_id, metadata, expires_at "
+                "FROM timed_holdings WHERE guild_id=? AND item_name=? "
+                "AND item_type != ?",
+            (guild_id, name, RETENTION_ITEM_TYPE)):
+        if is_expired(expires_at):
+            continue
+        k = kind_of_inventory_type(item_type, metadata=h_meta, role_id=h_role_id)
+        timed_by_kind[k] = timed_by_kind.get(k, 0) + 1
+    for k, holdings in timed_by_kind.items():
+        found.append((k, f"an active timed item ({holdings} holding(s))"))
     return found
 
 

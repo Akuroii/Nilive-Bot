@@ -13,8 +13,27 @@ class ItemTypeConflict(Exception):
 
 # Types whose Inventory behaviour depends on the type itself: a potion is
 # activated, a title or role is equipped. Every other type (custom,
-# shop_custom, event_drop, ...) is a plain collectible with no action.
+# shop_custom, event_drop, ...) is a plain collectible unless its metadata
+# links a Discord role_id.
 FUNCTIONAL_ITEM_TYPES = frozenset({"potion", "title", "role", "temp_role"})
+
+
+def _metadata_role_id(meta) -> int | None:
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta) if meta else {}
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("role_id")
+    if raw in (None, "", 0, "0") or isinstance(raw, bool):
+        return None
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 async def _consume_provenance(db, guild_id: int, user_id: int, item_name: str,
@@ -76,24 +95,48 @@ async def give_item(guild_id: int, user_id: int, item_name: str,
         raise ValueError("quantity must be positive")
     meta_json = json.dumps(metadata) if metadata else None
 
+    caller_typed = item_type is not None
+    incoming_role_id = _metadata_role_id(metadata)
+
     async def apply(connection):
         nonlocal item_type
         cursor = await connection.execute("""
-            SELECT item_type, quantity FROM inventory_items
+            SELECT item_type, quantity, metadata FROM inventory_items
             WHERE guild_id=? AND user_id=? AND item_name=?
         """, (guild_id, user_id, item_name))
         existing = await cursor.fetchone()
         stored_type = (existing[0] or "custom") if existing else None
         owned = bool(existing) and int(existing[1] or 0) > 0
-        if item_type is None:
+        stored_role_id = _metadata_role_id(existing[2]) if existing else None
+        if not caller_typed:
             item_type = stored_type or "custom"
-        elif owned and item_type != stored_type:
-            if (item_type in FUNCTIONAL_ITEM_TYPES
-                    or stored_type in FUNCTIONAL_ITEM_TYPES):
+        elif owned:
+            if item_type != stored_type and (
+                item_type in FUNCTIONAL_ITEM_TYPES
+                or stored_type in FUNCTIONAL_ITEM_TYPES
+            ):
+                raise ItemTypeConflict(
+                    "An unrelated item already uses this name")
+            stored_is_role = (
+                stored_type in ("role", "temp_role") or stored_role_id is not None
+            )
+            incoming_is_role = (
+                item_type in ("role", "temp_role") or incoming_role_id is not None
+            )
+            if stored_is_role != incoming_is_role:
+                raise ItemTypeConflict(
+                    "An unrelated item already uses this name")
+            if (
+                stored_is_role
+                and incoming_is_role
+                and stored_role_id != incoming_role_id
+            ):
                 raise ItemTypeConflict(
                     "An unrelated item already uses this name")
             item_type = stored_type
-        if existing and not owned and item_type != stored_type:
+        if existing and not owned and caller_typed and (
+            item_type != stored_type or stored_role_id != incoming_role_id
+        ):
             # Reusing an emptied row for a different kind of item: the old
             # kind's metadata (a potion's effect, a role id) must not carry
             # over to it.

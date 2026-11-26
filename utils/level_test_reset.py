@@ -443,12 +443,39 @@ async def inspect_member(guild_id: int, user_id: int, *,
                     continue
                 if _th_is_expired(expires_at):
                     continue
+                if str(item_type or "") not in ("role", "temp_role"):
+                    eq_cur = await db.execute(
+                        "SELECT entry_key, role_id FROM equipped_roles "
+                        "WHERE guild_id=? AND user_id=?",
+                        (guild_id, user_id),
+                    )
+                    eq_row = await eq_cur.fetchone()
+                    if not eq_row or eq_row[0] != f"h:{int(holding_id)}" or int(eq_row[1] or 0) != int(role_id):
+                        continue
                 report["role_other_grants"].setdefault(
                     str(int(role_id)), set()
                 ).add(f"timed holding '{item_name}' (#{holding_id})")
         except aiosqlite.OperationalError as exc:
             if "no such table: timed_holdings" not in str(exc).lower():
                 raise
+        try:
+            from utils.timed_ownership import _equipped_role_linked_item_entitlement
+            eq_cur = await db.execute(
+                "SELECT role_id FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            )
+            eq_row = await eq_cur.fetchone()
+            if eq_row and eq_row[0]:
+                eq_rid = int(eq_row[0])
+                eq_reason = await _equipped_role_linked_item_entitlement(
+                    db, guild_id, user_id, eq_rid,
+                )
+                if eq_reason and CLAIM_SOURCE not in eq_reason:
+                    report["role_other_grants"].setdefault(
+                        str(eq_rid), set()
+                    ).add(eq_reason)
+        except aiosqlite.OperationalError:
+            pass
         report["role_other_grants"] = {
             k: sorted(v) for k, v in report["role_other_grants"].items()}
 

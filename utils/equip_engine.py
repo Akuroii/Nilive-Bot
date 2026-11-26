@@ -6,6 +6,7 @@ import discord
 import aiosqlite
 from database import DB_PATH
 from utils.permissions import check_bot_role_position
+from utils.timed_ownership import is_role_equippable_entry
 
 # ═══════════════════════════════════════════════════════════════════════
 # EQUIP ENGINE — Rank Card foundation (pass 1: schema + backend)
@@ -282,16 +283,16 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                         db,
                         "SELECT item_name, item_type, source, metadata FROM inventory_items "
                         "WHERE id=? AND guild_id=? AND user_id=? AND quantity > 0 "
-                        "AND item_type IN ('role', 'temp_role')",
+                        "AND item_type NOT IN ('potion', 'title')",
                         (iid, gid, uid),
                     )
                     for i_name, i_type, i_src, i_meta in i_rows:
                         matched, meta_pid = _meta_matches_role(i_meta)
                         if matched:
-                            if i_type == "role":
-                                has_perm_inventory = True
-                            else:
+                            if i_type == "temp_role":
                                 has_temp_inventory = True
+                            else:
+                                has_perm_inventory = True
                             if i_name:
                                 item_names.add(str(i_name))
                             if i_src:
@@ -303,16 +304,16 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                     db,
                     "SELECT item_name, item_type, source, metadata FROM inventory_items "
                     "WHERE guild_id=? AND user_id=? AND quantity > 0 "
-                    "AND item_type IN ('role', 'temp_role')",
+                    "AND item_type NOT IN ('potion', 'title')",
                     (gid, uid),
                 )
                 for i_name, i_type, i_src, i_meta in i_rows:
                     matched, meta_pid = _meta_matches_role(i_meta)
                     if matched:
-                        if i_type == "role":
-                            has_perm_inventory = True
-                        else:
+                        if i_type == "temp_role":
                             has_temp_inventory = True
+                        else:
+                            has_perm_inventory = True
                         if i_name:
                             item_names.add(str(i_name))
                         if i_src:
@@ -431,7 +432,7 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                     f"SELECT 1 FROM purchase_history ph "
                     f"JOIN shop_items si ON si.id = ph.item_id AND si.guild_id = ph.guild_id "
                     f"WHERE ph.guild_id=? AND ph.user_id=? "
-                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') "
+                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color', 'custom') "
                     f"{shop_perm_clause}"
                     f"AND NOT EXISTS ("
                     f"    SELECT 1 FROM shop_purchase_operations rop "
@@ -451,7 +452,7 @@ async def reconcile_legacy_slot_observation(guild_id: int, user_id: int,
                     f"JOIN shop_items si ON si.id = op.item_id AND si.guild_id = op.guild_id "
                     f"WHERE op.guild_id=? AND op.user_id=? AND op.status='delivered' "
                     f"AND COALESCE(op.refunded, 0)=0 "
-                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color') "
+                    f"AND si.role_id=? AND si.type IN ('role', 'temp_role', 'color', 'custom') "
                     f"{shop_perm_clause}LIMIT 1",
                     (gid, uid, role_id),
                 )
@@ -1188,7 +1189,7 @@ async def equip_role(bot: discord.Client, guild_id: int, user_id: int,
                     "error": (f"You own more than one **{item_name}** — "
                               f"open the entry you want from `/inventory`.")}
         return {"success": False, "error": f"You don't own **{item_name}**."}
-    if owned["item_type"] not in ("role", "temp_role"):
+    if not is_role_equippable_entry(owned):
         return {"success": False,
                 "error": f"**{item_name}** isn't an equippable role item."}
 
@@ -1527,7 +1528,7 @@ async def unequip_role(bot: discord.Client, guild_id: int, user_id: int,
             target_role_id = int((target.get("metadata") or {}).get("role_id") or target.get("role_id") or 0) if target else 0
         except (TypeError, ValueError):
             target_role_id = 0
-        if (not target or target.get("item_type") not in ("role", "temp_role") or
+        if (not target or not is_role_equippable_entry(target) or
                 (item_name is not None and target.get("item_name") != item_name) or
                 target_role_id != int(current["role_id"])):
             return {"success": False, "error": "That role entry is no longer owned."}

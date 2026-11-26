@@ -313,6 +313,8 @@ async def _definitions(db: aiosqlite.Connection, guild_id: int,
             from utils.potion_engine import EFFECT_XP_BOOST, build_metadata
             raw["metadata"] = build_metadata(
                 EFFECT_XP_BOOST, float(multiplier), int(duration_hours))
+        elif item_type == "custom" and role_id:
+            raw["metadata"] = {"role_id": int(role_id), "product_id": int(item_id)}
         identities[(int(level), TRACK_SHOP, prefix + str(int(item_id)))] = raw
     cursor = await db.execute("""
         SELECT level, multiplier, duration_hours
@@ -1838,7 +1840,10 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
     # raises `EntitlementCheckError` so a transient lock or DB failure is never
     # mistaken for "no timed holding exists".
     try:
-        from utils.timed_ownership import RETENTION_ITEM_TYPE
+        from utils.timed_ownership import (
+            RETENTION_ITEM_TYPE,
+            _equipped_role_linked_item_entitlement,
+        )
         cursor = await db.execute(
             "SELECT id, item_type, item_name, expires_at FROM timed_holdings "
             "WHERE guild_id=? AND user_id=? AND role_id=?",
@@ -1856,7 +1861,24 @@ async def _role_granted_elsewhere(db, guild_id: int, user_id: int, role_id: int,
             return f"a pending role-retention obligation (#{holding_id})"
         if _th_is_expired(expires_at):
             continue
+        if str(item_type or "") not in ("role", "temp_role"):
+            continue
         return f"timed holding '{item_name}' (#{holding_id})"
+    try:
+        eq_reason = await _equipped_role_linked_item_entitlement(
+            db, guild_id, user_id, int(role_id),
+        )
+        if eq_reason and not (exclude_item and f"({exclude_item}," in eq_reason):
+            return eq_reason
+    except aiosqlite.OperationalError as exc:
+        if "no such table: equipped_roles" not in str(exc).lower():
+            raise EntitlementCheckError(
+                f"Failed to verify equipped_roles entitlement: {exc}"
+            ) from exc
+    except Exception as exc:
+        raise EntitlementCheckError(
+            f"Failed to verify equipped_roles entitlement: {exc}"
+        ) from exc
     return None
 
 

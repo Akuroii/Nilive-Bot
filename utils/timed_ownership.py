@@ -782,6 +782,131 @@ def role_id_of(item: dict) -> int | None:
         return None
 
 
+def is_role_equippable_entry(entry: dict | None) -> bool:
+    """Whether an inventory / timed-holding entry belongs to the role equip slot."""
+    if not isinstance(entry, dict):
+        return False
+    itype = entry.get("item_type")
+    if itype in ROLE_ITEM_TYPES:
+        return True
+    if itype in ("potion", "title", RETENTION_ITEM_TYPE):
+        return False
+    return role_id_of(entry) is not None
+
+
+def is_manual_equip_holding(holding: dict | None) -> bool:
+    """True for timed holdings whose role is manually equipped from `/inventory`
+    (such as a role-linked Item), as opposed to immediate-grant timed roles."""
+    if not isinstance(holding, dict):
+        return False
+    itype = holding.get("item_type")
+    return (
+        itype not in ROLE_ITEM_TYPES
+        and itype != RETENTION_ITEM_TYPE
+        and role_id_of(holding) is not None
+    )
+
+
+async def _equipped_role_linked_item_entitlement(
+    db,
+    guild_id: int,
+    user_id: int,
+    rid: int,
+    *,
+    exclude_entry_key: str | None = None,
+    now=None,
+) -> str | None:
+    """If the member currently has a live role-linked Item equipped for `rid`,
+    return its human-readable entitlement reason; otherwise None.
+
+    An unequipped role-linked Item does NOT hold the Discord role on the member,
+    so only an actively equipped, still-owned entry retains the role when
+    another grant expires or is revoked.
+    """
+    cursor = await db.execute(
+        "SELECT item_name, role_id, entry_key FROM equipped_roles "
+        "WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id),
+    )
+    eq = await cursor.fetchone()
+    if not eq:
+        return None
+    eq_name, eq_role_id, eq_key = eq
+    try:
+        if int(eq_role_id) != int(rid):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if exclude_entry_key and eq_key and str(eq_key) == str(exclude_entry_key):
+        return None
+    now = now or utcnow()
+    if isinstance(eq_key, str) and eq_key.startswith("h:"):
+        hid = entry_key_id(eq_key)
+        if hid is None:
+            return None
+        if exclude_entry_key and str(entry_key_id(exclude_entry_key)) == str(hid):
+            return None
+        cursor = await db.execute(
+            "SELECT item_name, item_type, source, role_id, metadata, expires_at "
+            "FROM timed_holdings WHERE id=? AND guild_id=? AND user_id=? "
+            "AND item_type != ?",
+            (int(hid), guild_id, user_id, RETENTION_ITEM_TYPE),
+        )
+        h_row = await cursor.fetchone()
+        if not h_row:
+            return None
+        h_name, h_type, h_src, h_rid, h_meta, h_exp = h_row
+        if h_type in ROLE_ITEM_TYPES or is_expired(h_exp, now=now):
+            return None
+        resolved_rid = h_rid
+        if resolved_rid in (None, ""):
+            try:
+                resolved_rid = (json.loads(h_meta) if h_meta else {}).get("role_id")
+            except (TypeError, ValueError):
+                resolved_rid = None
+        try:
+            if int(resolved_rid) != int(rid):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return f"equipped timed role item ({h_name}, {h_src})"
+
+    if isinstance(eq_key, str) and eq_key.startswith("i:"):
+        iid = entry_key_id(eq_key)
+        if iid is None:
+            return None
+        cursor = await db.execute(
+            "SELECT item_name, item_type, source, metadata, quantity "
+            "FROM inventory_items WHERE id=? AND guild_id=? AND user_id=?",
+            (int(iid), guild_id, user_id),
+        )
+        inv_row = await cursor.fetchone()
+    elif not eq_key:
+        cursor = await db.execute(
+            "SELECT item_name, item_type, source, metadata, quantity "
+            "FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name=?",
+            (guild_id, user_id, str(eq_name or "")),
+        )
+        inv_row = await cursor.fetchone()
+    else:
+        inv_row = None
+
+    if not inv_row:
+        return None
+    i_name, i_type, i_src, i_meta, i_qty = inv_row
+    if not i_qty or int(i_qty) <= 0:
+        return None
+    if i_type in (*ROLE_ITEM_TYPES, "potion", "title"):
+        return None
+    try:
+        meta_obj = json.loads(i_meta) if i_meta else {}
+        if int((meta_obj or {}).get("role_id")) != int(rid):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return f"equipped role item ({i_name}, {i_src})"
+
+
 # ── Entitlements: may this role be removed? ─────────────────────────────
 
 
@@ -1285,9 +1410,9 @@ async def role_still_entitled(guild_id: int, user_id: int, role_id: int,
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                f"SELECT id, expires_at FROM timed_holdings "
-                f"WHERE guild_id=? AND user_id=? AND role_id=? "
-                f"AND item_type != '{RETENTION_ITEM_TYPE}'",
+                "SELECT id, expires_at FROM timed_holdings "
+                "WHERE guild_id=? AND user_id=? AND role_id=? "
+                "AND item_type IN ('role','temp_role')",
                 (guild_id, user_id, rid))
             for holding_id, expires_at in await cursor.fetchall():
                 if exclude_entry_key and str(entry_key_id(exclude_entry_key)) == str(holding_id):
@@ -1341,6 +1466,13 @@ async def role_still_entitled(guild_id: int, user_id: int, role_id: int,
                 if meta_exp not in (None, "") and is_expired(meta_exp, now=now):
                     continue
                 return f"owned role item ({item_name}, {source})"
+
+            equipped_item_reason = await _equipped_role_linked_item_entitlement(
+                db, guild_id, user_id, rid,
+                exclude_entry_key=exclude_entry_key, now=now,
+            )
+            if equipped_item_reason:
+                return equipped_item_reason
     except EntitlementCheckError:
         raise
     except Exception as exc:
@@ -1390,9 +1522,9 @@ async def shop_role_still_owned(guild_id: int, user_id: int,
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute(
-                f"SELECT expires_at FROM timed_holdings"
-                f" WHERE guild_id=? AND user_id=? AND role_id=? "
-                f"AND item_type != '{RETENTION_ITEM_TYPE}'",
+                "SELECT expires_at FROM timed_holdings"
+                " WHERE guild_id=? AND user_id=? AND role_id=?"
+                " AND item_type IN ('role','temp_role')",
                 (guild_id, user_id, rid))
             for (expires_at,) in await cursor.fetchall():
                 if not is_expired(expires_at, now=now):
@@ -1440,6 +1572,12 @@ async def shop_role_still_owned(guild_id: int, user_id: int,
                 if meta_exp not in (None, "") and is_expired(meta_exp, now=now):
                     continue
                 return f"an owned role item ({item_name})"
+
+            equipped_item_reason = await _equipped_role_linked_item_entitlement(
+                db, guild_id, user_id, rid, now=now,
+            )
+            if equipped_item_reason:
+                return f"an {equipped_item_reason}"
     except EntitlementCheckError:
         raise
     except Exception as exc:
@@ -2385,6 +2523,59 @@ async def expire_one(bot, holding: dict) -> dict:
                                    guild_id=guild_id, user_id=user_id)
         return {"status": "removed", "reason": "no role"}
 
+    meta = holding.get("metadata") if isinstance(holding.get("metadata"), dict) else {}
+    is_late_rollback = bool(
+        meta.get("late_rollback") or holding.get("source") == "shop_late_rollback"
+    )
+    linked_op_id = meta.get("op_id")
+    if is_late_rollback or linked_op_id:
+        if not await _late_rollback_prereqs_complete(linked_op_id, entry_key=entry_key):
+            err = "inventory or equip rollback pending"
+            return {"status": "kept", "reason": err, "error": err}
+
+    if is_manual_equip_holding(holding) and not is_late_rollback:
+        from utils.equip_engine import (
+            get_equipped, observed_role_state, reconcile_legacy_slot_observation,
+        )
+        try:
+            slot = await get_equipped(guild_id, user_id)
+        except Exception as exc:
+            err = f"equip lookup failed: {exc}"
+            return {"status": "kept", "reason": err, "error": err}
+        if not slot or str(slot.get("entry_key") or "") != str(entry_key):
+            await delete_timed_holding(entry_key, event_type=removal_event,
+                                       guild_id=guild_id, user_id=user_id)
+            if linked_op_id:
+                await _complete_linked_rollback(linked_op_id)
+            return {"status": "removed", "reason": "unequipped manual role item"}
+        obs = observed_role_state(slot)
+        if (obs is None and slot.get("role_added") is None
+                and slot.get("role_added_role_id") is None):
+            try:
+                obs = await reconcile_legacy_slot_observation(
+                    guild_id, user_id, slot)
+            except Exception as exc:
+                err = f"equip observation reconciliation failed: {exc}"
+                return {"status": "kept", "reason": err, "error": err}
+        if obs is False:
+            try:
+                await clear_equip_for_holding(
+                    guild_id, user_id, entry_key, role_id=role_id)
+            except Exception as exc:
+                err = f"equip bookkeeping cleanup failed: {exc}"
+                return {"status": "kept", "reason": err, "error": err}
+            await delete_timed_holding(entry_key, event_type=removal_event,
+                                       guild_id=guild_id, user_id=user_id)
+            if linked_op_id:
+                await _complete_linked_rollback(linked_op_id)
+            return {
+                "status": "removed",
+                "reason": "role retained (already present before equip)",
+            }
+        if obs is None:
+            err = "equip role observation unverified"
+            return {"status": "kept", "reason": err, "error": err}
+
     guild = bot.get_guild(guild_id) if bot is not None else None
     if guild is None:
         # Cannot see the guild: keep the record so the removal is retried once
@@ -2403,15 +2594,6 @@ async def expire_one(bot, holding: dict) -> dict:
             else:
                 err = f"member lookup failed: {exc}"
                 return {"status": "kept", "reason": err, "error": err}
-    meta = holding.get("metadata") if isinstance(holding.get("metadata"), dict) else {}
-    is_late_rollback = bool(
-        meta.get("late_rollback") or holding.get("source") == "shop_late_rollback"
-    )
-    linked_op_id = meta.get("op_id")
-    if is_late_rollback or linked_op_id:
-        if not await _late_rollback_prereqs_complete(linked_op_id, entry_key=entry_key):
-            err = "inventory or equip rollback pending"
-            return {"status": "kept", "reason": err, "error": err}
     if (member is not None and not is_late_rollback
             and not _member_has_role_id(member, int(role_id))):
         # The gateway cache only says what Discord last echoed. An "absent"
@@ -2997,7 +3179,7 @@ def _serialised_role_grant(func):
     """
     @functools.wraps(func)
     async def wrapper(bot, guild_id, user_id, *args, **kwargs):
-        if kwargs.get("role_id") is None:
+        if kwargs.get("role_id") is None or not kwargs.get("assign_role_now", True):
             return await func(bot, guild_id, user_id, *args, **kwargs)
         from utils.equip_engine import slot_lock
         async with slot_lock(guild_id, user_id):
@@ -3014,6 +3196,7 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
                               product_id: int | None = None,
                               category: str | None = None,
                               role_id: int | None = None,
+                              assign_role_now: bool = True,
                               op_id: str | None = None,
                               reason: str = "Timed reward") -> dict:
     """Deliver a timed holding. Call ONLY after the charge/reservation is safe.
@@ -3052,7 +3235,7 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
     role_added = False
     guild = None
     member = None
-    if role_id is not None:
+    if role_id is not None and assign_role_now:
         if bot is None:
             return {"success": False, "entry_key": None, "expires_at": None,
                     "error": "Bot is offline; the role cannot be granted.",
@@ -3110,7 +3293,7 @@ async def grant_timed_product(bot, guild_id: int, user_id: int, *,
     equipped = None
     equip_warning = None
     equip_uncertain = False
-    if role_id is not None:
+    if role_id is not None and assign_role_now:
         # Perform the guarded single-slot Discord role swap and update
         # `equipped_roles`, keeping ownership of any previously worn role and
         # never stripping a role the member still holds through a non-slot
@@ -5039,6 +5222,16 @@ async def compensate_late_delivery(
                 f"Timed holding {late_key} does not exist; cannot verify the "
                 f"timed grant was rolled back"
             )
+        if role_id is not None and not role_added_by_delivery:
+            from utils.equip_engine import get_equipped, observed_role_state
+            current_slot = await get_equipped(guild_id, user_id)
+            if (
+                current_slot
+                and str(current_slot.get("entry_key") or "") == str(late_key)
+                and observed_role_state(current_slot) is True
+            ):
+                role_added_by_delivery = True
+                spec["role_added"] = True
         # A descriptor's `role_id` is an integer the rollback hands straight to
         # `remove_roles`; it is not evidence of which role this holding entitled.
         # The holding row records the granted `role_id` at creation time, so a
@@ -6125,12 +6318,50 @@ async def compensate_late_delivery(
                                     "AND user_id=? AND item_name=? AND quantity>0)",
                                     (guild_id, user_id, item_name,
                                      guild_id, user_id, item_name))
+                            needs_discord_role_remove = False
+                            if role_id is not None:
+                                inv_cur = await rb_db.execute(
+                                    "SELECT id, quantity FROM inventory_items "
+                                    "WHERE guild_id=? AND user_id=? AND item_name=?",
+                                    (guild_id, user_id, item_name),
+                                )
+                                rem_inv = await inv_cur.fetchone()
+                                still_owned = bool(rem_inv and int(rem_inv[1] or 0) > 0)
+                                if not still_owned:
+                                    eq_cur = await rb_db.execute(
+                                        "SELECT item_name, role_id, entry_key, "
+                                        "role_added, role_added_role_id "
+                                        "FROM equipped_roles WHERE guild_id=? AND user_id=?",
+                                        (guild_id, user_id),
+                                    )
+                                    eq_row = await eq_cur.fetchone()
+                                    inv_key = f"i:{rem_inv[0]}" if rem_inv else None
+                                    if eq_row is not None and (
+                                        (inv_key and eq_row[2] == inv_key)
+                                        or (not eq_row[2] and eq_row[0] == item_name)
+                                    ):
+                                        from utils.equip_engine import observed_role_state
+                                        slot_dict = {
+                                            "item_name": eq_row[0],
+                                            "role_id": eq_row[1],
+                                            "entry_key": eq_row[2],
+                                            "role_added": eq_row[3],
+                                            "role_added_role_id": eq_row[4],
+                                        }
+                                        if observed_role_state(slot_dict) is True:
+                                            needs_discord_role_remove = True
+                                            spec["role_added"] = True
+                                        await rb_db.execute(
+                                            "DELETE FROM equipped_roles "
+                                            "WHERE guild_id=? AND user_id=?",
+                                            (guild_id, user_id),
+                                        )
                             spec.pop("refusal_code", None)
                             spec["grant_id"] = verdict.get("grant_id")
 
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True
-                            spec["role_reconciled"] = True
+                            spec["role_reconciled"] = not needs_discord_role_remove
                             spec.pop("_durable_unpersisted", None)
                             clean_spec = {
                                 k: v for k, v in spec.items() if not str(k).startswith("_")
@@ -6168,7 +6399,8 @@ async def compensate_late_delivery(
                             in_tx = False
                             spec["inventory_rolled_back"] = True
                             spec["equip_reconciled"] = True
-                            spec["role_reconciled"] = True
+                            if not (role_id is not None and bool(spec.get("role_added"))):
+                                spec["role_reconciled"] = True
                     except Exception:
                         if in_tx:
                             try:
@@ -6184,7 +6416,49 @@ async def compensate_late_delivery(
                     f"Item inventory rollback failed for {item_name!r}: {exc}"
                 )
         spec["equip_reconciled"] = True
-        spec["role_reconciled"] = True
+        if role_id is not None and bool(spec.get("role_added")) and not spec.get("role_reconciled"):
+            from utils.equip_engine import slot_lock
+            async with slot_lock(guild_id, user_id):
+                guild = bot.get_guild(guild_id) if bot is not None else None
+                if guild is None:
+                    return await _persist_incomplete(
+                        f"Guild {guild_id} unavailable to remove role {role_id}"
+                    )
+                member = guild.get_member(user_id) if hasattr(guild, "get_member") else None
+                member_departed = False
+                if member is None and callable(getattr(guild, "fetch_member", None)):
+                    try:
+                        member = await guild.fetch_member(user_id)
+                    except Exception as exc:
+                        if _is_member_not_found(exc):
+                            member_departed = True
+                        else:
+                            return await _persist_incomplete(
+                                f"Member lookup failed for {user_id}: {exc}"
+                            )
+                try:
+                    still_reason = await role_still_entitled(
+                        guild_id, user_id, int(role_id), bot=bot, member=member,
+                    )
+                except Exception as exc:
+                    return await _persist_incomplete(
+                        f"Entitlement check failed for role {role_id}: {exc}"
+                    )
+                if not still_reason and not member_departed and member is not None:
+                    role_obj = guild.get_role(int(role_id)) if hasattr(guild, "get_role") else None
+                    if role_obj is not None and _member_has_role_id(member, int(role_id)):
+                        try:
+                            await member.remove_roles(
+                                role_obj,
+                                reason=f"Late shop purchase rollback ({op_id}): {item_name}",
+                            )
+                        except Exception as exc:
+                            return await _persist_incomplete(
+                                f"Discord remove_roles failed for role {role_id}: {exc}"
+                            )
+                spec["role_reconciled"] = True
+        else:
+            spec["role_reconciled"] = True
     else:
         # Defensive: every supported `internal_type` is handled by an explicit
         # branch above (and `_validate_delivery_rollback_spec` refuses a

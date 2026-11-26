@@ -78,10 +78,10 @@
                 </div>
             </div>
             <div class="form-group" id="item-role-field">
-                <label class="form-label">Role ID</label>
+                <label class="form-label" id="item-role-label">Role ID</label>
                 <input class="form-input" id="item-role"
                        placeholder="Right click role → Copy ID">
-                <div class="form-hint">The role a Color product grants</div>
+                <div class="form-hint" id="item-role-hint">The role a Color product grants</div>
             </div>
             <div class="form-group" id="item-boost-mult-field" style="display:none;">
                 <label class="form-label" id="item-boost-mult-label">XP Multiplier</label>
@@ -475,6 +475,8 @@ function applyFreeVIFields() {
 function toggleItemTypeFields() {
     const type = document.getElementById('item-type').value;
     const roleField  = document.getElementById('item-role-field');
+    const roleLabel  = document.getElementById('item-role-label');
+    const roleHint   = document.getElementById('item-role-hint');
     const boostField = document.getElementById('item-boost-mult-field');
     const prestigeField = document.getElementById('item-prestige-tier-field');
     const durLabel   = document.getElementById('item-duration-label');
@@ -508,13 +510,21 @@ function toggleItemTypeFields() {
         // Color is a buyable colour role: cogs/shop.py grants it as a permanent
         // role at duration 0, or a timed role when positive. It needs a role ID.
         roleField.style.display = 'block';
+        if (roleLabel) roleLabel.textContent = 'Role ID';
+        if (roleHint) roleHint.textContent = 'The role a Color product grants';
         boostField.style.display = 'none';
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
         durHint.textContent = '0 = permanent colour role; positive = temporary (timed role).';
     } else if (type === 'custom') {
-        // Item: an inventory product (no role). 0 = permanent, positive = timed.
-        roleField.style.display = 'none';
+        // Item: a plain collectible when Role ID is blank, or a role-linked
+        // inventory item that buyers manually equip/unequip from /inventory.
+        roleField.style.display = 'block';
+        if (roleLabel) roleLabel.textContent = 'Role ID (optional)';
+        if (roleHint) {
+            roleHint.textContent =
+                'Leave blank for a collectible Item, or set a Role ID so buyers can manually equip/unequip that role from /inventory.';
+        }
         boostField.style.display = 'none';
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
@@ -522,6 +532,8 @@ function toggleItemTypeFields() {
     } else {
         // Legacy role / temp_role — still editable, no longer offered for new.
         roleField.style.display = 'block';
+        if (roleLabel) roleLabel.textContent = 'Role ID';
+        if (roleHint) roleHint.textContent = '';
         boostField.style.display = 'none';
         prestigeField.style.display = 'none';
         durLabel.textContent = 'Duration hours (0 = permanent)';
@@ -574,18 +586,26 @@ async function addItem() {
     const durationValue = (durationRaw === '' || durationRaw === '0')
         ? null
         : (/^\d+$/.test(durationRaw) ? parseInt(durationRaw, 10) : NaN);
-    // Role-granting types carry a role_id; everything else sends null. Color
-    // joins role/temp_role here (cogs/shop.py grants a Colour as a role), and
-    // Item (custom) correctly drops the role field it never actually used.
-    const needsRole = ['color', 'role', 'temp_role'].indexOf(type) !== -1;
+    // Role-capable types carry a role_id; everything else sends null. Color
+    // and legacy role/temp_role require a role_id (validated server-side),
+    // while Item (custom) accepts an optional role_id as a 64-bit string.
+    const acceptsRole = ['color', 'role', 'temp_role', 'custom'].indexOf(type) !== -1;
+    const roleRaw = acceptsRole
+        ? String(document.getElementById('item-role').value || '').trim()
+        : '';
+    if (acceptsRole && roleRaw !== '' && !/^\d+$/.test(roleRaw)) {
+        showToast('Role ID must be a Discord numeric ID', 'danger');
+        return;
+    }
+    const roleValue = (acceptsRole && roleRaw !== '' && roleRaw !== '0')
+        ? roleRaw
+        : null;
     const payload = {
         name:          document.getElementById('item-name').value,
         price:         priceValue === null ? 0 : priceValue,
         price_diamonds: priceDiamonds > 0 ? priceDiamonds : null,
         type:          type,
-        role_id:       needsRole
-                       ? (document.getElementById('item-role').value || null)
-                       : null,
+        role_id:       roleValue,
         prestige_tier: type === 'prestige' && prestigeTier
                        ? parseInt(prestigeTier.value) : null,
         xp_boost_multiplier: (type === 'xp_boost' || type === 'potion') && boostMult > 1

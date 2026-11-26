@@ -478,7 +478,10 @@ def add_shop_item():
     # cannot coexist with a different kind of item of the same name.
     from utils.item_identity import find_name_conflict, kind_of_shop_type
     name_conflict = run_async(find_name_conflict(
-        guild_id, data["name"], kind_of_shop_type(data.get("type", "role"))))
+        guild_id,
+        data["name"],
+        kind_of_shop_type(data.get("type", "role"), role_id=data.get("role_id")),
+    ))
     if name_conflict:
         return jsonify({"success": False, "error": name_conflict}), 400
 
@@ -791,15 +794,45 @@ def update_shop_item(item_id: int):
     price_val = data["price"]
     price_diamonds_val = data["price_diamonds"]
     new_name = data["name"]
-    # Only a RENAME can introduce a name clash (the type is immutable), so a
-    # listing that already clashes stays editable in every other field.
-    if new_name != existing["name"]:
-        from utils.item_identity import find_name_conflict, kind_of_shop_type
+    # A rename or a kind change (e.g. adding or clearing role_id on an Item)
+    # can introduce a name clash; an unchanged listing that already clashes
+    # stays editable in every other field.
+    from utils.item_identity import find_name_conflict, kind_of_shop_type
+    old_kind = kind_of_shop_type(existing["type"], role_id=existing.get("role_id"))
+    new_kind = kind_of_shop_type(existing["type"], role_id=data.get("role_id"))
+    if new_name != existing["name"] or new_kind != old_kind:
         name_conflict = run_async(find_name_conflict(
-            guild_id, new_name, kind_of_shop_type(existing["type"]),
+            guild_id, new_name, new_kind,
             exclude_shop_item_id=item_id))
         if name_conflict:
             return jsonify({"success": False, "error": name_conflict}), 400
+    if (
+        existing["type"] == "custom"
+        and data.get("role_id")
+        and (data.get("role_id") != existing.get("role_id") or new_name != existing["name"])
+    ):
+        from utils.inventory import _metadata_role_id
+
+        async def _owned_role_id_mismatch():
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur = await db.execute(
+                    "SELECT metadata FROM inventory_items "
+                    "WHERE guild_id=? AND item_name=? AND quantity > 0",
+                    (guild_id, new_name),
+                )
+                for (raw_meta,) in await cur.fetchall():
+                    if _metadata_role_id(raw_meta) != int(data["role_id"]):
+                        return True
+            return False
+
+        if run_async(_owned_role_id_mismatch()):
+            return jsonify({
+                "success": False,
+                "error": (
+                    f"“{new_name}” is already owned by member(s) with a different "
+                    f"role setup. Use a different name instead of changing its Role ID."
+                ),
+            }), 400
     from utils.item_catalog import is_valid_rarity, upsert_catalog_entry
     rarity = (data.get("rarity") or "common").strip().lower()
     if not is_valid_rarity(rarity):
