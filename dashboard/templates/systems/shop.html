@@ -464,8 +464,10 @@ function applyFreeVIFields() {
         document.getElementById('item-duration').value =
             String(editingLegacyViDuration);
     }
+    // Prestige I is Free (typed 0 allowed); II-V need a positive Coin price.
     document.getElementById('item-price').min =
-        document.getElementById('item-type').value === 'prestige' && !free ? '1' : '0';
+        document.getElementById('item-type').value === 'prestige' && !free
+        && document.getElementById('item-prestige-tier').value !== '1' ? '1' : '0';
     if (free) {
         document.getElementById('item-duration-label').textContent = 'VI: Free while boosting';
         document.getElementById('item-duration-hint').textContent =
@@ -691,7 +693,15 @@ async function addItem() {
             showToast(`Prestige is purchased with ${currencyNameFor('coins')} — do not set a ${currencyNameFor('diamonds')} price`, 'danger');
             return;
         }
-        if (!freeVI && (!payload.price || payload.price <= 0)) {
+        // Prestige I is Free: a TYPED 0 is accepted, but a blank/invalid field
+        // is not (priceValue stays null) so an unfinished form never creates
+        // a Free tier. II-V still require a positive price.
+        if (!freeVI && payload.prestige_tier === 1) {
+            if (priceValue === null) {
+                showToast(`Prestige I needs a ${currencyNameFor('coins')} price — type 0 for Free`, 'danger');
+                return;
+            }
+        } else if (!freeVI && (!payload.price || payload.price <= 0)) {
             showToast(`Prestige items need a ${currencyNameFor('coins')} price (the minimum ${currencyNameFor('coins')} required)`, 'danger');
             return;
         }
