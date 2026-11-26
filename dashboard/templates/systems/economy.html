@@ -85,7 +85,7 @@
                             </div>
                         </td>
                         <td>{{ user_identity(d[0], u.get('display_name'), u.get('username'), u.get('avatar_url')) }}</td>
-                        <td><strong style="color:var(--accent);">{{ currency_icon(currency.diamonds.emoji) }} {{ "{:,}".format(d[1]) }}</strong></td>
+                        <td><strong style="color:var(--accent-text);">{{ currency_icon(currency.diamonds.emoji) }} {{ "{:,}".format(d[1]) }}</strong></td>
                     </tr>
                     {% else %}
                     <tr><td colspan="3" class="empty">No {{ currency.diamonds.name }} held yet</td></tr>
