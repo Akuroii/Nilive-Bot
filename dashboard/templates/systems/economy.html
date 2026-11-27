@@ -266,7 +266,7 @@
                         data-value="" data-allowed-channel-types="0,5">
                     <option value=""></option>
                 </select>
-                <div class="form-hint">Optional for Public or Both; only text and announcement channels are listed. The bot needs send permission. If unset or unavailable, no alternate channel is used and the reward still succeeds.</div>
+                <div class="form-hint">Required for Public or Both (optional for Private); only text and announcement channels are listed. The bot needs send permission. A public receipt with no channel is never posted, so the setting cannot be saved until one is chosen.</div>
             </div>
             <div style="grid-column:1/-1;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
                 <button type="button" class="btn btn-primary" id="streak-settings-save"
@@ -515,6 +515,19 @@ function updateStreakChannelMode() {
     document.getElementById('streak-receipt-channel').disabled = (mode === 'private');
 }
 
+// LAUNCH FIX (config loss): mirrors the MVP page's guard. True only after a
+// SUCCESSFUL settings read this page load. While it is false a save is refused,
+// because the form would otherwise submit values that were never loaded and
+// overwrite the server's real streak configuration with defaults.
+let streakSettingsLoaded = false;
+
+function setStreakSaveEnabled(enabled) {
+    const btn = document.getElementById('streak-settings-save');
+    if (!btn) return;
+    btn.disabled = !enabled;
+    btn.title = enabled ? '' : 'Settings could not be loaded — saving is disabled.';
+}
+
 function setSavedStreakSettings(settings) {
     const scopeNotes = [];
     scopeNotes.push(settings.reward_table
@@ -542,10 +555,25 @@ function setSavedStreakSettings(settings) {
 }
 
 async function loadStreakSettings() {
+    const status = document.getElementById('streak-settings-status');
     try {
         const res = await fetch('/api/economy/streak-settings');
-        const data = await res.json();
-        if (!res.ok || !data.success) throw new Error(data.error || 'Could not load Streak settings');
+        let data = null;
+        try {
+            data = await res.json();
+        } catch (parseError) {
+            throw new Error('The server returned an unreadable settings response (' + res.status + ').');
+        }
+        if (!res.ok || !data || !data.success) {
+            throw new Error((data && data.error) || ('Could not load Streak settings (' + res.status + ').'));
+        }
+        // A response must actually carry the settings object. A 200 with no
+        // settings is a failed read, not an empty configuration.
+        if (!data.settings || typeof data.settings !== 'object') {
+            throw new Error('The settings response did not contain a configuration.');
+        }
+        streakSettingsLoaded = true;
+        setStreakSaveEnabled(true);
         setSavedStreakSettings(data.settings);
         const picker = document.getElementById('streak-receipt-channel');
         if (window.NeroSelect && !window.NeroSelect.isReady(picker)) {
@@ -567,13 +595,30 @@ async function loadStreakSettings() {
             }
         }
     } catch (error) {
-        document.getElementById('streak-settings-status').textContent = error.message;
+        // Fail closed: the form keeps whatever is on screen (no defaults are
+        // substituted) and saving stays disabled until a read succeeds.
+        streakSettingsLoaded = false;
+        setStreakSaveEnabled(false);
+        if (status) {
+            status.textContent = error.message
+                + ' Saving is disabled so the stored configuration cannot be overwritten by values that were never loaded. Reload the page to try again.';
+            status.dataset.state = 'error';
+        }
     }
 }
 
 async function saveStreakSettings(btn) {
     const form = document.getElementById('streak-settings-form');
     const status = document.getElementById('streak-settings-status');
+    if (!streakSettingsLoaded) {
+        // Belt-and-braces: the button is disabled, but a keyboard or
+        // programmatic invocation must not write values that were never loaded.
+        if (status) {
+            status.textContent = 'Settings were not loaded — reload the page before saving.';
+            status.dataset.state = 'error';
+        }
+        return;
+    }
     if (!form.reportValidity()) return;
     const rewards = _readStreakRewards();
     if (rewards.error) {
@@ -612,6 +657,7 @@ STREAK_REWARD_IDS.forEach(id => {
 document.getElementById('streak-receipt-mode').addEventListener('change', updateStreakChannelMode);
 document.getElementById('streak-receipt-channel').dataset.value = '';
 updateStreakPreview();
+setStreakSaveEnabled(false);   // stay disabled until a read succeeds
 loadStreakSettings();
 
 })();

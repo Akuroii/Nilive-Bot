@@ -13,7 +13,10 @@ Read-only: scratch DB, no Discord network, no role changes.
 import asyncio, os, sys, tempfile, traceback
 from datetime import datetime, timedelta, timezone
 
-REPO="/home/user/Nilive-Bot"; sys.path.insert(0,REPO)
+# Repository root discovered from this file's location, so the test runs from
+# any checkout or working directory rather than one machine's layout.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO)
 os.environ.update({"DATABASE_PATH": os.path.join(tempfile.mkdtemp(prefix="mvp-"),"s.db"),
     "NERO_ENVIRONMENT":"production","OWNER_ID":"704453350384730237",
     "SECRET_KEY":"m"*48,"DISCORD_TOKEN":"M"*24+"."+"A"*6+"."+"B"*27})

@@ -41,10 +41,17 @@ COGS = [
     "cogs.afk", "cogs.shop_publication_sync", "cogs.command_aliases",
 ]
 
-# The 13 loops that were dead before this hotfix (12 wait_until_ready sites,
-# leveling contributed two). Every one must now be alive.
+# Baseline inventory, MEASURED at 36ac86f rather than inferred: with all 33
+# extensions loaded and the client still pre-login, exactly 17 tasks.Loop objects
+# exist and 13 of them were already dead. 12 awaited wait_until_ready() inside
+# before_loop (Leveling contributed two); CommandAliases._alias_sync_check is the
+# 13th -- its before_loop did too, and it starts from cog_load() rather than
+# __init__(), which is why an earlier inventory missed it. Verified by probing
+# its task at baseline: died with RuntimeError("Client has not been properly
+# initialised") before the first tick.
 PREVIOUSLY_DEAD = {
     "Backup.daily_backup",
+    "CommandAliases._alias_sync_check",
     "Events.scheduled_events_task",
     "Leveling.blacklist_role_task",
     "Leveling.leaderboard_reset_task",
@@ -56,6 +63,15 @@ PREVIOUSLY_DEAD = {
     "TagMissions.mission_poll",
     "Twitch.check_streams",
     "YouTube.check_videos",
+}
+
+# The 4 loops that were already healthy at baseline (they never awaited
+# wait_until_ready() in before_loop, or had no blocking precondition).
+PREVIOUSLY_HEALTHY = {
+    "ActivityEngine.voice_tick_task",
+    "Health.heartbeat",
+    "Minigames.spawn_request_loop",
+    "ReactionRoles.expiry_check",
 }
 
 results: list[tuple[str, bool, str]] = []
@@ -124,6 +140,16 @@ async def main() -> int:
     check("no loop died at startup", not snapshot["dead"],
           str([d["loop"] for d in snapshot["dead"]]))
     check("loop count is stable (17 expected)", len(loops) == 17, f"{len(loops)} loops")
+    check("dead+healthy inventory accounts for every discovered loop",
+          set(loops) == (PREVIOUSLY_DEAD | PREVIOUSLY_HEALTHY),
+          f"missing={sorted(set(loops) - (PREVIOUSLY_DEAD | PREVIOUSLY_HEALTHY))} "
+          f"extra={sorted((PREVIOUSLY_DEAD | PREVIOUSLY_HEALTHY) - set(loops))}")
+    check("previously-dead and previously-healthy sets are disjoint",
+          not (PREVIOUSLY_DEAD & PREVIOUSLY_HEALTHY),
+          str(PREVIOUSLY_DEAD & PREVIOUSLY_HEALTHY))
+    check("baseline inventory is 13 dead + 4 healthy = 17",
+          len(PREVIOUSLY_DEAD) == 13 and len(PREVIOUSLY_HEALTHY) == 4,
+          f"dead={len(PREVIOUSLY_DEAD)} healthy={len(PREVIOUSLY_HEALTHY)}")
 
     for label in sorted(PREVIOUSLY_DEAD):
         loop = loops.get(label)
@@ -139,6 +165,12 @@ async def main() -> int:
         check(f"previously-dead now alive: {label}",
               loop.is_running() and task is not None and not task.done() and exc is None,
               f"is_running={loop.is_running()} task_done={task.done() if task else None} exc={exc}")
+
+    for label in sorted(PREVIOUSLY_HEALTHY):
+        loop = loops.get(label)
+        check(f"previously-healthy still alive (no regression): {label}",
+              loop is not None and loop.is_running(),
+              "loop not found" if loop is None else f"is_running={loop.is_running()}")
 
     # ---- 4. before_loop must actually unblock once ready ----
     # Flip readiness the way Discord does, then confirm a loop body runs.
