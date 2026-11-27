@@ -20,6 +20,7 @@ import aiosqlite
 
 from database import DB_PATH
 from utils.reward_engine import give_reward, RewardError
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 
 class TagMissionConfirmView(discord.ui.View):
@@ -86,7 +87,7 @@ class TagMissions(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        self.mission_poll.start()
+        ensure_started(self.mission_poll)
 
     def cog_unload(self):
         self.mission_poll.cancel()
@@ -113,7 +114,10 @@ class TagMissions(commands.Cog):
 
     @mission_poll.before_loop
     async def _before_poll(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     async def _start_due_missions(self):
         async with aiosqlite.connect(DB_PATH) as db:

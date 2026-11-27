@@ -89,6 +89,7 @@ print(
 
 # Both entrypoint modes and aliases use one shared state; never import main for it.
 from utils.command_gating import _command_cooldowns, _prune_command_cooldowns
+from utils.task_lifecycle import report_task_health
 
 
 class NeroCommandTree(discord.app_commands.CommandTree):
@@ -240,6 +241,12 @@ async def load_cogs():
 
 @bot.event
 async def on_ready():
+    # IDEMPOTENT: discord.py dispatches on_ready again after a reconnect that
+    # required a fresh IDENTIFY (parse_ready -> _delay_ready -> 'ready'), not
+    # only on the first boot. tasks.Loop.start() raises RuntimeError("Task is
+    # already launched and is not completed.") on a second call, so the old
+    # unconditional rotate_status.start() here raised on every such reconnect
+    # and aborted the remainder of this handler.
     print(f"Nero is online as {bot.user}")
     bot.gateway_coordinator.gateway_transport_verified = True
     try:
@@ -253,7 +260,12 @@ async def on_ready():
     await bot.gateway_coordinator.reconcile_guilds()
     await guild_allowlist.run_sweep(bot)
     await backfill_guild_owners()
-    rotate_status.start()
+    # Idempotent start: safe on the first READY and on every reconnect READY.
+    if not rotate_status.is_running():
+        rotate_status.start()
+    # Surface a dead background loop instead of letting it tick zero times in
+    # silence for the life of the process (the pre-launch failure mode).
+    report_task_health(bot)
 
 
 @bot.event

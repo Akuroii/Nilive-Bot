@@ -17,6 +17,7 @@ from utils.timed_ownership import (
     live_purchase_scope, begin_delivery_intent, settle_delivery_intent,
     mark_provenance_tracked, INTENT_KIND_DISCORD_ROLE, INTENT_ABSENT, INTENT_RECORDED,
 )
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 SHOP_COLOR = 0x7c5cbf
 
@@ -1739,7 +1740,7 @@ async def _show_shop_page(interaction: discord.Interaction, page: int, *,
 class Shop(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.temp_role_cleanup.start()
+        ensure_started(self.temp_role_cleanup)
 
     def cog_unload(self):
         self.temp_role_cleanup.cancel()
@@ -1917,7 +1918,10 @@ class Shop(commands.Cog):
 
     @temp_role_cleanup.before_loop
     async def before_cleanup(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     # ─── SHOP COMMAND ───────────────────────────────────
     @app_commands.command(name="shop",

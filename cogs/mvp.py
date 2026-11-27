@@ -8,6 +8,7 @@ from database import DB_PATH
 from utils.formatters import snapshot_user, now_iso
 from utils.timezone import get_cairo_daily_key
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 
 async def get_mvp_config(guild_id: int) -> dict:
@@ -29,7 +30,7 @@ async def get_mvp_config(guild_id: int) -> dict:
 class MVP(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.mvp_cycle_task.start()
+        ensure_started(self.mvp_cycle_task)
 
     def cog_unload(self):
         self.mvp_cycle_task.cancel()
@@ -133,7 +134,10 @@ class MVP(commands.Cog):
 
     @mvp_cycle_task.before_loop
     async def before_mvp_task(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     # ─── SLASH COMMANDS ──────────────────────────────────
     @app_commands.command(name="mvp_scores",

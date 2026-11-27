@@ -58,6 +58,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import aiosqlite
 import discord
 from discord import app_commands
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 from discord.ext import commands, tasks
 
 from database import DB_PATH
@@ -439,7 +440,7 @@ class CommandAliases(commands.Cog):
     async def cog_load(self):
         await self._sync_aliases()
         if not self._alias_sync_check.is_running():
-            self._alias_sync_check.start()
+            ensure_started(self._alias_sync_check)
 
     def cog_unload(self):
         if self._alias_sync_check.is_running():
@@ -862,7 +863,10 @@ class CommandAliases(commands.Cog):
 
     @_alias_sync_check.before_loop
     async def _before_sync_check(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
 
 class _SyntheticMessage:

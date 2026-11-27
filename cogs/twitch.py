@@ -7,6 +7,7 @@ from database import DB_PATH
 from utils.permissions import check_bot_role_position
 from utils import creator_notify_engine as engine
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 # ═══════════════════════════════════════════════════════════════════════
 # TWITCH INTEGRATION
@@ -137,7 +138,7 @@ class Twitch(commands.Cog):
     def __init__(self, bot):
         self.bot    = bot
         self._token = None
-        self.check_streams.start()
+        ensure_started(self.check_streams)
 
     def cog_unload(self):
         self.check_streams.cancel()
@@ -332,7 +333,10 @@ class Twitch(commands.Cog):
 
     @check_streams.before_loop
     async def before_check(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     @app_commands.command(name="twitch_setup", description="Set up Twitch live alerts")
     @app_commands.checks.has_permissions(administrator=True)

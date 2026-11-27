@@ -9,6 +9,7 @@ from discord import app_commands
 import aiosqlite
 from database import DB_PATH
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 # FEATURE (dark-fixes pass #2): scheduled_messages had a schema
 # (database.py) with zero implementation anywhere. This cog is the
@@ -77,7 +78,7 @@ def compute_next_send(current_send_at: datetime, repeat_type: str,
 class Scheduler(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.check_scheduled.start()
+        ensure_started(self.check_scheduled)
 
     def cog_unload(self):
         self.check_scheduled.cancel()
@@ -190,7 +191,10 @@ class Scheduler(commands.Cog):
 
     @check_scheduled.before_loop
     async def before_check_scheduled(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     # ── admin commands ───────────────────────────────────────────────
 
