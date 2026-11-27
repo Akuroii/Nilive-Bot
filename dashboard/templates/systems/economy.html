@@ -258,7 +258,7 @@
                     <option value="public">Public — configured channel</option>
                     <option value="both">Both — private and public</option>
                 </select>
-                <div class="form-hint">Wallet itself always stays private. Missing channel access never blocks a reward.</div>
+                <div class="form-hint">Wallet itself always stays private. Public and Both require a channel below; without one the setting cannot be saved. Missing channel access never blocks a reward.</div>
             </div>
             <div class="form-group" id="streak-channel-wrap">
                 <label class="form-label" for="streak-receipt-channel">Public receipt channel</label>
@@ -581,13 +581,25 @@ async function saveStreakSettings(btn) {
         status.dataset.state = 'error';
         return;
     }
+    // LAUNCH FIX: a Public/Both receipt needs a destination. The server now
+    // rejects this combination too, but catching it here means the operator is
+    // told why before a round-trip instead of seeing a generic save failure.
+    const receiptMode = document.getElementById('streak-receipt-mode').value;
+    const receiptChannel = document.getElementById('streak-receipt-channel').value;
+    if ((receiptMode === 'public' || receiptMode === 'both') && !receiptChannel) {
+        status.textContent = 'Choose a public receipt channel for Public or Both, '
+            + 'or switch to Private. A public receipt with no channel is never posted.';
+        status.dataset.state = 'error';
+        showToast('Choose a receipt channel, or switch to Private.', 'error');
+        return;
+    }
     delete status.dataset.state;
     const payload = {
         stages: rewards.blank ? ['', '', '', '', ''] : rewards.stages,
         stage6_min: rewards.blank ? '' : rewards.min,
         stage6_max: rewards.blank ? '' : rewards.max,
-        receipt_visibility: document.getElementById('streak-receipt-mode').value,
-        receipt_channel_id: document.getElementById('streak-receipt-channel').value,
+        receipt_visibility: receiptMode,
+        receipt_channel_id: receiptChannel,
     };
     const data = await ajaxSave('/api/economy/streak-settings', payload, btn,
                                 'Daily & Streak settings saved!');
