@@ -1,10 +1,13 @@
 """
 Regression tests for legacy shop entry-point retirement.
 
-Verifies:
+Verifies through static code inspection:
 1. Discord /shop slash command is no longer registered
 2. Dashboard /shop-publisher page route is no longer accessible
 3. Preserved functionality (Shop Designer, APIs, purchases) remains intact
+
+These tests use only file system checks and text parsing.
+They do NOT require database connections, Discord tokens, or production credentials.
 """
 import sys
 import unittest
@@ -13,68 +16,68 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tests.phase1_support import (
-    GUILD, USER, execute, reset_database, seed_member, make_bot, make_guild
-)
 
-
-class DiscordShopCommandRemoved(unittest.IsolatedAsyncioTestCase):
+class DiscordShopCommandRemoved(unittest.TestCase):
     """Verify the legacy Discord /shop slash command is removed."""
 
-    async def asyncSetUp(self):
-        await reset_database()
-        seed_member(user=USER, guild=GUILD, balance=10000)
-
-    async def test_shop_command_not_in_cog(self):
-        """The Shop cog should not have a 'shop' command method."""
-        from cogs.shop import Shop
-        # Check that the Shop class doesn't have a 'shop' method
-        # (it had one at line 1929 before removal)
-        self.assertFalse(
-            hasattr(Shop, 'shop') or 'shop' in dir(Shop),
-            "Shop cog should not have a 'shop' command method"
-        )
-
-    async def test_shop_command_not_registered_with_bot(self):
-        """The /shop command should not be in the bot's command tree."""
-        bot = make_bot()
-        # Load the shop cog
-        await bot.load_extension('cogs.shop')
-        
-        # Check that 'shop' is not in the bot's application commands
-        # Note: This checks the registered commands, not just the cog methods
+    def test_shop_command_not_in_source(self):
+        """The @app_commands.command(name="shop") should not be in cogs/shop.py."""
+        shop_py = ROOT / "cogs" / "shop.py"
+        content = shop_py.read_text()
+        # Check that the command decorator is removed
         self.assertNotIn(
-            'shop',
-            [cmd.name for cmd in bot.tree.get_commands()],
-            "/shop command should not be registered"
+            '@app_commands.command(name="shop"',
+            content,
+            "@app_commands.command(name=\"shop\") should be removed from cogs/shop.py"
+        )
+        # Check that the method definition is removed
+        self.assertNotIn(
+            'async def shop(self, interaction: discord.Interaction):',
+            content,
+            "shop() method should be removed from Shop cog"
+        )
+
+    def test_on_interaction_still_in_source(self):
+        """The on_interaction method should still be in cogs/shop.py."""
+        shop_py = ROOT / "cogs" / "shop.py"
+        content = shop_py.read_text()
+        self.assertIn(
+            'async def on_interaction(self, interaction: discord.Interaction):',
+            content,
+            "on_interaction method should still exist in cogs/shop.py"
+        )
+        # Verify it handles shop_buy_*
+        self.assertIn(
+            'shop_buy_',
+            content,
+            "on_interaction should still handle shop_buy_* custom IDs"
+        )
+
+    def test_inventory_command_still_in_source(self):
+        """The inventory command should still be in cogs/shop.py."""
+        shop_py = ROOT / "cogs" / "shop.py"
+        content = shop_py.read_text()
+        self.assertIn(
+            '@app_commands.command(name="inventory"',
+            content,
+            "inventory command should still exist in cogs/shop.py"
+        )
+
+    def test_show_shop_page_function_still_exists(self):
+        """The _show_shop_page function should still be in cogs/shop.py."""
+        shop_py = ROOT / "cogs" / "shop.py"
+        content = shop_py.read_text()
+        self.assertIn(
+            'async def _show_shop_page(',
+            content,
+            "_show_shop_page function should still exist in cogs/shop.py"
         )
 
 
-class DashboardShopPublisherRouteRemoved(unittest.IsolatedAsyncioTestCase):
+class DashboardShopPublisherRouteRemoved(unittest.TestCase):
     """Verify the legacy Dashboard /shop-publisher page is removed."""
 
-    async def asyncSetUp(self):
-        await reset_database()
-        seed_member(user=USER, guild=GUILD, balance=10000)
-
-    async def test_shop_publisher_route_returns_404(self):
-        """The /shop-publisher route should return 404."""
-        from dashboard.app import app
-        from dashboard.auth import create_session
-        
-        # Create a test client
-        app.config['TESTING'] = True
-        app.config['SECRET_KEY'] = 'test-secret-key'
-        
-        with app.test_client() as client:
-            # Try to access the removed route
-            response = client.get('/shop-publisher')
-            self.assertEqual(
-                response.status_code, 404,
-                "/shop-publisher route should return 404 (Not Found)"
-            )
-
-    async def test_shop_publisher_template_deleted(self):
+    def test_shoppublisher_template_deleted(self):
         """The shoppublisher.html template should not exist."""
         template_path = ROOT / "dashboard" / "templates" / "manage" / "shoppublisher.html"
         self.assertFalse(
@@ -82,105 +85,170 @@ class DashboardShopPublisherRouteRemoved(unittest.IsolatedAsyncioTestCase):
             "shoppublisher.html template should be deleted"
         )
 
+    def test_shop_publisher_route_removed_from_app_py(self):
+        """The /shop-publisher route should not be in root app.py."""
+        app_py = ROOT / "app.py"
+        content = app_py.read_text()
+        self.assertNotIn(
+            '@app.route("/shop-publisher")',
+            content,
+            "/shop-publisher route should be removed from app.py"
+        )
+        self.assertNotIn(
+            'def shop_publisher():',
+            content,
+            "shop_publisher function should be removed from app.py"
+        )
 
-class PreservedFunctionalityIntact(unittest.IsolatedAsyncioTestCase):
-    """Verify that preserved shop functionality remains intact."""
+    def test_shop_publisher_route_removed_from_dashboard_app_py(self):
+        """The /shop-publisher route should not be in dashboard/app.py."""
+        dashboard_app_py = ROOT / "dashboard" / "app.py"
+        content = dashboard_app_py.read_text()
+        self.assertNotIn(
+            '@app.route("/shop-publisher")',
+            content,
+            "/shop-publisher route should be removed from dashboard/app.py"
+        )
+        self.assertNotIn(
+            'def shop_publisher():',
+            content,
+            "shop_publisher function should be removed from dashboard/app.py"
+        )
 
-    async def asyncSetUp(self):
-        await reset_database()
-        seed_member(user=USER, guild=GUILD, balance=10000)
+    def test_navigation_entry_removed(self):
+        """The /shop-publisher navigation entry should be removed from base.html."""
+        base_html = ROOT / "dashboard" / "templates" / "base.html"
+        content = base_html.read_text()
+        self.assertNotIn(
+            'href="/shop-publisher"',
+            content,
+            "/shop-publisher navigation link should be removed from base.html"
+        )
 
-    async def test_shop_route_still_exists(self):
-        """Dashboard /shop route should still be accessible."""
-        from dashboard.app import app
-        
-        app.config['TESTING'] = True
-        app.config['SECRET_KEY'] = 'test-secret-key'
-        
-        with app.test_client() as client:
-            # This will fail with 401/403 without proper auth, but should not be 404
-            response = client.get('/shop')
-            # We expect 401 (unauthorized) or 403 (forbidden), not 404 (not found)
-            self.assertNotEqual(
-                response.status_code, 404,
-                "/shop route should exist (may require auth)"
-            )
+    def test_palette_entry_removed(self):
+        """The p-shop-publisher palette entry should be removed from dashboard.js."""
+        dashboard_js = ROOT / "dashboard" / "static" / "js" / "dashboard.js"
+        content = dashboard_js.read_text()
+        self.assertNotIn(
+            "id: 'p-shop-publisher'",
+            content,
+            "p-shop-publisher palette entry should be removed from dashboard.js"
+        )
 
-    async def test_shop_designer_route_still_exists(self):
-        """Dashboard /shop-designer route should still be accessible."""
-        from dashboard.app import app
-        
-        app.config['TESTING'] = True
-        app.config['SECRET_KEY'] = 'test-secret-key'
-        
-        with app.test_client() as client:
-            response = client.get('/shop-designer')
-            self.assertNotEqual(
-                response.status_code, 404,
-                "/shop-designer route should exist (may require auth)"
-            )
 
-    async def test_shop_publisher_js_still_exists(self):
-        """The shared shop-publisher.js file should still exist."""
+class DashboardRoutesConfigured(unittest.TestCase):
+    """Verify Dashboard route configuration."""
+
+    def test_shop_designer_route_still_in_dashboard_app(self):
+        """The /shop-designer route should still be in dashboard/app.py."""
+        dashboard_app_py = ROOT / "dashboard" / "app.py"
+        content = dashboard_app_py.read_text()
+        self.assertIn(
+            '@app.route("/shop-designer")',
+            content,
+            "/shop-designer route should still be in dashboard/app.py"
+        )
+
+    def test_shop_route_still_in_dashboard_app(self):
+        """The /shop route should still be in dashboard/app.py."""
+        dashboard_app_py = ROOT / "dashboard" / "app.py"
+        content = dashboard_app_py.read_text()
+        self.assertIn(
+            '@app.route("/shop")',
+            content,
+            "/shop route should still be in dashboard/app.py"
+        )
+
+
+class ShopPublisherJSIntact(unittest.TestCase):
+    """Verify shared publisher JS is preserved."""
+
+    def test_shop_publisher_js_exists(self):
+        """The shop-publisher.js file should still exist."""
         js_path = ROOT / "dashboard" / "static" / "js" / "shop-publisher.js"
         self.assertTrue(
             js_path.exists(),
             "shop-publisher.js should still exist (used by Shop Designer)"
         )
 
-    async def test_shop_publisher_api_endpoints_still_exist(self):
-        """The /api/shop-publisher/* endpoints should still be accessible."""
-        from dashboard.app import app
-        
-        app.config['TESTING'] = True
-        app.config['SECRET_KEY'] = 'test-secret-key'
-        
-        with app.test_client() as client:
-            # Test the catalog endpoint (may require auth, but should not be 404)
-            response = client.get('/api/shop-publisher/catalog')
-            self.assertNotEqual(
-                response.status_code, 404,
-                "/api/shop-publisher/catalog should exist (may require auth)"
+    def test_shop_publisher_preview_exists(self):
+        """NERO.shopPublisherPreview should be defined in shop-publisher.js."""
+        js_path = ROOT / "dashboard" / "static" / "js" / "shop-publisher.js"
+        content = js_path.read_text()
+        self.assertIn(
+            'NERO.shopPublisherPreview',
+            content,
+            "NERO.shopPublisherPreview should be defined in shop-publisher.js"
+        )
+
+
+class ShopPublisherCSSIntact(unittest.TestCase):
+    """Verify shared publisher CSS is preserved."""
+
+    def test_shop_publisher_css_exists(self):
+        """The shop-publisher.css file should still exist."""
+        css_path = ROOT / "dashboard" / "static" / "css" / "shop-publisher.css"
+        self.assertTrue(
+            css_path.exists(),
+            "shop-publisher.css should still exist (used by both pages)"
+        )
+
+
+class APIIndexPreserved(unittest.TestCase):
+    """Verify API endpoints are preserved."""
+
+    def test_shop_publisher_api_files_exist(self):
+        """All shop-publisher API files should still exist."""
+        api_files = [
+            "shop_categories.py",
+            "shop_designs.py",
+            "shop_emoji.py",
+            "shop_publications.py",
+            "shop_publisher.py",
+        ]
+        for filename in api_files:
+            api_path = ROOT / "dashboard" / "api" / filename
+            self.assertTrue(
+                api_path.exists(),
+                f"{filename} should still exist"
             )
 
-    async def test_shop_buy_handlers_still_exist(self):
-        """The shop_buy_* interaction handlers should still exist."""
-        from cogs.shop import Shop
-        
-        # Check that the on_interaction method exists (handles shop_buy_*)
+
+class WalletMessagesUpdated(unittest.TestCase):
+    """Verify wallet help messages no longer reference /shop command."""
+
+    def test_wallet_messages_do_not_reference_shop_command(self):
+        """Wallet help messages should not reference /shop command."""
+        wallet_py = ROOT / "cogs" / "wallet.py"
+        content = wallet_py.read_text()
+        # Check that the old messages with /shop are gone
+        self.assertNotIn(
+            '`/shop`',
+            content,
+            "Wallet messages should not reference /shop command"
+        )
+
+
+class ShopDesignerTemplateIntact(unittest.TestCase):
+    """Verify Shop Designer template is preserved."""
+
+    def test_shopdesigner_template_exists(self):
+        """The shopdesigner.html template should still exist."""
+        template_path = ROOT / "dashboard" / "templates" / "manage" / "shopdesigner.html"
         self.assertTrue(
-            hasattr(Shop, 'on_interaction'),
-            "Shop cog should still have on_interaction method for shop_buy_* handlers"
+            template_path.exists(),
+            "shopdesigner.html template should still exist"
         )
 
-    async def test_show_shop_page_function_still_exists(self):
-        """The _show_shop_page function should still exist (used by button callbacks)."""
-        from cogs.shop import _show_shop_page
-        
-        # This function is used by navigation buttons in published shops
-        self.assertIsNotNone(
-            _show_shop_page,
-            "_show_shop_page function should still exist"
+    def test_shopdesigner_uses_shop_publisher_js(self):
+        """Shop Designer should still load shop-publisher.js."""
+        template_path = ROOT / "dashboard" / "templates" / "manage" / "shopdesigner.html"
+        content = template_path.read_text()
+        self.assertIn(
+            'shop-publisher.js',
+            content,
+            "shopdesigner.html should still load shop-publisher.js"
         )
-
-
-class ShopCommandRemovedFromWalletMessages(unittest.TestCase):
-    """Verify that wallet help messages no longer reference the /shop command."""
-
-    def test_wallet_messages_updated(self):
-        """Wallet empty messages should not reference /shop command."""
-        from cogs.wallet import TAB_ITEMS, TAB_COLORS, TAB_POTIONS, TAB_TITLES
-        from cogs.wallet import build_inventory_embed
-        
-        # These constants should exist
-        self.assertIsNotNone(TAB_ITEMS)
-        self.assertIsNotNone(TAB_COLORS)
-        
-        # The function should exist
-        self.assertIsNotNone(build_inventory_embed)
-        
-        # We can't easily test the exact message without a full Discord setup,
-        # but we can at least verify the module loads correctly
 
 
 if __name__ == "__main__":
