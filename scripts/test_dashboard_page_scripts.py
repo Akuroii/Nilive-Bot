@@ -76,7 +76,6 @@ PAGES = {
     "/tag-missions": "systems/tagmissions.html",
     "/tag-partners": "systems/tagpartners.html",
     "/shop-designer": None,
-    "/shop-publisher": None,
     "/config/access": None,
     "/audit-log": None,
     "/health": None,

@@ -889,7 +889,6 @@ const NERO_PALETTE_ITEMS = [
     { id: 'p-economy', title: 'Economy System', desc: 'Currency names, exchange rates, and bank settings', url: '/economy', icon: 'nero-i-coins', group: 'Navigation', keywords: 'coins diamonds bank cash' },
     { id: 'p-shop', title: 'Server Shop', desc: 'Manage items, colors, titles, and member purchases', url: '/shop', icon: 'nero-i-bag', group: 'Navigation', keywords: 'store shop buy items' },
     { id: 'p-shop-designer', title: 'Shop Designer', desc: 'Custom shop layouts and visual theme editor', url: '/shop-designer', icon: 'nero-i-bag', group: 'Navigation', keywords: 'shop designer theme' },
-    { id: 'p-shop-publisher', title: 'Shop Publisher', desc: 'Publish and sync shop menus to Discord channels', url: '/shop-publisher', icon: 'nero-i-bag', group: 'Navigation', keywords: 'shop publish menu' },
     { id: 'p-events', title: 'Events Calendar', desc: 'Schedule and manage community events and dates', url: '/events', icon: 'nero-i-calendar', group: 'Navigation', keywords: 'events calendar' },
     { id: 'p-minigames', title: 'Minigames', desc: 'Configure trivia, math, wheel, and automated spawns', url: '/minigames', icon: 'nero-i-gamepad', group: 'Navigation', keywords: 'games trivia wheel math' },
     { id: 'p-missions', title: 'Missions & Tasks', desc: 'Community goals, daily missions, and reward payouts', url: '/missions', icon: 'nero-i-map', group: 'Navigation', keywords: 'missions quests goals' },

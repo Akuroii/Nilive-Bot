@@ -1923,12 +1923,6 @@ class Shop(commands.Cog):
         # loop task on arrival (see utils/task_lifecycle.py).
         await wait_until_client_ready(self.bot)
 
-    # ─── SHOP COMMAND ───────────────────────────────────
-    @app_commands.command(name="shop",
-                          description="View the server shop")
-    async def shop(self, interaction: discord.Interaction):
-        await _show_shop_page(interaction, 0)
-
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:

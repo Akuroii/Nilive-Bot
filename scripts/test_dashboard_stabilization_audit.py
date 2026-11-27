@@ -1161,7 +1161,6 @@ asyncio.run(main())
             "/leveling",
             "/economy",
             "/shop",
-            "/shop-publisher",
             "/shop-designer",
             "/events",
             "/minigames",
