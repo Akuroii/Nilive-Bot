@@ -17,16 +17,33 @@ from utils.db_config import DB_PATH, NERO_ENVIRONMENT
 # owner. If this is your own existing deploy, set OWNER_ID to your
 # Discord user ID (it was previously hardcoded to 704453350384730237)
 # as an env var before redeploying.
-_owner_id_raw = os.getenv("OWNER_ID", "").strip()
-if not _owner_id_raw:
+#
+# OWNER / DEV TIERS (see utils/owner_ids.py): OWNER_ID = the bot's real owner(s),
+# DEV_ID = the developer(s). Both accept one ID or a comma-separated list. When DEV_ID
+# is unset, the OWNER_ID value(s) are also the developer(s) (pre-existing behavior).
+from utils.owner_ids import OwnerConfigError, load_tiers
+
+try:
+    OWNER_DISCORD_IDS, DEV_DISCORD_IDS = load_tiers(os.environ)
+except OwnerConfigError as _owner_cfg_err:
     print("=" * 60)
-    print("FATAL: OWNER_ID is missing or empty.")
-    print("  -> Set OWNER_ID to your Discord user ID as an env var.")
+    print(f"FATAL: {_owner_cfg_err}.")
+    print("  -> Set OWNER_ID to the bot owner's Discord user ID as an env var")
+    print("     (a comma-separated list is allowed). DEV_ID is optional and")
+    print("     takes the developer's Discord user ID the same way.")
     print("  -> This used to default to a hardcoded ID baked into the")
     print("     source — that fallback has been removed for security.")
     print("=" * 60)
     sys.exit(1)
-OWNER_DISCORD_ID = int(_owner_id_raw)
+# Backward-compatible single-ID name: the first OWNER_ID entry.
+OWNER_DISCORD_ID = OWNER_DISCORD_IDS[0]
+# Everyone with bot-wide trust (guild-blind dashboard bypass, backups, Discord owner-only
+# commands). Developer-only operator actions use DEV_DISCORD_IDS instead.
+TRUSTED_DISCORD_IDS = frozenset(OWNER_DISCORD_IDS) | frozenset(DEV_DISCORD_IDS)
+# OWNER_ID entries that are NOT developers get a visible 'owner' row in each server's
+# dashboard Access page. Developers stay hidden (guild-blind bypass, never a row), so with
+# DEV_ID unset this is empty and nothing changes for an existing deploy.
+VISIBLE_OWNER_IDS = tuple(i for i in OWNER_DISCORD_IDS if i not in DEV_DISCORD_IDS)
 
 
 LEVELING_CONFIG_BASELINE_MIGRATION = "message-xp-10s-spam-window-20s-v1"
@@ -2602,16 +2619,22 @@ async def init_db():
         # to leave running forever — a no-op once the legacy rows are
         # gone.
         try:
-            cursor = await db.execute("""
-                SELECT COUNT(*) FROM dashboard_users
-                WHERE user_id = ? AND added_by_name = 'auto-setup'
-            """, (OWNER_DISCORD_ID,))
-            legacy_count = (await cursor.fetchone())[0]
-            if legacy_count:
-                await db.execute("""
-                    DELETE FROM dashboard_users
+            legacy_count = 0
+            # Every bot-wide trusted ID (OWNER_ID and DEV_ID), not just the first: the
+            # old mechanism seeded whichever ID was OWNER_ID at the time, and OWNER_ID
+            # may since have moved to a different person.
+            for _trusted_id in sorted(TRUSTED_DISCORD_IDS):
+                cursor = await db.execute("""
+                    SELECT COUNT(*) FROM dashboard_users
                     WHERE user_id = ? AND added_by_name = 'auto-setup'
-                """, (OWNER_DISCORD_ID,))
+                """, (_trusted_id,))
+                legacy_count += (await cursor.fetchone())[0]
+            if legacy_count:
+                for _trusted_id in sorted(TRUSTED_DISCORD_IDS):
+                    await db.execute("""
+                        DELETE FROM dashboard_users
+                        WHERE user_id = ? AND added_by_name = 'auto-setup'
+                    """, (_trusted_id,))
                 await db.commit()
                 print(f"[MIGRATION] Removed {legacy_count} legacy "
                       f"auto-setup dashboard_users row(s) for the "
@@ -2632,8 +2655,12 @@ async def init_db():
     schedule_startup_reconciliation()
 
     print("✅ Database initialized — all tables ready")
-    print(f"✅ Developer bypass active for user ID: {OWNER_DISCORD_ID} "
+    print(f"✅ Developer bypass active for user ID(s): "
+          f"{', '.join(str(i) for i in sorted(DEV_DISCORD_IDS))} "
           f"(guild-blind, never written to dashboard_users)")
+    if VISIBLE_OWNER_IDS:
+        print(f"✅ Bot owner ID(s) with visible Access rows: "
+              f"{', '.join(str(i) for i in VISIBLE_OWNER_IDS)}")
 
 
 async def add_guild_owner(guild_id: int, owner_discord_id: int):

@@ -21,8 +21,10 @@ from utils.db_config import DB_PATH
 from database import (
     add_guild_owner,
     record_bot_guild_join, record_bot_guild_remove, record_bot_guild_update,
+    DEV_DISCORD_IDS, TRUSTED_DISCORD_IDS, VISIBLE_OWNER_IDS,
 )
 from utils.guild_lifecycle import GuildLifecycleCoordinator
+from utils import guild_allowlist
 
 print("Starting Nero bot...")
 
@@ -146,7 +148,10 @@ class NeroCommandTree(discord.app_commands.CommandTree):
             return False
 
         return True
-bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=NeroCommandTree, case_insensitive=True)
+# owner_ids makes bot.is_owner() follow OWNER_ID + DEV_ID (the same trust set the dashboard
+# uses) instead of whoever owns the application in the Discord Developer Portal.
+bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=NeroCommandTree,
+                   case_insensitive=True, owner_ids=set(TRUSTED_DISCORD_IDS))
 bot.gateway_coordinator = GuildLifecycleCoordinator(bot)
 
 _status_index = 0
@@ -205,6 +210,7 @@ async def load_cogs():
         "cogs.report",
         "cogs.health",
         "cogs.backup",
+        "cogs.guild_admin",
         "cogs.scheduler",
         "cogs.tagmissions",
         "cogs.tagpartners",
@@ -245,6 +251,7 @@ async def on_ready():
         traceback.print_exc()
 
     await bot.gateway_coordinator.reconcile_guilds()
+    await guild_allowlist.run_sweep(bot)
     await backfill_guild_owners()
     rotate_status.start()
 
@@ -319,6 +326,10 @@ async def on_app_command_error(interaction: discord.Interaction,
 @bot.event
 async def on_guild_join(guild: discord.Guild):
     print(f"Joined new guild: {guild.name} ({guild.id})")
+    # Optional allowlist (utils/guild_allowlist.py): off unless ALLOWED_GUILD_IDS is set.
+    # False means the bot just left an unapproved server, so nothing is recorded for it.
+    if not await guild_allowlist.handle_join(guild):
+        return
     async def _do_join():
         icon_key = getattr(guild.icon, "key", None) if hasattr(guild.icon, "key") else (str(guild.icon) if guild.icon else None)
         await record_bot_guild_join(
@@ -326,6 +337,8 @@ async def on_guild_join(guild: discord.Guild):
             guild.owner_id or 0, getattr(guild, "member_count", 0) or 0,
         )
         await add_guild_owner(guild.id, guild.owner_id)
+        for _owner_id in VISIBLE_OWNER_IDS:
+            await add_guild_owner(guild.id, _owner_id)
     await bot.gateway_coordinator.execute_mutation(_do_join)
 
 
@@ -369,13 +382,24 @@ async def backfill_guild_owners():
     bot.gateway_coordinator.reconcile_guilds().
     """
     for guild in bot.guilds:
+        if guild_allowlist.decide(guild_allowlist.get_config(), guild.id) == guild_allowlist.LEAVE:
+            continue  # unapproved server in enforce mode: no access rows for it
         if guild.owner_id:
             await add_guild_owner(guild.id, guild.owner_id)
+        for _owner_id in VISIBLE_OWNER_IDS:
+            await add_guild_owner(guild.id, _owner_id)
     print(f"✅ Backfilled owner access for {len(bot.guilds)} installed guilds")
 
 
+def dev_only():
+    """!sync / !reload can break the running bot: developer(s) only, not the bot owner."""
+    async def predicate(ctx):
+        return ctx.author.id in DEV_DISCORD_IDS
+    return commands.check(predicate)
+
+
 @bot.command()
-@commands.is_owner()
+@dev_only()
 async def sync(ctx):
     await bot.tree.sync()
     cmds = await bot.tree.fetch_commands()
@@ -383,7 +407,7 @@ async def sync(ctx):
 
 
 @bot.command()
-@commands.is_owner()
+@dev_only()
 async def reload(ctx, cog: str):
     try:
         await bot.reload_extension(f"cogs.{cog}")
