@@ -435,7 +435,7 @@ class ShopPublisherApiTests(unittest.TestCase):
         # The standalone /shop-publisher page has been retired.
         # Verify it returns 404 (Not Found) instead of 200 or 403.
         response = self.client.get("/shop-publisher")
-        self.assertEqual(response.status_code, 404, 
+        self.assertEqual(response.status_code, 404,
                         "Legacy /shop-publisher page route should be removed")
 
     def test_publisher_page_route_removed_no_permission_check(self):
