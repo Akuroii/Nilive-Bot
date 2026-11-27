@@ -124,13 +124,32 @@ class Health(commands.Cog):
                 ))
                 await db.commit()
 
-            coordinator = getattr(self.bot, "gateway_coordinator", None)
-            if coordinator:
-                await coordinator.heartbeat()
         except Exception:
             # A failure to WRITE health data shouldn't itself crash
             # the loop — print and let the next tick try again.
             print(f"[HEALTH] heartbeat write failed:\n{traceback.format_exc()}")
+
+        # LAUNCH FIX: the lease refresh now has its own error boundary and its
+        # own message. Previously a failure here was reported as "heartbeat
+        # write failed", which pointed at bot_status rather than at dashboard
+        # authorization — and authorization is what actually breaks when this
+        # step fails: _sync_state_is_valid() needs a lease younger than 45 s,
+        # and this loop is the ONLY thing that refreshes it.
+        coordinator = getattr(self.bot, "gateway_coordinator", None)
+        if coordinator:
+            try:
+                await coordinator.heartbeat()
+            except Exception:
+                self._lease_failures = getattr(self, "_lease_failures", 0) + 1
+                print(f"[HEALTH] authorization-lease refresh FAILED "
+                      f"({self._lease_failures} consecutive); the dashboard will "
+                      f"deny access once the 45 s lease expires:\n"
+                      f"{traceback.format_exc()}")
+            else:
+                if getattr(self, "_lease_failures", 0):
+                    print(f"[HEALTH] authorization-lease refresh recovered after "
+                          f"{self._lease_failures} failure(s)")
+                self._lease_failures = 0
 
     @heartbeat.before_loop
     async def before_heartbeat(self):

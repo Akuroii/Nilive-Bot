@@ -71,8 +71,43 @@ class GuildLifecycleCoordinator:
         self.connection_epoch += 1
 
     async def on_disconnect_async(self, db_path: str = DB_PATH):
+        """Invalidate persisted authorization -- but check the epoch INSIDE the lock.
+
+        LAUNCH FIX (dashboard lockout): on_disconnect is awaited from main.py's
+        `on_disconnect` handler, so the *pre-await* part (handle_disconnect)
+        always runs before the lock is acquired. That left this ordering race:
+
+            1. on_disconnect -> handle_disconnect() bumps connection_epoch to E.
+            2. The socket recovers fast enough that main.py's on_resumed runs:
+               reconcile_guilds(E) acquires the lock first, succeeds, and
+               restores authorization (guilds_synced='1') legitimately for
+               epoch E.
+            3. THIS coroutine finally acquires the lock and, unconditionally,
+               stamps guilds_synced='0' -- for a connection that has already
+               been re-verified and is live again.
+
+        Nothing restores authorization afterwards, because can_restore_authorization()
+        stays True and heartbeat() therefore only refreshes the lease; and
+        _sync_state_is_valid() requires guilds_synced='1'. The dashboard then
+        answers 403 to its own operator until the process restarts -- the
+        reported "dashboard lockout".
+
+        The fix re-checks the epoch after taking the lock. If the connection was
+        already re-verified for this epoch, the invalidation is stale and
+        skipped. Fail-closed is preserved: any disconnect that has NOT been
+        reconciled still invalidates, and the lease still has its 45 s TTL.
+        """
         self.handle_disconnect()
+        epoch = self.connection_epoch
         async with self.lock:
+            if (self.connection_epoch != epoch
+                    or self.guild_membership_reconciled
+                    or self.gateway_transport_verified):
+                # A newer reconcilation already owns this connection state;
+                # invalidating here would revoke a verified session.
+                print("[GATEWAY] Skipping stale authorization invalidation from a "
+                      "disconnect that has already been re-verified.")
+                return
             await invalidate_bot_sync_state(db_path)
 
     async def execute_mutation(self, mutation_coro, db_path: str = DB_PATH):
