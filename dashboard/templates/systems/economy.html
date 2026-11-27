@@ -591,7 +591,7 @@ async function loadStreakSettings() {
                 if (window.jQuery) window.jQuery(picker).trigger('change.select2');
             } else {
                 document.getElementById('streak-settings-status').textContent =
-                    'The saved receipt channel is unavailable or unsupported. Choose a text/announcement channel, or leave it blank to disable the public copy; the reward still succeeds.';
+                    'The saved receipt channel is unavailable or unsupported. Choose a different text/announcement channel, or switch Receipt visibility to Private if you do not want a public copy — a public receipt cannot be saved without a channel. The reward itself is unaffected.';
             }
         }
     } catch (error) {
