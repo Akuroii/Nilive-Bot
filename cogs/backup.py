@@ -8,6 +8,7 @@ from discord import app_commands
 import aiosqlite
 from database import DB_PATH
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 # FEATURE (dark-fixes pass #2): backup_log had a schema (database.py)
 # with zero implementation anywhere — no backup mechanism existed at
@@ -126,7 +127,7 @@ async def _prune_old_backups():
 class Backup(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.daily_backup.start()
+        ensure_started(self.daily_backup)
 
     def cog_unload(self):
         self.daily_backup.cancel()
@@ -143,7 +144,10 @@ class Backup(commands.Cog):
 
     @daily_backup.before_loop
     async def before_daily_backup(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     @app_commands.command(name="backup_now",
                           description="Trigger an immediate DB backup (owner only)")

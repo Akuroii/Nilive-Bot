@@ -21,17 +21,32 @@ async def get_boost_config(guild_id: int) -> dict:
 
 
 def _booster_level(member: discord.Member) -> int:
+    """How many boosts this MEMBER is contributing, as far as Discord exposes it.
+
+    API LIMITATION (launch fix): ``discord.Member`` does NOT expose a per-member
+    boost count. It exposes only ``premium_since`` (whether/when this member
+    started boosting). ``premium_subscription_count`` is a ``discord.Guild``
+    attribute -- the whole server's total -- and must never be read as one
+    member's contribution.
+
+    The previous version did ``getattr(member, "premium_subscription_count", 1)``
+    on a real Member, so it always fell through to the default and returned
+    either 0 or 1. Result: every live booster was level 1 forever, and any
+    ``requires_boost_level >= 2`` colour role was permanently unreachable.
+
+    This delegates to utils/timed_ownership._booster_level_for(), which already
+    documents and handles exactly this distinction (including test doubles that
+    do carry a per-member count), so there is one implementation instead of two
+    that disagree. Returns 0 when the member is not boosting.
+
+    Consequence to be explicit about: with a real Member this returns 1, never
+    more, so ``requires_boost_level >= 2`` cannot be satisfied from Discord's
+    data. That is reported to the admin at configuration time (see
+    boostcolor_add) rather than silently granting a tier we cannot verify.
     """
-    FEATURE (dark-fixes pass #2, boost_color_roles): reuses the same
-    "how many boosts is this member contributing" signal the existing
-    boost1/boost2 logic above already relies on
-    (premium_subscription_count), so a color role's requires_boost_level
-    lines up with the same tiers admins already think in terms of via
-    /boost_setup's boost1/boost2 roles. 0 if not currently boosting.
-    """
-    if not member.premium_since:
-        return 0
-    return getattr(member, "premium_subscription_count", 1) or 1
+    from utils.timed_ownership import _booster_level_for
+    level, _known = _booster_level_for(member)
+    return int(level)
 
 
 async def get_boost_color_roles(guild_id: int) -> list[dict]:
@@ -119,15 +134,28 @@ class Boost(commands.Cog):
         elif before_boosts and not after_boosts:
             await self._handle_unboost(guild, after, boost1_id, boost2_id, config)
         elif before_boosts and after_boosts:
-            before_count = getattr(before, "premium_subscription_count", 0) or 0
-            after_count  = getattr(after, "premium_subscription_count", 0) or 0
-            if after_count > before_count and after_count >= 2:
+            # Both states are already boosting, so a second-strength upgrade can
+            # only be inferred from a per-member count -- which discord.Member
+            # does not expose (see _booster_level). Previously this read the
+            # phantom attribute, so both counts were always 0 and the branch was
+            # dead code. Say so instead of silently never upgrading.
+            before_level = _booster_level(before)
+            after_level = _booster_level(after)
+            if after_level > before_level:
                 await self._give_role(guild, after, boost2_id)
+            else:
+                print(f"[BOOST] guild={guild.id} user={after.id}: already boosting; "
+                      f"per-member boost count is not available from Discord, so "
+                      f"the 2nd-boost role cannot be granted on an upgrade.")
 
     async def _handle_new_boost(self, guild, member, boost1_id, boost2_id, channel_id, config):
         await self._give_role(guild, member, boost1_id)
 
-        boost_count = getattr(member, "premium_subscription_count", 1) or 1
+        # Per-member boost count is unavailable from Discord (see _booster_level).
+        # A member who is already boosting when this fires may be contributing
+        # several boosts, but we cannot verify that, so the 2nd-boost role is
+        # granted only in the case Discord actually confirms it.
+        boost_count = _booster_level(member)
         if boost_count >= 2:
             await self._give_role(guild, member, boost2_id)
 
@@ -163,7 +191,8 @@ class Boost(commands.Cog):
 
         for (role_id,) in booster_roles:
             await Boost._retire_booster_role(
-                guild, member, guild.get_role(role_id), "booster-only role")
+                guild, member, guild.get_role(role_id), "booster-only role",
+                log_failure=True)
 
         # FEATURE (dark-fixes pass #2, boost_color_roles): a self-picked
         # color role is a boost perk too, so it comes off on unboost
@@ -172,11 +201,18 @@ class Boost(commands.Cog):
         color_roles = await get_boost_color_roles(guild.id)
         for cr in color_roles:
             await Boost._retire_booster_role(
-                guild, member, guild.get_role(cr["role_id"]), "colour role")
+                guild, member, guild.get_role(cr["role_id"]), "colour role",
+                log_failure=True)
 
     @staticmethod
     async def _retire_booster_role(guild, member, role, label, *, log_failure=False):
         if role is None:
+            # The role was deleted between the unboost and this cleanup, so
+            # there is nothing to remove. Logged (when requested) so a genuinely
+            # missing role is distinguishable from a removal that never ran.
+            if log_failure:
+                print(f"[BOOST] {label} no longer exists in guild={guild.id}; "
+                      f"nothing to remove for {member.id}")
             return
         from utils.equip_engine import slot_lock
         from utils.timed_ownership import role_removal_blocked
@@ -309,9 +345,20 @@ class Boost(commands.Cog):
                 VALUES (?, ?, ?, ?)
             """, (interaction.guild.id, role.id, role.name, requires_boost_level))
             await db.commit()
+        # Be explicit rather than implying a tier we cannot verify: Discord does
+        # not expose a per-member boost count, so anything above 1 can never be
+        # satisfied. The row is still saved unchanged (existing business rule
+        # preserved) but the admin is told it will not be selectable.
+        unsupported = (
+            f"\n\n⚠️ Discord does not expose a per-member boost count, so a "
+            f"requirement above 1 boost cannot be verified and this option will "
+            f"never appear in /boostcolor. Use 1 for a booster-only colour role."
+            if requires_boost_level > 1 else ""
+        )
         await interaction.response.send_message(
             f"{CHECK_EMOJI} Added {role.mention} as a boost color option "
-            f"(requires {requires_boost_level} boost{'s' if requires_boost_level != 1 else ''}).",
+            f"(requires {requires_boost_level} boost{'s' if requires_boost_level != 1 else ''})."
+            + unsupported,
             ephemeral=True)
 
     @app_commands.command(name="boostcolor_remove",

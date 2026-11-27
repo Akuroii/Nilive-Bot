@@ -11,6 +11,7 @@ from utils.formatters import snapshot_user, now_iso
 from utils.level_ops import enqueue_xp_grant, xp_amount_or_none
 from utils.currency import get_currency_config, currency_amount
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 
 async def give_reward(bot: discord.Client,
@@ -211,7 +212,7 @@ class ButtonRaceView(discord.ui.View):
 class Events(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.scheduled_events_task.start()
+        ensure_started(self.scheduled_events_task)
 
     def cog_unload(self):
         self.scheduled_events_task.cancel()
@@ -343,7 +344,10 @@ class Events(commands.Cog):
 
     @scheduled_events_task.before_loop
     async def before_task(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     @app_commands.command(name="event_create",
                           description="Create and launch a button race event")

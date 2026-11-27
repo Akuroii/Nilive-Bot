@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from database import DB_PATH
 from utils.permissions import can_moderate, check_bot_role_position
 from utils.formatters import snapshot_user, now_iso, format_duration, parse_duration
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 
 async def log_mod_action(guild_id: int, user: discord.Member,
@@ -148,7 +149,7 @@ async def check_warning_thresholds(guild: discord.Guild,
 class Moderation(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.scheduled_unban_check.start()
+        ensure_started(self.scheduled_unban_check)
 
     def cog_unload(self):
         self.scheduled_unban_check.cancel()
@@ -208,7 +209,10 @@ class Moderation(commands.Cog):
 
     @scheduled_unban_check.before_loop
     async def before_unban_check(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     # ─── KICK ───────────────────────────────────────────
     @app_commands.command(name="kick", description="Kick a member")

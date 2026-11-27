@@ -8,6 +8,7 @@ import os
 from database import DB_PATH
 from utils import creator_notify_engine as engine
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
@@ -237,7 +238,7 @@ def build_live_ended_embed(video_id: str, title: str = "") -> discord.Embed:
 class YouTube(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.check_videos.start()
+        ensure_started(self.check_videos)
 
     def cog_unload(self):
         self.check_videos.cancel()
@@ -474,7 +475,10 @@ class YouTube(commands.Cog):
 
     @check_videos.before_loop
     async def before_check(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     @app_commands.command(name="youtube_setup",
                           description="Add a YouTube channel to watch (Video notifications)")

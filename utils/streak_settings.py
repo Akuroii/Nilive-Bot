@@ -61,7 +61,18 @@ def validate_streak_settings(stages, stage6_min, stage6_max,
         raise ValueError("Receipt visibility must be Private, Public, or Both.")
     channel = None
     raw_channel = str(receipt_channel_id or "").strip()
-    if mode in {"public", "both"} and raw_channel:
+    if mode in {"public", "both"}:
+        # LAUNCH FIX: Public/Both with no channel was previously ACCEPTED and
+        # saved. The claim then credited the reward, received
+        # receipt_public=True and receipt_channel_id=None, and
+        # send_public_claim_receipt() returned False immediately -- while the
+        # private receipt was suppressed too (receipt_destinations('public')
+        # returns (False, True)). The member got no receipt anywhere and the
+        # dashboard had already reported success. A public receipt needs a
+        # destination, so require one here.
+        if not raw_channel:
+            raise ValueError(
+                "Choose a receipt channel for Public or Both, or select Private.")
         try:
             channel = str(int(raw_channel))
         except (TypeError, ValueError):

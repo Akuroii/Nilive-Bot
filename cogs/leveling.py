@@ -13,6 +13,7 @@ from utils.xp_calculator import (
     is_role_blacklisted,
 )
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 
 # ─── Phase 5 / Leveling expansion — reset config helpers ────────────────
@@ -1976,8 +1977,8 @@ class Leveling(commands.Cog):
         # on_activity_voice_xp_tick below) instead of this cog running
         # its own poll loop, so there's no task to start/cancel here
         # anymore.
-        self.leaderboard_reset_task.start()
-        self.blacklist_role_task.start()
+        ensure_started(self.leaderboard_reset_task)
+        ensure_started(self.blacklist_role_task)
 
     def cog_unload(self):
         self.leaderboard_reset_task.cancel()
@@ -2428,7 +2429,10 @@ class Leveling(commands.Cog):
 
     @leaderboard_reset_task.before_loop
     async def before_reset_task(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     # ─── MEMBER BLACKLIST ROLE SWEEP ────────────────────────────────
     # The dashboard has no Discord cache, so blacklisting/unblacklisting from it
@@ -2444,7 +2448,10 @@ class Leveling(commands.Cog):
 
     @blacklist_role_task.before_loop
     async def before_blacklist_role_task(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     # ─── LEADERBOARD ────────────────────────────────────
     # Phase 5 / Prestige system: sort order is now

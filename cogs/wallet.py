@@ -662,17 +662,50 @@ def _stage_file(stage: int) -> discord.File | None:
 
 
 async def send_public_claim_receipt(bot, result: dict, currency: dict) -> bool:
-    """Render a separate public copy of the already-calculated claim result."""
+    """Render a separate public copy of the already-calculated claim result.
+
+    Returns True only when the receipt was actually delivered. Every reason it
+    can fail is logged: the caller distinguishes "credited + delivered" from
+    "credited + not delivered", and silently returning False left operators
+    with no way to tell "no channel configured" from "Discord rejected it".
+    """
+    if not result.get("receipt_public"):
+        return False
     channel_id = result.get("receipt_channel_id")
-    if not result.get("receipt_public") or not channel_id:
+    if not channel_id:
+        # Reachable from settings saved before the channel requirement below
+        # existed (validation now rejects the combination at save time).
+        print(f"[STREAK] public receipt NOT sent for guild={result.get('guild_id')} "
+              f"user={result.get('user_id')}: Public/Both is configured but no "
+              f"receipt channel is stored. Set one in Dashboard > Economy > Streak.")
         return False
     try:
         channel = bot.get_channel(int(channel_id))
         if channel is None:
             channel = await bot.fetch_channel(int(channel_id))
-        guild = getattr(channel, "guild", None)
-        if guild is None or int(guild.id) != int(result.get("guild_id", 0)):
+    except Exception as exc:
+        print(f"[STREAK] public receipt NOT sent for guild={result.get('guild_id')}: "
+              f"channel {channel_id} could not be resolved "
+              f"({type(exc).__name__}: {exc}). Claim remains credited.")
+        return False
+    guild = getattr(channel, "guild", None)
+    if guild is None or int(guild.id) != int(result.get("guild_id", 0)):
+        print(f"[STREAK] public receipt NOT sent: channel {channel_id} does not "
+              f"belong to guild {result.get('guild_id')}. Claim remains credited.")
+        return False
+    # Check the permission up front so a Forbidden produces an actionable log
+    # line instead of a generic send failure.
+    try:
+        me = getattr(guild, "me", None)
+        perms = getattr(me, "guild_permissions", None)
+        if perms is not None and not perms.send_messages:
+            print(f"[STREAK] public receipt NOT sent: bot lacks Send Messages in "
+                  f"channel {channel_id} (guild={result.get('guild_id')}). "
+                  f"Claim remains credited.")
             return False
+    except Exception:
+        pass  # never block delivery on a permission *probe*
+    try:
         embed = build_claim_embed(result, currency)
         file = _stage_file(int(result["stage"]))
         kwargs = {"embed": embed, "allowed_mentions": discord.AllowedMentions.none()}
@@ -681,7 +714,9 @@ async def send_public_claim_receipt(bot, result: dict, currency: dict) -> bool:
         await channel.send(**kwargs)
         return True
     except Exception as exc:
-        print(f"[STREAK] public receipt failed; claim remains credited: {exc}")
+        print(f"[STREAK] public receipt delivery FAILED for guild={result.get('guild_id')} "
+              f"channel={channel_id} ({type(exc).__name__}: {exc}). "
+              f"Claim remains credited.")
         return False
 
 

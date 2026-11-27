@@ -13,6 +13,7 @@ from utils import minigame_store as store
 from utils import minigame_engine as engine
 from utils.timezone import get_cairo_daily_key, get_cairo_weekly_key, CAIRO_TZ
 from utils.emoji import CHECK_EMOJI
+from utils.task_lifecycle import ensure_started, wait_until_client_ready
 
 # ═══════════════════════════════════════════════════════════════════════
 # MINIGAMES v2 — the Discord surface (Phase 3 of the approved
@@ -180,7 +181,7 @@ class Minigames(commands.Cog):
         self.live_games: dict[int, engine.MinigameEngine] = {}
         # False until the first on_ready of THIS process has swept.
         self._sweep_done = False
-        self.daily_check_loop.start()
+        ensure_started(self.daily_check_loop)
         self.spawn_request_loop.start()
 
     def cog_unload(self):
@@ -404,7 +405,10 @@ class Minigames(commands.Cog):
 
     @daily_check_loop.before_loop
     async def before_daily_check(self):
-        await self.bot.wait_until_ready()
+        # Poll is_ready() instead of awaiting wait_until_ready(): this cog is
+        # loaded before login(), where wait_until_ready() raises and kills the
+        # loop task on arrival (see utils/task_lifecycle.py).
+        await wait_until_client_ready(self.bot)
 
     # ── Spawn request queue (plan §9/§19) ──────────────────────────────
 

@@ -231,6 +231,17 @@ function updateMinHint() {
         : words + ' words = ' + points.toFixed(1) + ' points (voice weight is 0, so voice cannot reach it).';
 }
 
+// True only after a SUCCESSFUL configuration read this page load. A save is
+// refused while this is false: see the config-loss guard in loadMVPConfig().
+let mvpConfigLoaded = false;
+
+function mvpSetSaveEnabled(enabled) {
+    const btn = document.getElementById('mvp-save-btn');
+    if (!btn) return;
+    btn.disabled = !enabled;
+    btn.title = enabled ? '' : 'Settings could not be loaded — saving is disabled.';
+}
+
 // The saved role/channel as loaded, so a save made before the pickers finish
 // populating cannot send "no role" and wipe them.
 let loadedRoleId = null;
@@ -248,12 +259,34 @@ async function loadMVPConfig() {
     let data;
     try {
         const res = await fetch('/api/mvp/config');
-        if (!res.ok) { if (scope) scope.textContent = 'Could not load the saved MVP settings.'; return; }
+        if (!res.ok) {
+            // LAUNCH FIX (config loss): a failed READ must never be presented as
+            // loadable defaults. Saving here would write those defaults over the
+            // server's real settings, which is how configuration "disappeared".
+            mvpConfigLoaded = false;
+            mvpSetSaveEnabled(false);
+            if (scope) {
+                scope.textContent = 'Could not load the saved MVP settings (' + res.status + '). '
+                    + 'Saving is disabled so the stored settings cannot be overwritten by values that were never loaded. '
+                    + 'Reload the page to try again.';
+                scope.dataset.state = 'error';
+            }
+            return;
+        }
         data = await res.json();
     } catch (e) {
-        if (scope) scope.textContent = 'Could not load the saved MVP settings.';
+        mvpConfigLoaded = false;
+        mvpSetSaveEnabled(false);
+        if (scope) {
+            scope.textContent = 'Could not reach the server to load the saved MVP settings. '
+                + 'Saving is disabled so the stored settings cannot be overwritten.';
+            scope.dataset.state = 'error';
+        }
         return;
     }
+    mvpConfigLoaded = true;
+    mvpSetSaveEnabled(true);
+    if (scope) delete scope.dataset.state;
     const c = data.config || {};
     const saved = Object.keys(c).length > 0;
     if (scope) scope.textContent = saved
@@ -278,6 +311,7 @@ async function loadMVPConfig() {
         if (cp && c.announce_channel_id) { $(cp).val(String(c.announce_channel_id)).trigger('change.select2'); }
     }, 800);
 }
+mvpSetSaveEnabled(false);   // disabled until a read succeeds
 loadMVPConfig();
 
 // Reads the form without substituting defaults: a blank or invalid field is
@@ -320,6 +354,12 @@ function readMVPForm() {
 
 async function saveMVPConfig(btn) {
     const status = document.getElementById('mvp-save-status');
+    if (!mvpConfigLoaded) {
+        // Belt-and-braces: the button is disabled, but a keyboard/programmatic
+        // invocation must not be able to write values that were never loaded.
+        if (status) { status.textContent = 'Settings were not loaded — reload the page before saving.'; status.dataset.state = 'error'; }
+        return;
+    }
     const form = readMVPForm();
     if (form.error) {
         if (status) { status.textContent = form.error; status.dataset.state = 'error'; }
