@@ -138,14 +138,14 @@ class ShopOptionTests(unittest.TestCase):
             for parent in Path(__file__).resolve().parents
             if (parent / "cogs/shop.py").is_file())
         self.assertIn("AND option_of_id IS NULL", source.read_text())
-        # Exercise the actual command callback, including both the listing
-        # fields and its direct-buy button view.
-        from cogs.shop import Shop
+        # Exercise the shop page rendering (formerly the /shop command callback),
+        # including both the listing fields and its direct-buy button view.
+        from cogs.shop import _show_shop_page
         response = SimpleNamespace(send_message=AsyncMock())
         interaction = SimpleNamespace(
             guild=SimpleNamespace(id=GUILD, name="Test Guild"),
             user=SimpleNamespace(id=USER, roles=[]), response=response)
-        asyncio.run(Shop.shop.callback(None, interaction))
+        asyncio.run(_show_shop_page(interaction, 0))
         kwargs = response.send_message.await_args.kwargs
         listed_names = [field.name for field in kwargs["embed"].fields]
         button_ids = [item.custom_id for item in kwargs["view"].children]
