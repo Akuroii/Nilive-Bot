@@ -432,17 +432,6 @@ window.__GUILD_ID__ = {{ (session.get('guild_id')|string if session.get('guild_i
         <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-sliders"></use></svg></span>
         <span class="nav-text">Shop Designer</span>
     </a>
-    <a href="/shop-publisher"
-       hx-get="/shop-publisher"
-       hx-target="#content-area"
-       hx-swap="outerHTML"
-       hx-select="#content-area"
-       hx-push-url="true"
-       class="nav-link nav-link-legacy"
-       aria-label="Legacy Shop Publisher — compatibility page">
-        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-megaphone"></use></svg></span>
-        <span class="nav-text">Shop Publisher · Legacy</span>
-    </a>
     <a href="/events"
        hx-get="/events"
        hx-target="#content-area"

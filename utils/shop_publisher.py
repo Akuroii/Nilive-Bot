@@ -581,7 +581,7 @@ def build_purchase_action(action_cfg: dict, rows_by_id: dict, currency: dict,
 
     action = {"kind": kind, "entries": entries_out}
     if kind == "buttons":
-        action["style"] = "green"   # /shop's existing button convention
+        action["style"] = "green"   # existing green shop-button convention
     else:
         action["component_custom_id"] = f"shop_buy_sel_{int(context_id or 0)}"
         placeholder_tpl = cfg.get("placeholder") or DEFAULT_PLACEHOLDERS[kind]
