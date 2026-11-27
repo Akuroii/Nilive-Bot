@@ -99,7 +99,12 @@ class AddCoinsModal(discord.ui.Modal):
             return
         if not await self.view_ref._acknowledge(interaction):
             return
-        bal = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="balance")
+        try:
+            bal = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="balance")
+        except Exception as exc:
+            print(f"[TRADE] Coin balance check failed ({type(exc).__name__}).")
+            await self.view_ref._private_error(interaction, "Could not verify your coin balance. Please try again.")
+            return
         if amt > bal:
             cc = self.view_ref.cur["coins"]
             await self.view_ref._private_error(
@@ -132,7 +137,12 @@ class AddDiamondsModal(discord.ui.Modal):
             return
         if not await self.view_ref._acknowledge(interaction):
             return
-        gems = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="diamonds")
+        try:
+            gems = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="diamonds")
+        except Exception as exc:
+            print(f"[TRADE] Diamond balance check failed ({type(exc).__name__}).")
+            await self.view_ref._private_error(interaction, "Could not verify your diamond balance. Please try again.")
+            return
         if amt > gems:
             cd = self.view_ref.cur["diamonds"]
             await self.view_ref._private_error(
@@ -190,7 +200,12 @@ class ItemQuantityModal(discord.ui.Modal):
         # rule execute_trade() itself follows at execution time.
         if not await self.view_ref._acknowledge(interaction):
             return
-        owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, self.item_name, qty)
+        try:
+            owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, self.item_name, qty)
+        except Exception as exc:
+            print(f"[TRADE] Item ownership check failed ({type(exc).__name__}).")
+            await self.view_ref._private_error(interaction, "Could not verify your inventory. Please try again.")
+            return
         if not owns:
             await self.view_ref._private_error(
                 interaction, f"You don't have {qty}x **{self.item_name}** to offer.")
@@ -258,7 +273,12 @@ class AddItemModal(discord.ui.Modal, title="Offer an Item"):
         name = str(self.item_name.value).strip()
         if not await self.view_ref._acknowledge(interaction):
             return
-        owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, name, qty)
+        try:
+            owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, name, qty)
+        except Exception as exc:
+            print(f"[TRADE] Item ownership check failed ({type(exc).__name__}).")
+            await self.view_ref._private_error(interaction, "Could not verify your inventory. Please try again.")
+            return
         if not owns:
             await self.view_ref._private_error(
                 interaction, f"You don't have {qty}x **{name}** to offer.")
@@ -298,9 +318,21 @@ class TradeView(discord.ui.View):
             return "This trade has already ended."
         return None
 
+    async def _complete_deferred_response(self, interaction: discord.Interaction, message: str):
+        """Finish a thinking defer with the follow-up required by discord.py."""
+        if not interaction.response.is_done():
+            raise RuntimeError("Cannot complete an interaction before acknowledging it")
+        try:
+            # discord.py 2.7.1 InteractionResponse.defer(thinking=True) docs
+            # explicitly require a follow-up to make the thinking state go away.
+            await interaction.followup.send(message, ephemeral=True)
+        except discord.HTTPException as exc:
+            print(f"[TRADE] Deferred interaction completion failed ({type(exc).__name__}).")
+            raise
+
     async def _private_error(self, interaction: discord.Interaction, message: str):
         if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
+            await self._complete_deferred_response(interaction, message)
         else:
             await interaction.response.send_message(message, ephemeral=True)
 
@@ -345,29 +377,37 @@ class TradeView(discord.ui.View):
 
             old_offers = copy.deepcopy(self.session.offers)
             old_ready = set(self.session.ready)
+            mutation_error = None
             try:
                 if mutation is not None:
                     mutation_error = mutation()
-                    if mutation_error:
-                        await self._private_error(interaction, mutation_error)
-                        return False
-                embed = await self.session.build_embed(self.cur)
-                await message.edit(embed=embed, view=self)
-                return True
+                if not mutation_error:
+                    embed = await self.session.build_embed(self.cur)
+                    await message.edit(embed=embed, view=self)
             except discord.NotFound:
                 self.session.offers = old_offers
                 self.session.ready = old_ready
                 await self._private_error(interaction, "The shared Trade message no longer exists.")
+                return False
             except discord.HTTPException as exc:
                 self.session.offers = old_offers
                 self.session.ready = old_ready
                 print(f"[TRADE] Public message refresh failed ({type(exc).__name__}).")
                 await self._private_error(interaction, "Could not update the shared Trade message. Please try again.")
-            except Exception:
+                return False
+            except Exception as exc:
                 self.session.offers = old_offers
                 self.session.ready = old_ready
+                print(f"[TRADE] Public offer update failed ({type(exc).__name__}).")
+                await self._private_error(interaction, "Could not update the shared Trade offer. Please try again.")
                 raise
-            return False
+
+            if mutation_error:
+                await self._private_error(interaction, mutation_error)
+                return False
+
+            await self._complete_deferred_response(interaction, "Trade offer updated.")
+            return True
 
     async def on_timeout(self):
         async with self.session.lock:
@@ -442,14 +482,31 @@ class TradeView(discord.ui.View):
                     self.session.ready = previous_ready
                     print(f"[TRADE] Ready-state message refresh failed ({type(exc).__name__}).")
                     await self._private_error(interaction, "Could not update the shared Trade message. Please try again.")
+                    return
+                except Exception as exc:
+                    self.session.ready = previous_ready
+                    print(f"[TRADE] Ready-state update failed ({type(exc).__name__}).")
+                    await self._private_error(interaction, "Could not update the shared Trade message. Please try again.")
+                    raise
+                await self._complete_deferred_response(interaction, "Ready status updated.")
                 return
 
             # The session lock closes the gap between both Ready clicks and
             # settlement; execute_trade still owns the atomic DB transaction.
             a_id, b_id = self.session.user_a.id, self.session.user_b.id
-            result = await execute_trade(
-                self.session.guild_id, a_id, self.session.offers[a_id],
-                b_id, self.session.offers[b_id], reason="Player trade")
+            try:
+                result = await execute_trade(
+                    self.session.guild_id, a_id, self.session.offers[a_id],
+                    b_id, self.session.offers[b_id], reason="Player trade")
+            except Exception as exc:
+                print(f"[TRADE] Settlement attempt failed ({type(exc).__name__}).")
+                try:
+                    await message.edit(embed=await self.session.build_embed(self.cur), view=self)
+                except Exception as edit_exc:
+                    print(f"[TRADE] Ready-state display recovery failed ({type(edit_exc).__name__}).")
+                await self._private_error(
+                    interaction, "Trade could not be completed. The offers remain open; please try Ready again.")
+                return
 
             self.session.finished = True
             _active_trades.pop(self.session.key(), None)
@@ -473,6 +530,19 @@ class TradeView(discord.ui.View):
                 await self._private_error(
                     interaction,
                     "Trade processing finished, but the shared message could not be updated. Check trade history.")
+                return
+            except Exception as exc:
+                print(f"[TRADE] Settlement receipt update failed ({type(exc).__name__}).")
+                await self._private_error(
+                    interaction,
+                    "Trade processing finished, but its shared receipt could not be updated. Check trade history.")
+                raise
+
+            if result.get("success"):
+                await self._complete_deferred_response(interaction, "Trade completed.")
+            else:
+                await self._complete_deferred_response(
+                    interaction, "Trade failed. Review the shared message for details.")
 
     @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -483,6 +553,10 @@ class TradeView(discord.ui.View):
             if error:
                 await self._private_error(interaction, error)
                 return
+            message = self.session.message
+            if message is None:
+                await self._private_error(interaction, "The shared Trade message is unavailable.")
+                return
             self.session.finished = True
             _active_trades.pop(self.session.key(), None)
             for item in self.children:
@@ -491,7 +565,19 @@ class TradeView(discord.ui.View):
                 description=f"Trade cancelled by {interaction.user.mention}.",
                 color=0xED4245)
             if self.session.message:
-                await self.session.message.edit(embed=embed, view=self)
+                try:
+                    await self.session.message.edit(embed=embed, view=self)
+                except discord.HTTPException as exc:
+                    print(f"[TRADE] Cancelled Trade message edit failed ({type(exc).__name__}).")
+                    await self._private_error(
+                        interaction, "Trade was cancelled, but the shared message could not be updated.")
+                    return
+                except Exception as exc:
+                    print(f"[TRADE] Cancelled Trade display update failed ({type(exc).__name__}).")
+                    await self._private_error(
+                        interaction, "Trade was cancelled, but the shared message could not be updated.")
+                    raise
+            await self._complete_deferred_response(interaction, "Trade cancelled.")
 
 
 class Trade(commands.Cog):
