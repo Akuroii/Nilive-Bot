@@ -239,6 +239,19 @@ async def load_cogs():
             bot.failed_cogs.append({"cog": cog, "error": str(e)})
 
 
+_command_sync_lock = asyncio.Lock()
+
+
+async def sync_startup_commands(*, force: bool = False):
+    """Sync deployed definitions once; explicit developer calls can force it."""
+    async with _command_sync_lock:
+        if not force and getattr(bot, "_startup_commands_synced", False):
+            return None
+        synced = await bot.tree.sync()
+        bot._startup_commands_synced = True
+        return synced
+
+
 @bot.event
 async def on_ready():
     # IDEMPOTENT: discord.py dispatches on_ready again after a reconnect that
@@ -249,12 +262,17 @@ async def on_ready():
     # and aborted the remainder of this handler.
     print(f"Nero is online as {bot.user}")
     bot.gateway_coordinator.gateway_transport_verified = True
+    # Command definitions are unchanged within a running process. Sync on the
+    # first READY (including every fresh deployment), retry on failure, and
+    # leave the developer !sync command as the explicit force-refresh path.
+    sync_started = time.perf_counter()
     try:
-        await bot.tree.sync()
-        synced = await bot.tree.fetch_commands()
-        print(f"Synced {len(synced)} slash commands")
+        synced = await sync_startup_commands()
+        if synced is not None:
+            print(f"Synced {len(synced)} slash commands "
+                  f"in {(time.perf_counter() - sync_started) * 1000:.0f} ms")
     except Exception as e:
-        print(f"Sync error: {e}")
+        print(f"Sync error after {(time.perf_counter() - sync_started) * 1000:.0f} ms: {e}")
         traceback.print_exc()
 
     await bot.gateway_coordinator.reconcile_guilds()
@@ -283,7 +301,6 @@ async def on_disconnect():
 
 @bot.event
 async def on_message(message: discord.Message):
-    print(f"[DIAG-GATEWAY] Message event received: author={message.author} (bot={getattr(message.author, 'bot', False)}), guild_id={getattr(message.guild, 'id', None)}, channel_id={getattr(message.channel, 'id', None)}, content={repr(message.content)}")
     await bot.process_commands(message)
 
 
@@ -413,9 +430,10 @@ def dev_only():
 @bot.command()
 @dev_only()
 async def sync(ctx):
-    await bot.tree.sync()
-    cmds = await bot.tree.fetch_commands()
-    await ctx.send(f"Synced {len(cmds)} commands!")
+    started = time.perf_counter()
+    cmds = await sync_startup_commands(force=True)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    await ctx.send(f"Synced {len(cmds)} commands in {elapsed_ms:.0f} ms!")
 
 
 @bot.command()

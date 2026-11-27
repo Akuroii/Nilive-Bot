@@ -21,7 +21,23 @@ from dashboard.api import api_bp
 def get_guild_roles():
     guild_id  = get_session_guild_id()
     from dashboard.utils.role_validation import fetch_guild_roles_and_bot_member, compute_role_assignability
-    roles, bot_member, err = fetch_guild_roles_and_bot_member(guild_id)
+    from dashboard.utils.discord_guild_cache import get_or_load
+
+    bot_token = os.getenv("DISCORD_TOKEN", "").strip()
+    refresh = request.args.get("refresh") == "1"
+    if bot_token:
+        def load_roles():
+            value = fetch_guild_roles_and_bot_member(guild_id)
+            roles_value, member_value, error_value = value
+            member_status = (member_value or {}).get("_bot_status") if isinstance(member_value, dict) else None
+            valid_member_state = member_status != "unknown"
+            cacheable = error_value is None and roles_value is not None and valid_member_state
+            return value, cacheable
+
+        roles, bot_member, err = get_or_load(
+            "roles", guild_id, bot_token, load_roles, refresh=refresh)
+    else:
+        roles, bot_member, err = fetch_guild_roles_and_bot_member(guild_id)
     if err:
         return jsonify({"results": [], "error": err})
 
@@ -73,19 +89,29 @@ def get_guild_channels():
                 ]
             })
         return jsonify({"results": [], "error": "BOT_TOKEN not set"})
-    try:
-        resp = _req.get(
-            f"https://discord.com/api/v10/guilds/{guild_id}/channels",
-            headers={"Authorization": f"Bot {bot_token}"},
-            timeout=8,
-        )
-        if resp.status_code != 200:
-            return jsonify({"results": [], "error": f"Discord {resp.status_code}"})
-        channels = resp.json()
-    except Exception as exc:
-        return jsonify({"results": [], "error": f"Network error ({type(exc).__name__})"})
-    if not isinstance(channels, list):
-        return jsonify({"results": [], "error": "Malformed channels payload"})
+    from dashboard.utils.discord_guild_cache import get_or_load
+
+    def load_channels():
+        try:
+            resp = _req.get(
+                f"https://discord.com/api/v10/guilds/{guild_id}/channels",
+                headers={"Authorization": f"Bot {bot_token}"},
+                timeout=8,
+            )
+            if resp.status_code != 200:
+                return (None, f"Discord {resp.status_code}"), False
+            payload = resp.json()
+            if not isinstance(payload, list) or any(not isinstance(ch, dict) for ch in payload):
+                return (None, "Malformed channels payload"), False
+            return (payload, None), True
+        except Exception as exc:
+            return (None, f"Network error ({type(exc).__name__})"), False
+
+    (channels, channel_error) = get_or_load(
+        "channels", guild_id, bot_token, load_channels,
+        refresh=request.args.get("refresh") == "1")
+    if channel_error:
+        return jsonify({"results": [], "error": channel_error})
     TYPE_ICON = {0: "#", 2: "speaker", 4: "folder", 5: "megaphone", 10: "thread", 11: "thread", 12: "thread", 13: "mic", 15: "forum"}
     TYPE_NAME = {0: "text", 2: "voice", 4: "category", 5: "announcement", 10: "thread", 11: "thread", 12: "thread", 13: "stage", 15: "forum"}
 

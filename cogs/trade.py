@@ -1,3 +1,5 @@
+import asyncio
+import copy
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -34,6 +36,8 @@ class TradeSession:
         self.ready: set[int] = set()
         self.message: discord.Message | None = None
         self.finished = False
+        # Serializes offer mutations, public renders, Ready changes, and settlement.
+        self.lock = asyncio.Lock()
 
     def other(self, user_id: int) -> discord.Member:
         return self.user_b if user_id == self.user_a.id else self.user_a
@@ -93,17 +97,20 @@ class AddCoinsModal(discord.ui.Modal):
         if amt < 0:
             await interaction.response.send_message("Amount cannot be negative.", ephemeral=True)
             return
+        if not await self.view_ref._acknowledge(interaction):
+            return
         bal = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="balance")
         if amt > bal:
-            cur = self.view_ref.cur
-            cc = cur["coins"]
-            await interaction.response.send_message(
-                f"You only have {bal:,} {cc['emoji']} — cannot offer {amt:,}.",
-                ephemeral=True)
+            cc = self.view_ref.cur["coins"]
+            await self.view_ref._private_error(
+                interaction, f"You only have {bal:,} {cc['emoji']} — cannot offer {amt:,}.")
             return
-        self.view_ref.session.offers[interaction.user.id]["coins"] = amt
+        await self.view_ref.refresh_public_trade(
+            interaction, lambda: self._set_offer(interaction.user.id, amt))
+
+    def _set_offer(self, user_id: int, amount: int):
+        self.view_ref.session.offers[user_id]["coins"] = amount
         self.view_ref.session.reset_ready()
-        await self.view_ref.refresh(interaction)
 
 
 class AddDiamondsModal(discord.ui.Modal):
@@ -123,17 +130,20 @@ class AddDiamondsModal(discord.ui.Modal):
         if amt < 0:
             await interaction.response.send_message("Amount cannot be negative.", ephemeral=True)
             return
+        if not await self.view_ref._acknowledge(interaction):
+            return
         gems = await get_balance(self.view_ref.session.guild_id, interaction.user.id, currency="diamonds")
         if amt > gems:
-            cur = self.view_ref.cur
-            cd = cur["diamonds"]
-            await interaction.response.send_message(
-                f"You only have {gems:,} {cd['emoji']} — cannot offer {amt:,}.",
-                ephemeral=True)
+            cd = self.view_ref.cur["diamonds"]
+            await self.view_ref._private_error(
+                interaction, f"You only have {gems:,} {cd['emoji']} — cannot offer {amt:,}.")
             return
-        self.view_ref.session.offers[interaction.user.id]["diamonds"] = amt
+        await self.view_ref.refresh_public_trade(
+            interaction, lambda: self._set_offer(interaction.user.id, amt))
+
+    def _set_offer(self, user_id: int, amount: int):
+        self.view_ref.session.offers[user_id]["diamonds"] = amount
         self.view_ref.session.reset_ready()
-        await self.view_ref.refresh(interaction)
 
 
 # ─── Item picker (replaces free-text item-name entry) ───────────────────
@@ -178,19 +188,20 @@ class ItemQuantityModal(discord.ui.Modal):
         # Re-checked live (not just against the snapshot the Select was
         # built from) — the same "trust nothing older than this click"
         # rule execute_trade() itself follows at execution time.
+        if not await self.view_ref._acknowledge(interaction):
+            return
         owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, self.item_name, qty)
         if not owns:
-            await interaction.response.send_message(
-                f"You don't have {qty}x **{self.item_name}** to offer.", ephemeral=True)
+            await self.view_ref._private_error(
+                interaction, f"You don't have {qty}x **{self.item_name}** to offer.")
             return
-        offer = self.view_ref.session.offers[interaction.user.id]
-        if self.item_name not in offer["items"] and len(offer["items"]) >= MAX_ITEM_LINES_PER_SIDE:
-            await interaction.response.send_message(
-                f"Max {MAX_ITEM_LINES_PER_SIDE} distinct items per side.", ephemeral=True)
-            return
-        offer["items"][self.item_name] = qty
-        self.view_ref.session.reset_ready()
-        await self.view_ref.refresh(interaction)
+        def mutate():
+            offer = self.view_ref.session.offers[interaction.user.id]
+            if self.item_name not in offer["items"] and len(offer["items"]) >= MAX_ITEM_LINES_PER_SIDE:
+                return f"Max {MAX_ITEM_LINES_PER_SIDE} distinct items per side."
+            offer["items"][self.item_name] = qty
+            self.view_ref.session.reset_ready()
+        await self.view_ref.refresh_public_trade(interaction, mutate)
 
 
 class ItemPickerSelect(discord.ui.Select):
@@ -245,19 +256,21 @@ class AddItemModal(discord.ui.Modal, title="Offer an Item"):
             await interaction.response.send_message("Quantity must be positive.", ephemeral=True)
             return
         name = str(self.item_name.value).strip()
+        if not await self.view_ref._acknowledge(interaction):
+            return
         owns = await has_item(self.view_ref.session.guild_id, interaction.user.id, name, qty)
         if not owns:
-            await interaction.response.send_message(
-                f"You don't have {qty}x **{name}** to offer.", ephemeral=True)
+            await self.view_ref._private_error(
+                interaction, f"You don't have {qty}x **{name}** to offer.")
             return
-        offer = self.view_ref.session.offers[interaction.user.id]
-        if name not in offer["items"] and len(offer["items"]) >= MAX_ITEM_LINES_PER_SIDE:
-            await interaction.response.send_message(
-                f"Max {MAX_ITEM_LINES_PER_SIDE} distinct items per side.", ephemeral=True)
-            return
-        offer["items"][name] = qty
-        self.view_ref.session.reset_ready()
-        await self.view_ref.refresh(interaction)
+
+        def mutate():
+            offer = self.view_ref.session.offers[interaction.user.id]
+            if name not in offer["items"] and len(offer["items"]) >= MAX_ITEM_LINES_PER_SIDE:
+                return f"Max {MAX_ITEM_LINES_PER_SIDE} distinct items per side."
+            offer["items"][name] = qty
+            self.view_ref.session.reset_ready()
+        await self.view_ref.refresh_public_trade(interaction, mutate)
 
 
 class TradeView(discord.ui.View):
@@ -276,35 +289,100 @@ class TradeView(discord.ui.View):
             button.label = f"Offer {info['name']}"
             button.emoji = _as_button_emoji(info["emoji"])
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    def _active_error(self, interaction: discord.Interaction) -> str | None:
         if interaction.user.id not in (self.session.user_a.id, self.session.user_b.id):
-            await interaction.response.send_message(
-                "This is not your trade.", ephemeral=True)
+            return "This is not your trade."
+        if interaction.guild_id != self.session.guild_id:
+            return "This trade is only valid in its original server."
+        if self.session.finished or _active_trades.get(self.session.key()) is not self.session:
+            return "This trade has already ended."
+        return None
+
+    async def _private_error(self, interaction: discord.Interaction, message: str):
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+    async def _acknowledge(self, interaction: discord.Interaction) -> bool:
+        error = self._active_error(interaction)
+        if error:
+            await self._private_error(interaction, error)
             return False
-        if self.session.finished:
-            await interaction.response.send_message(
-                "This trade has already ended.", ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        return True
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        error = self._active_error(interaction)
+        if error is None and self.session.message is not None:
+            if getattr(interaction.message, "id", None) != self.session.message.id:
+                error = "This Trade message is no longer current."
+        if error:
+            await self._private_error(interaction, error)
             return False
         return True
 
-    async def refresh(self, interaction: discord.Interaction):
-        embed = await self.session.build_embed(self.cur)
-        if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=self)
-        else:
-            await interaction.response.edit_message(embed=embed, view=self)
+    async def refresh_public_trade(self, interaction: discord.Interaction, mutation=None):
+        """Apply one authorized state change and explicitly edit the shared message.
+
+        Modal interactions may originate from ephemeral picker messages; they
+        are acknowledged privately, while this method always edits the stored
+        public Trade message. The session lock prevents stale renders from
+        replacing newer concurrent offer/Ready state.
+        """
+        if not await self._acknowledge(interaction):
+            return False
+        async with self.session.lock:
+            error = self._active_error(interaction)
+            message = self.session.message
+            if error:
+                await self._private_error(interaction, error)
+                return False
+            if message is None:
+                await self._private_error(interaction, "The shared Trade message is unavailable.")
+                return False
+
+            old_offers = copy.deepcopy(self.session.offers)
+            old_ready = set(self.session.ready)
+            try:
+                if mutation is not None:
+                    mutation_error = mutation()
+                    if mutation_error:
+                        await self._private_error(interaction, mutation_error)
+                        return False
+                embed = await self.session.build_embed(self.cur)
+                await message.edit(embed=embed, view=self)
+                return True
+            except discord.NotFound:
+                self.session.offers = old_offers
+                self.session.ready = old_ready
+                await self._private_error(interaction, "The shared Trade message no longer exists.")
+            except discord.HTTPException as exc:
+                self.session.offers = old_offers
+                self.session.ready = old_ready
+                print(f"[TRADE] Public message refresh failed ({type(exc).__name__}).")
+                await self._private_error(interaction, "Could not update the shared Trade message. Please try again.")
+            except Exception:
+                self.session.offers = old_offers
+                self.session.ready = old_ready
+                raise
+            return False
 
     async def on_timeout(self):
-        self.session.finished = True
-        _active_trades.pop(self.session.key(), None)
-        for item in self.children:
-            item.disabled = True
-        if self.session.message:
-            try:
-                await self.session.message.edit(
-                    content="⌛ Trade timed out — no changes were made.", view=self)
-            except Exception:
-                pass
+        async with self.session.lock:
+            if self.session.finished:
+                return
+            self.session.finished = True
+            _active_trades.pop(self.session.key(), None)
+            for item in self.children:
+                item.disabled = True
+            if self.session.message:
+                try:
+                    await self.session.message.edit(
+                        content="⌛ Trade timed out — no changes were made.", view=self)
+                except Exception:
+                    pass
 
     # Labels/emoji here are PLACEHOLDERS: `discord.ui.button` arguments are
     # evaluated once, at class-definition time, so they cannot hold a
@@ -336,58 +414,84 @@ class TradeView(discord.ui.View):
 
     @discord.ui.button(label="Clear My Offer", emoji="🔄", style=discord.ButtonStyle.secondary)
     async def clear_offer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.session.offers[interaction.user.id] = _empty_offer()
-        self.session.reset_ready()
-        await self.refresh(interaction)
+        def mutate():
+            self.session.offers[interaction.user.id] = _empty_offer()
+            self.session.reset_ready()
+        await self.refresh_public_trade(interaction, mutate)
 
     @discord.ui.button(label="Ready", emoji=CHECK_EMOJI,
                        style=discord.ButtonStyle.success)
     async def ready(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.session.ready.add(interaction.user.id)
-
-        if len(self.session.ready) < 2:
-            await self.refresh(interaction)
+        if not await self._acknowledge(interaction):
             return
+        async with self.session.lock:
+            error = self._active_error(interaction)
+            if error:
+                await self._private_error(interaction, error)
+                return
+            message = self.session.message
+            if message is None:
+                await self._private_error(interaction, "The shared Trade message is unavailable.")
+                return
+            previous_ready = set(self.session.ready)
+            self.session.ready.add(interaction.user.id)
+            if len(self.session.ready) < 2:
+                try:
+                    await message.edit(embed=await self.session.build_embed(self.cur), view=self)
+                except discord.HTTPException as exc:
+                    self.session.ready = previous_ready
+                    print(f"[TRADE] Ready-state message refresh failed ({type(exc).__name__}).")
+                    await self._private_error(interaction, "Could not update the shared Trade message. Please try again.")
+                return
 
-        # Both ready — execute atomically. interaction_check already
-        # gated who can click; execute_trade re-validates live balances
-        # inside its own transaction regardless (offers can go stale
-        # between "both readied up" and now).
-        a_id, b_id = self.session.user_a.id, self.session.user_b.id
-        result = await execute_trade(
-            self.session.guild_id, a_id, self.session.offers[a_id],
-            b_id, self.session.offers[b_id],
-            reason="Player trade")
+            # The session lock closes the gap between both Ready clicks and
+            # settlement; execute_trade still owns the atomic DB transaction.
+            a_id, b_id = self.session.user_a.id, self.session.user_b.id
+            result = await execute_trade(
+                self.session.guild_id, a_id, self.session.offers[a_id],
+                b_id, self.session.offers[b_id], reason="Player trade")
 
-        self.session.finished = True
-        _active_trades.pop(self.session.key(), None)
-        for item in self.children:
-            item.disabled = True
+            self.session.finished = True
+            _active_trades.pop(self.session.key(), None)
+            for item in self.children:
+                item.disabled = True
 
-        if not result.get("success"):
-            embed = discord.Embed(
-                title="❌ Trade failed",
-                description=result.get("error", "Something changed — trade could not complete."),
-                color=0xED4245)
-            await interaction.response.edit_message(embed=embed, view=self)
-            return
-
-        embed = await self.session.build_embed(self.cur)
-        embed.title = f"{CHECK_EMOJI} Trade complete"
-        embed.color = 0x57F287
-        embed.set_footer(text=f"Trade #{result['trade_id']}")
-        await interaction.response.edit_message(embed=embed, view=self)
+            if not result.get("success"):
+                embed = discord.Embed(
+                    title="❌ Trade failed",
+                    description=result.get("error", "Something changed — trade could not complete."),
+                    color=0xED4245)
+            else:
+                embed = await self.session.build_embed(self.cur)
+                embed.title = f"{CHECK_EMOJI} Trade complete"
+                embed.color = 0x57F287
+                embed.set_footer(text=f"Trade #{result['trade_id']}")
+            try:
+                await message.edit(embed=embed, view=self)
+            except discord.HTTPException as exc:
+                print(f"[TRADE] Settlement completed but public receipt edit failed ({type(exc).__name__}).")
+                await self._private_error(
+                    interaction,
+                    "Trade processing finished, but the shared message could not be updated. Check trade history.")
 
     @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.session.finished = True
-        _active_trades.pop(self.session.key(), None)
-        for item in self.children:
-            item.disabled = True
-        embed = discord.Embed(
-            description=f"Trade cancelled by {interaction.user.mention}.",
-            color=0xED4245)
-        await interaction.response.edit_message(embed=embed, view=self)
+        if not await self._acknowledge(interaction):
+            return
+        async with self.session.lock:
+            error = self._active_error(interaction)
+            if error:
+                await self._private_error(interaction, error)
+                return
+            self.session.finished = True
+            _active_trades.pop(self.session.key(), None)
+            for item in self.children:
+                item.disabled = True
+            embed = discord.Embed(
+                description=f"Trade cancelled by {interaction.user.mention}.",
+                color=0xED4245)
+            if self.session.message:
+                await self.session.message.edit(embed=embed, view=self)
 
 
 class Trade(commands.Cog):
