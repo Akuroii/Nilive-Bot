@@ -35,11 +35,13 @@ Run:  python3 scripts/test_shop_publisher_api.py
 import asyncio
 import time
 import unittest
+from pathlib import Path
 
 from phase1_support import (
     GUILD, USER, execute, rows, mutation_snapshot, reset_database,
 )
 import dashboard.app as dashboard
+import app as alternate_dashboard
 
 app = dashboard.app
 app.config.update(TESTING=True, PROPAGATE_EXCEPTIONS=False)
@@ -97,6 +99,50 @@ class ShopPublisherApiTests(unittest.TestCase):
             session.update(user={"id": USER, "username": "Step Zero", "avatar": None},
                            guild_id=GUILD, expires_at=time.time() + 7200,
                            csrf_token="step0-csrf")
+
+    def test_standalone_page_is_absent_but_shop_and_designer_stay_live(self):
+        for candidate in (app, alternate_dashboard.app):
+            paths = {rule.rule for rule in candidate.url_map.iter_rules()}
+            self.assertNotIn("/shop-publisher", paths)
+            self.assertIn("/shop", paths)
+            self.assertIn("/shop-designer", paths)
+        self.assertEqual(app.test_client().get("/shop-publisher").status_code, 404)
+
+        shop_response = self.client.get("/shop")
+        self.assertEqual(shop_response.status_code, 200)
+        shop_html = shop_response.get_data(as_text=True)
+        self.assertIn('href="/shop"', shop_html)
+        self.assertIn('id="shop-form-title">Add Shop Item', shop_html)
+        self.assertIn("/api/shop/item", shop_html)
+        self.assertNotIn('href="/shop-publisher"', shop_html)
+
+        designer_response = self.client.get("/shop-designer")
+        self.assertEqual(designer_response.status_code, 200)
+        designer_html = designer_response.get_data(as_text=True)
+        self.assertIn('data-page-module="shop-designer"', designer_html)
+        self.assertIn('id="sd-publication-publish"', designer_html)
+        self.assertIn("Publications", designer_html)
+        self.assertIn("js/shop-publisher.js", designer_html)
+        self.assertIn("js/shop-publications.js", designer_html)
+
+        palette = Path("dashboard/static/js/dashboard.js").read_text()
+        self.assertNotIn("id: 'p-shop-publisher'", palette)
+        self.assertNotIn("title: '/shop,", palette)
+        for candidate in (dashboard, alternate_dashboard):
+            commands = {name for names in candidate.COMMAND_CATEGORIES.values() for name in names}
+            self.assertNotIn("shop", commands)
+            self.assertIn("inventory", commands)
+            self.assertNotIn("shop", candidate.COMMAND_METADATA)
+
+    def test_integrated_publisher_api_routes_remain_registered(self):
+        paths = {rule.rule for rule in app.url_map.iter_rules()}
+        for path in (
+            "/api/shop-publisher/catalog",
+            "/api/shop-publisher/preview",
+            "/api/shop-publisher/designs",
+            "/api/shop-publisher/publications/publish",
+        ):
+            self.assertIn(path, paths)
 
     def preview(self, payload, csrf=True):
         headers = {"X-CSRF-Token": "step0-csrf"} if csrf else {}
@@ -430,18 +476,6 @@ class ShopPublisherApiTests(unittest.TestCase):
         self.assertIn("unknown_product",
                       [p["code"] for p in response.get_json()["problems"]],
                       "cross-guild ids are invisible, not leaking")
-
-    def test_publisher_page_renders_for_owner(self):
-        response = self.client.get("/shop-publisher")
-        self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
-        self.assertIn('data-page-module="shop-publisher"', html)
-        self.assertIn("sp-preview-mount", html)
-        self.assertIn("sp-purchase", html)
-
-    def test_publisher_page_is_owner_gated(self):
-        execute("UPDATE dashboard_users SET permission_level='admin'")
-        self.assertEqual(self.client.get("/shop-publisher").status_code, 403)
 
 
 if __name__ == "__main__":

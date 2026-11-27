@@ -1045,10 +1045,10 @@ def build_inventory_embed(tab: str, entries: list[dict],
 
     if not entries and not lines:
         empty = {
-            TAB_ITEMS: "No items yet — get one from `/shop`.",
-            TAB_COLORS: "No colors yet — find one in `/shop`.",
-            TAB_POTIONS: "No potions yet — get one from `/shop`.",
-            TAB_TITLES: "No titles yet — get one from `/shop`.",
+            TAB_ITEMS: "No items yet — get one from the server shop.",
+            TAB_COLORS: "No colors yet — find one in the server shop.",
+            TAB_POTIONS: "No potions yet — get one from the server shop.",
+            TAB_TITLES: "No titles yet — get one from the server shop.",
         }[tab]
         embed.description = empty + effect_note + _pending_reward_note(pending_rewards)
         return embed

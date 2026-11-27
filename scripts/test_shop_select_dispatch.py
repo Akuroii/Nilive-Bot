@@ -20,10 +20,29 @@ sys.path.insert(0, str(ROOT))
 import phase1_support  # noqa: F401,E402
 
 import discord
+from discord.ext import commands
+import cogs.shop as shop_cog
 from cogs.shop import Shop
 
 
 class ShopSelectDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_cog_setup_registers_inventory_not_legacy_shop(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        try:
+            # The setup path is real; only skip starting the unrelated periodic
+            # cleanup loop so this test needs no Discord gateway connection.
+            with patch.object(Shop, "__init__", lambda self, owner: setattr(self, "bot", owner)):
+                await shop_cog.setup(bot)
+
+            self.assertIsNone(bot.tree.get_command("shop"))
+            self.assertIsNotNone(bot.tree.get_command("inventory"))
+            cog = bot.get_cog("Shop")
+            self.assertIsNotNone(cog)
+            self.assertTrue(any(getattr(listener, "__self__", None) is cog
+                                for listener in bot.extra_events.get("on_interaction", [])))
+        finally:
+            await bot.close()
+
     def setUp(self):
         # Bypass Shop.__init__, which starts the unrelated cleanup task.
         self.shop = Shop.__new__(Shop)

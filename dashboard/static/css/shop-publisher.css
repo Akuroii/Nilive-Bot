@@ -8,8 +8,7 @@
    existing `.eb-preview-box` class for the Discord-style frame and the frozen
    embed/preview.js renderer emits the eb-* preview markup it always has.
 
-   Loaded from inside the page's content block (shop-publisher.html), so no
-   other page pays for it.
+   Loaded by the Shop Designer page for its shared preview components.
    ═══════════════════════════════════════════════════════════════ */
 
 .sp-shell { display: flex; flex-direction: column; gap: 16px; }

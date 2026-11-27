@@ -1,4 +1,4 @@
-"""Real Discord-flow tests: /shop paging, published purchase controls, item panel.
+"""Real Discord-flow tests: published purchase controls and item panel.
 
 Run as its own process (like the other suites): the scratch DB is bound at import.
     OWNER_ID=1 python3 -m pytest tests/test_inventory_shop_flows.py -q
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 for p in (ROOT, ROOT / "scripts", ROOT / "tests"):
     sys.path.insert(0, str(p))
 
-from phase1_support import GUILD, USER, execute, reset_database, rows, seed_listing, seed_member  # noqa: E402
+from phase1_support import GUILD, USER, reset_database, rows, seed_listing, seed_member  # noqa: E402
 from test_f01_f03_role_reconciliation_and_purchase import (  # noqa: E402
     BLUE, FLAME, balance_of, make_discord_env, make_interaction, worn_ids)
 from utils import inventory, potion_engine, shop_publication, shop_publisher  # noqa: E402
@@ -26,18 +26,6 @@ import cogs.wallet as wallet  # noqa: E402
 CURRENCY = {"coins": {"name": "Coins", "emoji": "🪙"}, "diamonds": {"name": "Diamonds", "emoji": "💎"}}
 
 
-def add_product(name, price, *, stock=None, desc="A product", kind="custom"):
-    return execute(
-        "INSERT INTO shop_items (guild_id, name, type, price, description, max_stock, current_stock, enabled) "
-        "VALUES (?,?,?,?,?,?,?,1)",
-        # max_stock 0/NULL means "unlimited"; sold out is max_stock >= 1 with current_stock 0
-        (GUILD, name, kind, price, desc, None if stock is None else max(1, stock), stock))
-
-
-def components_of(view):
-    return [c for row in view.to_components() for c in row["components"]]
-
-
 class ShopFlowBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await reset_database()
@@ -45,97 +33,11 @@ class ShopFlowBase(unittest.IsolatedAsyncioTestCase):
         self.bot, self.guild, self.member, self.roles = make_discord_env()
         self.guild.name = "Test Guild"
 
-    def shop_interaction(self):
-        ix = make_interaction(self.bot, self.guild, self.member)
-        ix.response.edit_message = AsyncMock()
-        return ix
-
-    async def open_shop(self):
-        ix = self.shop_interaction()
-        with patch.object(shop_cog, "get_currency_config", AsyncMock(return_value=CURRENCY)):
-            await shop_cog.Shop.shop.callback(None, ix)
-        return ix.response.send_message.await_args.kwargs
-
-    async def click_nav(self, view, label):
-        button = next(c for c in view.children if getattr(c, "label", "") == label)
-        ix = self.shop_interaction()
-        with patch.object(shop_cog, "get_currency_config", AsyncMock(return_value=CURRENCY)):
-            await button.callback(ix)
-        return ix.response.edit_message.await_args.kwargs
-
     def purchase_click(self, custom_id, values=None):
         ix = make_interaction(self.bot, self.guild, self.member)
         ix.type = discord.InteractionType.component
         ix.data = {"custom_id": custom_id, **({"values": values} if values is not None else {})}
         return ix
-
-
-class ShopPagingTests(ShopFlowBase):
-    async def test_five_or_fewer_products_keep_the_original_buttons(self):
-        ids = [add_product(f"Item{i}", 10 * (i + 1)) for i in range(4)]
-        sold_out = add_product("SoldOut", 5, stock=0)  # out of stock: field shown, no button
-        message = await self.open_shop()
-        view, embed = message["view"], message["embed"]
-        self.assertEqual(len(embed.fields), 5)
-        self.assertEqual(sorted(c.custom_id for c in view.children if hasattr(c, "custom_id")),
-                         sorted(f"shop_buy_{i}" for i in ids))
-        self.assertNotIn(f"shop_buy_{sold_out}", [c.custom_id for c in view.children])
-        self.assertFalse(any(isinstance(c, discord.ui.Select) for c in view.children))
-
-    async def test_every_in_stock_product_is_reachable_across_pages(self):
-        ids = [add_product(f"Item{i:02d}", 10 * (i + 1)) for i in range(27)]
-        add_product("SoldOut", 1, stock=0)
-        seed_listing(tier=6, stock=2)  # Prestige VI: Booster only, this member is not a booster
-        reachable, page_count, message = set(), 0, await self.open_shop()
-        while True:
-            page_count += 1
-            embed, view = message["embed"], message["view"]
-            self.assertLessEqual(len(embed.fields), 25)
-            self.assertLessEqual(len(embed), 6000)
-            self.assertLessEqual(len(view.to_components()), 5)
-            for select in (c for c in view.children if isinstance(c, discord.ui.Select)):
-                self.assertLessEqual(len(select.options), 25)
-                self.assertTrue(select.custom_id.startswith("shop_buy_sel_"))
-                self.assertTrue(select.custom_id[len("shop_buy_sel_"):].isdigit())
-                reachable.update(int(o.value.removeprefix("shop_buy_")) for o in select.options)
-            nxt = next(c for c in view.children if getattr(c, "label", "") == "Next ▶")
-            if nxt.disabled:
-                break
-            message = await self.click_nav(view, "Next ▶")
-        self.assertGreater(page_count, 1)
-        self.assertEqual(reachable, set(ids), "every purchasable product must be reachable; sold-out and booster-only are not offered")
-
-    async def test_long_descriptions_never_exceed_discord_limits(self):
-        for i in range(12):
-            add_product(f"Long{i:02d}", i + 1, desc="x" * 1500)
-        message = await self.open_shop()
-        while True:
-            self.assertLessEqual(len(message["embed"]), 6000)
-            for f in message["embed"].fields:
-                self.assertLessEqual(len(f.value), 1024)
-                self.assertLessEqual(len(f.name), 256)
-            nxt = next(c for c in message["view"].children if getattr(c, "label", "") == "Next ▶")
-            if nxt.disabled:
-                break
-            message = await self.click_nav(message["view"], "Next ▶")
-
-    async def test_select_on_a_later_page_completes_a_real_purchase(self):
-        ids = [add_product(f"Item{i:02d}", 10 * (i + 1)) for i in range(14)]
-        message = await self.open_shop()
-        message = await self.click_nav(message["view"], "Next ▶")
-        select = next(c for c in message["view"].children if isinstance(c, discord.ui.Select))
-        value = select.options[0].value
-        item_id = int(value.removeprefix("shop_buy_"))
-        self.assertIn(item_id, ids[10:])
-        before = balance_of()
-        price = rows("SELECT price FROM shop_items WHERE id=?", (item_id,))[0][0]
-        ix = self.purchase_click(select.custom_id, [value])
-        await shop_cog.Shop.on_interaction(None, ix)
-        self.assertEqual(balance_of(), before - price)
-        name = rows("SELECT name FROM shop_items WHERE id=?", (item_id,))[0][0]
-        owned = rows("SELECT quantity FROM inventory_items WHERE guild_id=? AND user_id=? AND item_name=?",
-                     (GUILD, USER, name))
-        self.assertEqual(owned, [(1,)])
 
 
 class PublishedControlTests(ShopFlowBase):

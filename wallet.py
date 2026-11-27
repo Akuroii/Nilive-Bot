@@ -540,9 +540,9 @@ def build_inventory_embed(tab: str, entries: list[dict],
 
     if not entries:
         empty = {
-            TAB_ITEMS: "No items yet — get one from `/shop`.",
-            TAB_POTIONS: "No potions yet — get one from `/shop`.",
-            TAB_TITLES: "No titles yet — get one from `/shop`.",
+            TAB_ITEMS: "No items yet — get one from the server shop.",
+            TAB_POTIONS: "No potions yet — get one from the server shop.",
+            TAB_TITLES: "No titles yet — get one from the server shop.",
         }[tab]
         embed.description = empty
         return embed
