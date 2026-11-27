@@ -227,6 +227,12 @@ class WalletMessagesUpdated(unittest.TestCase):
             content,
             "Wallet messages should not reference /shop command"
         )
+        # Verify the new messages are present
+        self.assertIn(
+            'check the server shop',
+            content,
+            "Wallet messages should use generic 'check the server shop' text"
+        )
 
 
 class ShopDesignerTemplateIntact(unittest.TestCase):
