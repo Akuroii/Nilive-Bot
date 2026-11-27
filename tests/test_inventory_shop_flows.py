@@ -51,9 +51,10 @@ class ShopFlowBase(unittest.IsolatedAsyncioTestCase):
         return ix
 
     async def open_shop(self):
+        from cogs.shop import _show_shop_page
         ix = self.shop_interaction()
         with patch.object(shop_cog, "get_currency_config", AsyncMock(return_value=CURRENCY)):
-            await shop_cog.Shop.shop.callback(None, ix)
+            await _show_shop_page(ix, 0)
         return ix.response.send_message.await_args.kwargs
 
     async def click_nav(self, view, label):

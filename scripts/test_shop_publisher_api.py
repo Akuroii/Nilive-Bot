@@ -431,17 +431,19 @@ class ShopPublisherApiTests(unittest.TestCase):
                       [p["code"] for p in response.get_json()["problems"]],
                       "cross-guild ids are invisible, not leaking")
 
-    def test_publisher_page_renders_for_owner(self):
+    def test_publisher_page_route_removed(self):
+        # The standalone /shop-publisher page has been retired.
+        # Verify it returns 404 (Not Found) instead of 200 or 403.
         response = self.client.get("/shop-publisher")
-        self.assertEqual(response.status_code, 200)
-        html = response.get_data(as_text=True)
-        self.assertIn('data-page-module="shop-publisher"', html)
-        self.assertIn("sp-preview-mount", html)
-        self.assertIn("sp-purchase", html)
+        self.assertEqual(response.status_code, 404,
+                        "Legacy /shop-publisher page route should be removed")
 
-    def test_publisher_page_is_owner_gated(self):
+    def test_publisher_page_route_removed_no_permission_check(self):
+        # Even with admin permissions, the retired route should not exist.
         execute("UPDATE dashboard_users SET permission_level='admin'")
-        self.assertEqual(self.client.get("/shop-publisher").status_code, 403)
+        response = self.client.get("/shop-publisher")
+        self.assertEqual(response.status_code, 404,
+                        "Legacy /shop-publisher page route should be removed for all users")
 
 
 if __name__ == "__main__":

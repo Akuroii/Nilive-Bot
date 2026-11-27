@@ -186,9 +186,10 @@ class FreeVITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await prestige.has_vi_activation(GUILD, USER))
 
     async def test_shop_displays_free_and_keeps_button_despite_zero_stock(self):
+        from cogs.shop import _show_shop_page
         itx = interaction(True)
         itx.guild.name = "Test guild"
-        await Shop.shop.callback(object.__new__(Shop), itx)
+        await _show_shop_page(itx, 0)
         kwargs = itx.response.send_message.call_args.kwargs
         content = str(kwargs["embed"].to_dict()).lower()
         self.assertIn("free", content)

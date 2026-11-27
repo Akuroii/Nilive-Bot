@@ -138,7 +138,6 @@ class Workstream2AcceptanceTests(unittest.TestCase):
             'dashboard/templates/config/announcements.html',
             'dashboard/templates/config/botprofile.html',
             'dashboard/templates/manage/tickets.html',
-            'dashboard/templates/manage/shoppublisher.html',
             'dashboard/templates/manage/shopdesigner.html',
             'dashboard/templates/manage/moderation.html',
             'dashboard/templates/manage/triggers.html',
