@@ -141,6 +141,22 @@ async def main():
     check("genuine disconnect still invalidates (no weakening)",
           not allowed, "guilds_synced reset")
 
+    # ---- 4b. verified-but-NOT-reconciled must still invalidate (no weakening).
+    # main.py sets gateway_transport_verified at the top of on_ready, before
+    # reconcile_guilds() has proven anything, so that flag alone must not be
+    # allowed to suppress the invalidation.
+    bot._open = True                            # the client is live again
+    coord.gateway_transport_verified = True
+    await coord.reconcile_guilds()
+    allowed, _ = await authorize()
+    check("precondition: authorized before the transport-only disconnect", allowed)
+    coord.gateway_transport_verified = True     # on_ready top, no reconcile yet
+    coord.guild_membership_reconciled = False   # nothing proven this epoch
+    await coord.on_disconnect_async()
+    allowed, state = await authorize()
+    check("transport-verified alone does NOT suppress invalidation",
+          not allowed, f"state={state}")
+
     # ---- 5. heartbeat refreshes the lease but never resurrects authorization ----
     coord.gateway_transport_verified = True
     await coord.reconcile_guilds()

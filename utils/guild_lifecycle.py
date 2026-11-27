@@ -100,13 +100,15 @@ class GuildLifecycleCoordinator:
         self.handle_disconnect()
         epoch = self.connection_epoch
         async with self.lock:
-            if (self.connection_epoch != epoch
-                    or self.guild_membership_reconciled
-                    or self.gateway_transport_verified):
-                # A newer reconcilation already owns this connection state;
-                # invalidating here would revoke a verified session.
-                print("[GATEWAY] Skipping stale authorization invalidation from a "
-                      "disconnect that has already been re-verified.")
+            # Skip ONLY when a COMPLETED reconcile already owns this exact epoch,
+            # i.e. authorization was genuinely re-verified after this disconnect
+            # began. gateway_transport_verified is deliberately NOT sufficient:
+            # main.py sets it at the top of on_ready, before reconcile_guilds()
+            # has proven anything, and skipping on that alone would revoke less
+            # than the fail-closed contract requires.
+            if self.connection_epoch == epoch and self.guild_membership_reconciled:
+                print("[GATEWAY] Skipping stale authorization invalidation: this "
+                      "connection was already reconciled after the disconnect.")
                 return
             await invalidate_bot_sync_state(db_path)
 
