@@ -6,7 +6,7 @@ import aiosqlite
 from functools import wraps
 from urllib.parse import urlencode
 from flask import session, redirect, url_for, abort, jsonify, request, render_template
-from database import DB_PATH, OWNER_DISCORD_ID, check_bot_guild_access_atomic, GuildAccessState
+from database import DB_PATH, OWNER_DISCORD_ID, TRUSTED_DISCORD_IDS, check_bot_guild_access_atomic, GuildAccessState
 from dashboard.utils.async_utils import run_async
 from utils.permissions import (
     LEVEL_OWNER, LEVEL_ADMIN, LEVEL_MODERATOR,
@@ -185,7 +185,9 @@ def _trusted_backup_user_ids() -> set[int]:
     existing guild-scoped-only check, unchanged. The same latent gap
     still applies to those pages; out of scope here.
     """
-    ids = {OWNER_DISCORD_ID}
+    # OWNER_ID + DEV_ID (database.py). OWNER_DISCORD_ID is kept in the union so the
+    # long-standing name stays the single source existing tests/tools override.
+    ids = set(TRUSTED_DISCORD_IDS) | {OWNER_DISCORD_ID}
     extra = os.getenv("BACKUP_TRUSTED_USER_IDS", "")
     for part in extra.split(","):
         part = part.strip()
@@ -243,7 +245,9 @@ def _trusted_super_admin_user_ids() -> set[int]:
     trusted. SUPER_ADMIN_USER_IDS (env var, comma-separated) can add
     more without a code change.
     """
-    ids = {OWNER_DISCORD_ID}
+    # OWNER_ID + DEV_ID (database.py). OWNER_DISCORD_ID is kept in the union so the
+    # long-standing name stays the single source existing tests/tools override.
+    ids = set(TRUSTED_DISCORD_IDS) | {OWNER_DISCORD_ID}
     extra = os.getenv("SUPER_ADMIN_USER_IDS", "")
     for part in extra.split(","):
         part = part.strip()
