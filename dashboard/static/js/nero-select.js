@@ -1,21 +1,23 @@
 window.NeroSelect = (function () {
     const _optionsCache = {};
     const _inflight = {};
-    const _ABSENT_CACHE_TTL_MS = 30000;
+    const _OPTIONS_CACHE_TTL_MS = 20000;
 
-    async function fetchOptions(kind) {
+    async function fetchOptions(kind, forceRefresh = false) {
         const now = Date.now();
         const cached = _optionsCache[kind];
-        if (cached && (!cached.expiresAt || cached.expiresAt > now)) {
+        if (!forceRefresh && cached && cached.expiresAt > now) {
             return { results: cached.results, ok: true, botStatus: cached.botStatus };
         }
         if (cached) {
             delete _optionsCache[kind];
         }
         if (_inflight[kind]) {
-            return _inflight[kind];
+            if (!forceRefresh) return _inflight[kind];
+            await _inflight[kind];
         }
-        const url = kind === 'role' ? '/api/guild/roles' : '/api/guild/channels';
+        const baseUrl = kind === 'role' ? '/api/guild/roles' : '/api/guild/channels';
+        const url = forceRefresh ? `${baseUrl}?refresh=1` : baseUrl;
         _inflight[kind] = (async () => {
             try {
                 const res = await fetch(url);
@@ -27,12 +29,10 @@ window.NeroSelect = (function () {
                 const botStatus = kind === 'role'
                     ? ((data && data.bot_status) || 'present')
                     : 'present';
-                if (botStatus === 'present') {
-                    _optionsCache[kind] = { results, expiresAt: 0, botStatus };
-                } else if (botStatus === 'absent') {
+                if (botStatus === 'present' || botStatus === 'absent') {
                     _optionsCache[kind] = {
                         results,
-                        expiresAt: Date.now() + _ABSENT_CACHE_TTL_MS,
+                        expiresAt: Date.now() + _OPTIONS_CACHE_TTL_MS,
                         botStatus,
                     };
                 }
@@ -407,12 +407,21 @@ window.NeroSelect = (function () {
         return !!(el && el.dataset && el.dataset.nsInit === '1');
     }
 
+    function refreshOptions(kind) {
+        if (kind !== 'role' && kind !== 'channel') {
+            throw new Error('Unsupported option type');
+        }
+        delete _optionsCache[kind];
+        return fetchOptions(kind, true);
+    }
+
     return {
         initAll,
         initMulti,
         initOne,
         getMultiValues,
         isReady,
+        refreshOptions,
         _populateOptions: populateOptions,
         _makeOption: makeOption,
     };
