@@ -25,6 +25,7 @@ Run from the repository root:
 The exit code is the harness's own (0 only when every check passed).
 """
 import asyncio
+import inspect
 import discord
 import json
 import sqlite3
@@ -130,6 +131,10 @@ class Member:
         self.premium_since = None
         self.fail_remove = fail_remove
         self.lie_remove = lie_remove
+        # Runs on the first authoritative read a removal makes; lets a test
+        # stage "another operation acted just before the read".
+        self.on_fetch = None
+        self.fetch_count = 0
         self.remove_calls = []
         self.roles = [guild.roles[r] for r in roles]
         self.top_role = guild.roles[BOT_ROLE]
@@ -137,6 +142,16 @@ class Member:
 
     def role_ids(self):
         return {role.id for role in self.roles}
+
+    async def fetched(self):
+        """What Guild.fetch_member hands back: a member honest about its roles."""
+        self.fetch_count += 1
+        hook, self.on_fetch = self.on_fetch, None
+        if hook is not None:
+            staged = hook()
+            if inspect.isawaitable(staged):
+                await staged
+        return self
 
     async def _remove(self, *roles, reason=None):
         self.remove_calls.append([role.id for role in roles])
@@ -177,7 +192,7 @@ class Guild:
         member = self.members.get(int(user_id))
         if member is None:
             raise _NotFound()
-        return member
+        return await member.fetched()
 
 
 class Bot:
@@ -509,6 +524,258 @@ async def test_expired_ownership_does_not_block():
     await world.event({KEEP}, {KEEP, CONFLICT_B})
     check("ownership: an expired holding does not block the replacement",
           world.member.role_ids() == {KEEP}, str(world.member.role_ids()))
+
+
+# ── 5. Stale snapshots, lock races and configuration drift ───────────────
+
+async def test_stale_snapshot_keep_role_already_gone():
+    """The event says A arrived; by the time we look, A is gone again.
+
+    Both directions must re-check the KEEP role against authoritative state, not
+    just the conflicting one, or a stale event removes a role the member is no
+    longer meant to lose.
+    """
+    await reset_database()
+    await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(CONFLICT_B,))        # A was removed before we looked
+    result = await world.event({CONFLICT_B}, {KEEP, CONFLICT_B})
+    check("stale keep: the conflicting role survives",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("stale keep: reported as a decision, not a failure",
+          result["removed"] == [] and result["events"]
+          and result["events"][0]["status"] == "keep_absent", str(result))
+    check("stale keep: no retry marker is written, nothing is owed",
+          pending_rows() == [], str(pending_rows()))
+
+    # Same guarantee in the other direction: B arrives while A is held, then A
+    # is lost before the removal runs.
+    await reset_database()
+    await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(CONFLICT_B,))     # the event says A is held; it is not
+    result = await world.event({KEEP}, {KEEP, CONFLICT_B})
+    check("stale keep (reverse): the conflicting role survives",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("stale keep (reverse): keep_absent reported",
+          result["removed"] == [] and result["events"]
+          and result["events"][0]["status"] == "keep_absent", str(result))
+
+
+async def test_keep_role_lost_while_waiting_for_the_slot_lock():
+    """A is lost after the caller decided, but before the in-lock read."""
+    await reset_database()
+    await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(KEEP, CONFLICT_B))
+    world.member.on_fetch = lambda: world.set_roles(CONFLICT_B)
+    result = await world.event({CONFLICT_B}, {KEEP, CONFLICT_B})  # A "arrived"
+    check("in-lock keep check: the conflicting role survives",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("in-lock keep check: nothing was even attempted",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("in-lock keep check: reported as keep_absent",
+          result["events"][0]["status"] == "keep_absent", str(result))
+    check("in-lock keep check: no retry marker", pending_rows() == [],
+          str(pending_rows()))
+
+
+async def test_equip_wins_the_race_inside_the_slot_lock():
+    """An equip records its entitlement just before the in-lock read.
+
+    The ownership gate must see it, because the gate is now re-run against a
+    member read taken while the same slot_lock the equip takes is held.
+    """
+    await reset_database()
+    await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(KEEP,))               # B arrives during the race
+
+    async def equip_lands():
+        world.set_roles(KEEP, CONFLICT_B)
+        db_exec("INSERT INTO inventory_items (guild_id,user_id,item_name,"
+                "item_type,quantity,metadata,source) VALUES (?,?,?,?,1,?,?)",
+                (GUILD, USER, "Flame", "role", json.dumps({"role_id": CONFLICT_B}),
+                 "shop"))
+        db_exec("INSERT INTO equipped_roles (guild_id,user_id,item_name,role_id,"
+                "entry_key) VALUES (?,?,?,?,NULL)", (GUILD, USER, "Flame", CONFLICT_B))
+
+    world.member.on_fetch = equip_lands
+    result = await world.event({KEEP}, {KEEP, CONFLICT_B})
+    check("lock race: the freshly equipped role is preserved",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("lock race: the ownership gate is what saved it",
+          result["events"] and result["events"][0]["status"] == "kept"
+          and "owned role item" in result["events"][0]["reason"],
+          str(result["events"]))
+    check("lock race: nothing was sent to Discord",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("lock race: no retry marker", pending_rows() == [], str(pending_rows()))
+
+
+async def _failed_pending_then(mutate, *, keep=KEEP, conflict=CONFLICT_B):
+    """A failed removal that leaves one durable pending row, then a mutation."""
+    await reset_database()
+    rule = await add_rule(keep, [conflict])
+    world = World(held=(keep, conflict), fail_remove=True)
+    await world.event({keep}, {keep, conflict})
+    before = pending_rows()
+    await mutate(rule)
+    world.member.fail_remove = False
+    world.member.remove_calls.clear()   # ignore the attempt that failed
+    summary = await world.retry()
+    return rule, world, before, summary
+
+
+async def test_an_equip_holding_the_slot_lock_is_not_overtaken():
+    """The genuine race: an equip holds slot_lock while it records entitlement.
+
+    A deterministic interleaving - the equip grants the role FIRST and writes its
+    entitlement a moment later, all while holding the lock. If the removal
+    decision is taken before the lock (the pre-fix order) it sees no
+    entitlement yet and strips a role the member has just been granted. Taking
+    the decision inside the lock forces it to wait and re-read.
+    """
+    from utils.equip_engine import slot_lock
+
+    await reset_database()
+    await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(KEEP,))
+    role_granted = asyncio.Event()
+
+    async def equip():
+        async with slot_lock(GUILD, USER):
+            world.set_roles(KEEP, CONFLICT_B)      # the role lands...
+            role_granted.set()
+            await asyncio.sleep(0.05)              # ...entitlement written later
+            db_exec("INSERT INTO inventory_items (guild_id,user_id,item_name,"
+                    "item_type,quantity,metadata,source) VALUES (?,?,?,?,1,?,?)",
+                    (GUILD, USER, "Flame", "role",
+                     json.dumps({"role_id": CONFLICT_B}), "shop"))
+            db_exec("INSERT INTO equipped_roles (guild_id,user_id,item_name,"
+                    "role_id,entry_key) VALUES (?,?,?,?,NULL)",
+                    (GUILD, USER, "Flame", CONFLICT_B))
+
+    equip_task = asyncio.create_task(equip())
+    await role_granted.wait()
+    result = await world.event({KEEP}, {KEEP, CONFLICT_B})
+    await equip_task
+
+    check("lock ordering: the freshly equipped role survives the race",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("lock ordering: the ownership gate decided, not Discord",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("lock ordering: reported as kept for ownership",
+          result["events"] and result["events"][0]["status"] == "kept"
+          and "owned role item" in result["events"][0]["reason"],
+          str(result["events"]))
+
+
+async def test_retry_respects_a_disabled_rule():
+    async def disable(rule):
+        await RR.set_rule_enabled(GUILD, rule["id"], False)
+
+    rule, world, before, summary = await _failed_pending_then(disable)
+    check("retry/disabled: a pending row was created to begin with",
+          before == [(GUILD, USER, CONFLICT_B)], str(before))
+    check("retry/disabled: the role is NOT removed",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("retry/disabled: never even attempted",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("retry/disabled: the row is cancelled, not left pending",
+          summary["removed"] == 0 and summary["cleared"] == 1
+          and pending_rows() == [], str(summary))
+
+
+async def test_retry_respects_a_deleted_rule():
+    async def delete(rule):
+        await RR.delete_rule(GUILD, rule["id"])
+
+    rule, world, before, summary = await _failed_pending_then(delete)
+    check("retry/deleted: the role is NOT removed",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("retry/deleted: never even attempted",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("retry/deleted: the row is cancelled",
+          summary["cleared"] == 1 and pending_rows() == [], str(summary))
+
+
+async def test_retry_respects_the_conflict_being_edited_away():
+    async def edit(rule):
+        await RR.save_rule(GUILD, KEEP, [CONFLICT_C], rule_id=rule["id"])
+
+    rule, world, before, summary = await _failed_pending_then(edit)
+    check("retry/edited: the removed conflict is no longer configured",
+          CONFLICT_B not in (await RR.get_rule(GUILD, rule["id"]))["conflict_role_ids"],
+          str(await RR.get_rule(GUILD, rule["id"])))
+    check("retry/edited: the role is NOT removed",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("retry/edited: the row is cancelled",
+          summary["cleared"] == 1 and pending_rows() == [], str(summary))
+
+
+async def test_retry_respects_a_pending_row_with_no_rule():
+    """A row that names no rule has nothing to justify it: keep the role."""
+    await reset_database()
+    db_exec("INSERT INTO role_replacement_pending (guild_id,user_id,role_id,"
+            "rule_id,attempts,last_error,created_at,updated_at) "
+            "VALUES (?,?,?,NULL,1,?,?,?)",
+            (GUILD, USER, CONFLICT_B, "boom", "x", "x"))
+    world = World(held=(CONFLICT_B,))
+    summary = await world.retry()
+    check("retry/no rule: the role is NOT removed",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("retry/no rule: the orphan row is cancelled",
+          summary["cleared"] == 1 and pending_rows() == [], str(summary))
+
+
+async def test_retry_respects_a_keep_role_lost_before_the_retry():
+    await reset_database()
+    rule = await add_rule(KEEP, [CONFLICT_B])
+    db_exec("INSERT INTO role_replacement_pending (guild_id,user_id,role_id,"
+            "rule_id,attempts,last_error,created_at,updated_at) VALUES (?,?,?,?,1,?,?,?)",
+            (GUILD, USER, CONFLICT_B, rule["id"], "boom", "x", "x"))
+    world = World(held=(CONFLICT_B,))        # A is gone by retry time
+    summary = await world.retry()
+    check("retry/keep lost: the conflicting role survives",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("retry/keep lost: nothing was attempted",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("retry/keep lost: the row is cleared",
+          summary["removed"] == 0 and summary["cleared"] == 1
+          and pending_rows() == [], str(summary))
+
+
+async def test_retry_with_an_unreadable_rule_keeps_waiting():
+    """A failed configuration read must never be read as "not configured"."""
+    from unittest.mock import patch
+    await reset_database()
+    rule = await add_rule(KEEP, [CONFLICT_B])
+    db_exec("INSERT INTO role_replacement_pending (guild_id,user_id,role_id,"
+            "rule_id,attempts,last_error,created_at,updated_at) VALUES (?,?,?,?,1,?,?,?)",
+            (GUILD, USER, CONFLICT_B, rule["id"], "boom", "x", "x"))
+    world = World(held=(KEEP, CONFLICT_B))
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("config store unavailable")
+
+    with patch.object(RR, "get_rule", boom):
+        summary = await world.retry()
+    check("retry/unreadable config: the role is NOT removed",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("retry/unreadable config: the row stays pending, not cancelled",
+          summary["pending"] == 1 and summary["cleared"] == 0
+          and bool(pending_rows()), str(summary))
+    check("retry/unreadable config: nothing was attempted",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+
+
+async def test_retry_still_applies_a_genuinely_pending_removal():
+    """The configuration checks must not turn into a blanket refusal."""
+    async def noop(_rule):
+        return None
+
+    rule, world, before, summary = await _failed_pending_then(noop)
+    check("retry/applies: a still-configured removal does go through",
+          summary["removed"] == 1 and pending_rows() == [], str(summary))
+    check("retry/applies: the role is gone",
+          CONFLICT_B not in world.member.role_ids(), str(world.member.role_ids()))
 
 
 # ── 5. Discord failures and retries ──────────────────────────────────────

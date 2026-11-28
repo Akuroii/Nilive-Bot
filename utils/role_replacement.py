@@ -633,49 +633,37 @@ async def clear_pending_for_member(guild_id: int, user_id: int) -> int:
 
 # ── Removal ──────────────────────────────────────────────────────────────
 
-async def _remove_role_verified(bot, guild, user_id: int, role_id: int, *,
-                                rule_id: int | None) -> dict:
-    """Remove one conflicting role, verified against authoritative state.
+async def _decide_removal(bot, guild_id: int, user_id: int, role_id: int,
+                          member, *, keep_role_id: int | None) -> dict | None:
+    """Terminal outcome for this removal, or None when it should go ahead.
 
-    The event snapshot is deliberately NOT trusted: Discord can redeliver an
-    event, and another listener may have acted on the same update already. The
-    member is fetched twice - once to decide, once to confirm - and a failed
-    read is reported (and retried) instead of being read as success or absence.
+    Every decision is made against ``member`` exactly as Discord reported it a
+    moment ago, never against the event snapshot: the snapshot is a statement
+    about the past, and an equip, a level claim or another listener may have
+    changed the truth since. Both halves of the rule are checked - the
+    conflicting role must still be held AND its keep role must still be held -
+    so a stale event cannot strip a role the member is no longer meant to lose.
     """
-    guild_id = int(guild.id)
-    role = guild.get_role(int(role_id)) if hasattr(guild, "get_role") else None
-    if role is None:
-        # The configured role was deleted from the guild: there is nothing to
-        # remove and no obligation could ever be satisfied. Drop any marker.
-        await _clear_pending(guild_id, user_id, role_id)
-        return {"status": "missing_role", "role_id": int(role_id)}
-
-    from utils.permissions import check_bot_role_position
-    can_remove, why = check_bot_role_position(guild, role)
-    if not can_remove:
-        await _record_pending(guild_id, user_id, role_id,
-                              rule_id=rule_id, error=why)
-        return {"status": "blocked", "role_id": int(role_id), "reason": why}
-
-    current = await _fetch_member(guild, user_id)
-    if current is MEMBER_ABSENT:
-        await _clear_pending(guild_id, user_id, role_id)
-        return {"status": "member_absent", "role_id": int(role_id)}
-    if current is None:
-        reason = "could not read the member's current roles"
-        await _record_pending(guild_id, user_id, role_id,
-                              rule_id=rule_id, error=reason)
-        return {"status": "unverified", "role_id": int(role_id),
-                "reason": reason}
-
-    if int(role_id) not in _role_ids(getattr(current, "roles", ())):
+    held = _role_ids(getattr(member, "roles", ()))
+    if int(role_id) not in held:
         # Already gone (a duplicate event, or another system removed it).
         await _clear_pending(guild_id, user_id, role_id)
         return {"status": "already_absent", "role_id": int(role_id)}
 
+    if keep_role_id is None:
+        # The rule that justified this removal cannot be resolved. Nothing
+        # justifies removing a role any more, so leave the member alone.
+        await _clear_pending(guild_id, user_id, role_id)
+        return {"status": "keep_absent", "role_id": int(role_id),
+                "reason": "the rule no longer has a keep role"}
+    if int(keep_role_id) not in held:
+        await _clear_pending(guild_id, user_id, role_id)
+        return {"status": "keep_absent", "role_id": int(role_id),
+                "reason": f"the keep role {int(keep_role_id)} is no longer held"}
+
     try:
         reason = await role_removal_reason(guild_id, user_id, role_id,
-                                           bot=bot, member=current)
+                                           bot=bot, member=member)
     except Exception as exc:
         # Fail closed: a gate that cannot answer is a reason to keep, and the
         # removal is retried rather than treated as "nobody else grants it".
@@ -685,9 +673,62 @@ async def _remove_role_verified(bot, guild, user_id: int, role_id: int, *,
         # a failure: no removal is owed, so no retry marker is written.
         await _clear_pending(guild_id, user_id, role_id)
         return {"status": "kept", "role_id": int(role_id), "reason": reason}
+    return None
+
+
+async def _remove_role_verified(bot, guild, user_id: int, role_id: int, *,
+                                rule_id: int | None,
+                                keep_role_id: int | None) -> dict:
+    """Remove one conflicting role, verified against authoritative state.
+
+    The event snapshot is deliberately NOT trusted: Discord can redeliver an
+    event, and another listener may have acted on the same update already. The
+    member is fetched twice - once to decide, once to confirm - and a failed
+    read is reported (and retried) instead of being read as success or absence.
+
+    The decision is taken while holding the member's ``slot_lock``, the same
+    lock every Inventory/Equip mutation takes, and against a member read *after*
+    the lock was acquired. Without that, an equip could grant and record the
+    role between the ownership check and the removal, and this feature would
+    strip a role the member had just legitimately acquired.
+    """
+    guild_id = int(guild.id)
+    role = guild.get_role(int(role_id)) if hasattr(guild, "get_role") else None
+    if role is None:
+        # The configured role was deleted from the guild: there is nothing to
+        # remove and no obligation could ever be satisfied. Drop any marker.
+        await _clear_pending(guild_id, user_id, role_id)
+        return {"status": "missing_role", "role_id": int(role_id)}
+
+    # Guild-level geometry, not member state: safe to answer before the lock.
+    from utils.permissions import check_bot_role_position
+    can_remove, why = check_bot_role_position(guild, role)
+    if not can_remove:
+        await _record_pending(guild_id, user_id, role_id,
+                              rule_id=rule_id, error=why)
+        return {"status": "blocked", "role_id": int(role_id), "reason": why}
 
     from utils.equip_engine import slot_lock
     async with slot_lock(guild_id, user_id):
+        current = await _fetch_member(guild, user_id)
+        if current is MEMBER_ABSENT:
+            await _clear_pending(guild_id, user_id, role_id)
+            return {"status": "member_absent", "role_id": int(role_id)}
+        if current is None:
+            reason = "could not read the member's current roles"
+            await _record_pending(guild_id, user_id, role_id,
+                                  rule_id=rule_id, error=reason)
+            return {"status": "unverified", "role_id": int(role_id),
+                    "reason": reason}
+
+        # Re-decide against what the member holds NOW, inside the lock, so the
+        # ownership gate cannot be overtaken by an equip that already recorded
+        # its entitlement.
+        decided = await _decide_removal(bot, guild_id, user_id, role_id,
+                                        current, keep_role_id=keep_role_id)
+        if decided is not None:
+            return decided
+
         try:
             await current.remove_roles(
                 role, reason="Role replacement: conflicting role")
@@ -696,6 +737,9 @@ async def _remove_role_verified(bot, guild, user_id: int, role_id: int, *,
                                   rule_id=rule_id, error=str(exc))
             return {"status": "failed", "role_id": int(role_id),
                     "reason": str(exc)}
+
+    # Confirmation happens outside the lock: nothing else should queue behind a
+    # Discord round-trip just to read the result back.
 
     confirmed = await _fetch_member(guild, user_id)
     if confirmed is MEMBER_ABSENT:
@@ -778,7 +822,8 @@ async def process_member_update(bot, before, after) -> dict:
     for role_id in sorted(targets):
         rule = targets[role_id]
         outcome = await _remove_role_verified(
-            bot, guild, int(after.id), role_id, rule_id=rule.get("id"))
+            bot, guild, int(after.id), role_id, rule_id=rule.get("id"),
+            keep_role_id=rule.get("keep_role_id"))
         result["events"].append(outcome)
         status = outcome["status"]
         if status == "removed":
@@ -804,6 +849,9 @@ def describe(result: dict) -> list[str]:
         elif status == "kept":
             lines.append(f"[ROLE REPLACEMENT] Kept role {role_id}: still "
                          f"{event.get('reason')}.")
+        elif status == "keep_absent":
+            lines.append(f"[ROLE REPLACEMENT] Kept role {role_id}: "
+                         f"{event.get('reason')}.")
         elif status in ("blocked", "failed", "unverified", "unconfirmed"):
             lines.append(f"[ROLE REPLACEMENT] Could not remove role {role_id} "
                          f"({status}): {event.get('reason')}. Retry recorded.")
@@ -812,11 +860,44 @@ def describe(result: dict) -> list[str]:
 
 # ── Retry sweep ──────────────────────────────────────────────────────────
 
+async def _retry_justification(guild_id: int, row: dict) -> tuple[str, int | None]:
+    """Is the pending removal still what the CURRENT configuration asks for?
+
+    A pending row is a reminder of an intention, not a standing order: the
+    administrator may have disabled the rule, deleted it, or edited the
+    conflicting role away since it was written - and the dashboard promises
+    that deleting a rule leaves members' roles alone. A row that names no rule,
+    or a rule that no longer exists, is treated conservatively: with nothing to
+    justify it, the member keeps the role.
+
+    Returns ``(verdict, keep_role_id)`` where verdict is one of ``apply``,
+    ``not_configured`` or ``unknown`` (a read that failed: keep waiting, never
+    remove on a guess).
+    """
+    rule_id = row.get("rule_id")
+    if rule_id is None:
+        return "not_configured", None
+    try:
+        rule = await get_rule(guild_id, int(rule_id))
+    except Exception as exc:
+        print(f"[ROLE REPLACEMENT] rule lookup failed for rule {rule_id} "
+              f"in guild {guild_id}: {exc}")
+        return "unknown", None
+    if rule is None:
+        return "not_configured", None
+    if not rule.get("enabled"):
+        return "not_configured", None
+    if int(row["role_id"]) not in {int(r) for r in rule["conflict_role_ids"]}:
+        return "not_configured", None
+    return "apply", int(rule["keep_role_id"])
+
+
 async def retry_pending(bot, *, limit: int = 200) -> dict:
     """Retry removals Discord never confirmed.
 
     A row is deleted only once the role is proven gone, the member left, the
-    configured role no longer exists, or another system now justifies it.
+    configured role no longer exists, the current configuration no longer asks
+    for the removal, or another system now justifies the role.
     """
     summary = {"checked": 0, "removed": 0, "cleared": 0, "pending": 0}
     for row in await pending_removals(limit=limit):
@@ -825,10 +906,20 @@ async def retry_pending(bot, *, limit: int = 200) -> dict:
         if guild is None:
             summary["pending"] += 1
             continue
+        verdict, keep_role_id = await _retry_justification(row["guild_id"], row)
+        if verdict == "not_configured":
+            # Disabled / deleted / edited away: the dashboard's promise that
+            # retiring a rule strands nobody takes precedence.
+            await _clear_pending(row["guild_id"], row["user_id"], row["role_id"])
+            summary["cleared"] += 1
+            continue
+        if verdict == "unknown":
+            summary["pending"] += 1
+            continue
         try:
             outcome = await _remove_role_verified(
                 bot, guild, row["user_id"], row["role_id"],
-                rule_id=row["rule_id"])
+                rule_id=row["rule_id"], keep_role_id=keep_role_id)
         except Exception as exc:
             print(f"[ROLE REPLACEMENT] retry failed for role {row['role_id']} "
                   f"/ user {row['user_id']} in {row['guild_id']}: {exc}")
@@ -837,7 +928,8 @@ async def retry_pending(bot, *, limit: int = 200) -> dict:
         status = outcome.get("status")
         if status == "removed":
             summary["removed"] += 1
-        elif status in ("already_absent", "member_absent", "missing_role", "kept"):
+        elif status in ("already_absent", "member_absent", "missing_role",
+                        "kept", "keep_absent"):
             summary["cleared"] += 1
         else:
             summary["pending"] += 1
