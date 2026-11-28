@@ -539,22 +539,35 @@ async def _reaction_requirement_hold(guild_id: int, role_id: int,
     return None
 
 
-async def role_removal_reason(guild_id: int, user_id: int, role_id: int,
-                              *, bot=None, member=None) -> str | None:
+class OwnershipUnavailable(RuntimeError):
+    """An ownership source could not be read, so nothing may be removed.
+
+    Deliberately NOT the same answer as "entitled" or "not entitled": the
+    caller must keep the role AND keep the pending retry, because the question
+    was never answered rather than answered "no".
+    """
+
+    def __init__(self, reason: str):
+        RuntimeError.__init__(self, reason)
+        self.reason = reason
+
+
+async def role_removal_verdict(guild_id: int, user_id: int, role_id: int,
+                               *, bot=None, member=None) -> str | None:
     """Why this role must stay, or None when Role Replacement may remove it.
 
-    Fails closed: an unreadable ownership store is reported as a reason to
-    keep, never as permission to remove.
+    Returns a *confirmed* reason (another system still owns the role) or None.
+    A source that cannot be read raises :class:`OwnershipUnavailable` instead of
+    being flattened into either answer: "we could not check" is neither
+    permission to remove nor proof that nobody else grants the role.
     """
-    from utils.timed_ownership import EntitlementCheckError, role_still_entitled
+    from utils.timed_ownership import role_still_entitled
 
     try:
         reason = await role_still_entitled(
             int(guild_id), int(user_id), int(role_id), bot=bot, member=member)
-    except EntitlementCheckError as exc:
-        return f"ownership could not be verified ({exc})"
-    except Exception as exc:  # defensive: never treat a crash as permission
-        return f"ownership could not be verified ({exc})"
+    except Exception as exc:  # includes EntitlementCheckError
+        raise OwnershipUnavailable(f"ownership could not be verified ({exc})")
     if reason:
         return reason
 
@@ -565,10 +578,24 @@ async def role_removal_reason(guild_id: int, user_id: int, role_id: int,
         try:
             reason = await check
         except Exception as exc:
-            return f"ownership could not be verified ({exc})"
+            raise OwnershipUnavailable(f"ownership could not be verified ({exc})")
         if reason:
             return reason
     return None
+
+
+async def role_removal_reason(guild_id: int, user_id: int, role_id: int,
+                              *, bot=None, member=None) -> str | None:
+    """Keep-reason for display and for callers that must never remove.
+
+    Flattens :class:`OwnershipUnavailable` into a keep reason, which is the
+    safe answer whenever the caller's only options are keep or remove.
+    """
+    try:
+        return await role_removal_verdict(guild_id, user_id, role_id,
+                                          bot=bot, member=member)
+    except OwnershipUnavailable as exc:
+        return exc.reason
 
 
 # ── Pending (unconfirmed) removals ───────────────────────────────────────
@@ -634,7 +661,8 @@ async def clear_pending_for_member(guild_id: int, user_id: int) -> int:
 # ── Removal ──────────────────────────────────────────────────────────────
 
 async def _decide_removal(bot, guild_id: int, user_id: int, role_id: int,
-                          member, *, keep_role_id: int | None) -> dict | None:
+                          member, *, rule_id: int | None,
+                          keep_role_id: int | None) -> dict | None:
     """Terminal outcome for this removal, or None when it should go ahead.
 
     Every decision is made against ``member`` exactly as Discord reported it a
@@ -662,15 +690,25 @@ async def _decide_removal(bot, guild_id: int, user_id: int, role_id: int,
                 "reason": f"the keep role {int(keep_role_id)} is no longer held"}
 
     try:
-        reason = await role_removal_reason(guild_id, user_id, role_id,
-                                           bot=bot, member=member)
-    except Exception as exc:
-        # Fail closed: a gate that cannot answer is a reason to keep, and the
-        # removal is retried rather than treated as "nobody else grants it".
+        reason = await role_removal_verdict(guild_id, user_id, role_id,
+                                            bot=bot, member=member)
+    except OwnershipUnavailable as exc:
+        # Could not tell whether somebody else still owns this role. Never
+        # remove on an unanswered question, and never drop the retry either:
+        # the next sweep re-asks and may legitimately complete the removal.
+        await _record_pending(guild_id, user_id, role_id,
+                              rule_id=rule_id, error=exc.reason)
+        return {"status": "unverified", "role_id": int(role_id),
+                "reason": exc.reason}
+    except Exception as exc:  # defensive: never treat a crash as permission
         reason = f"ownership could not be verified ({exc})"
+        await _record_pending(guild_id, user_id, role_id,
+                              rule_id=rule_id, error=reason)
+        return {"status": "unverified", "role_id": int(role_id),
+                "reason": reason}
     if reason:
         # Some other system still justifies this role. That is a decision, not
-        # a failure: no removal is owed, so no retry marker is written.
+        # a failure: removal is not permitted, so no retry marker is kept.
         await _clear_pending(guild_id, user_id, role_id)
         return {"status": "kept", "role_id": int(role_id), "reason": reason}
     return None
@@ -725,7 +763,8 @@ async def _remove_role_verified(bot, guild, user_id: int, role_id: int, *,
         # ownership gate cannot be overtaken by an equip that already recorded
         # its entitlement.
         decided = await _decide_removal(bot, guild_id, user_id, role_id,
-                                        current, keep_role_id=keep_role_id)
+                                        current, rule_id=rule_id,
+                                        keep_role_id=keep_role_id)
         if decided is not None:
             return decided
 
@@ -788,36 +827,53 @@ async def process_member_update(bot, before, after) -> dict:
         return result
     result["evaluated"] = True
 
-    # Stage 1: which roles this update displaces.
+    # Which roles this update displaces.
     #
-    # A keep role that is ITSELF being displaced this pass does not get to act
-    # as a keep role - otherwise "A arrives, B conflicts with A, and B happens
-    # to keep D" would strip D too: rule processing cascading from a role this
-    # feature is removing. That is the one cascade the feature must not have, so
-    # the target set is grown to a fixpoint that never lets a doomed keep role
-    # contribute.
+    # A role this feature is about to remove must never act as a keep role:
+    # with A > B > D, adding B while A and D are held has to remove B and leave
+    # D alone, because B is being displaced by A before its own rule could
+    # apply. So displacement is settled FIRST - a role arriving as somebody
+    # else's conflict loses its keep-role licence in the same pass - and only
+    # the keep roles that survive that are allowed to displace anything.
+    #
+    # Every step is a set operation over the whole update, never a walk in id
+    # order, so the outcome cannot depend on which role the loop happens to
+    # visit first.
     targets: dict[int, dict] = {}
-    changed = True
-    while changed:
-        changed = False
+    while True:
+        displaced = set(targets)
+
+        # Keep roles that are still allowed to act, held and arrived alike.
+        active = {role_id for role_id in after_ids
+                  if role_id in rules["keep"] and role_id not in displaced}
+
+        # 1. A conflicting role that just arrived is displaced by a keep role
+        #    the member already holds - or one arriving with it.
+        newly = set()
+        for role_id in added:
+            if role_id in displaced:
+                continue
+            for rule in rules["conflict"].get(role_id, ()):
+                if rule["keep_role_id"] in active:
+                    newly.add(role_id)
+                    targets.setdefault(role_id, rule)
+                    break
+
+        # 2. Only now may a keep role act, and never if step 1 just displaced
+        #    it. This is what stops B from removing D in the A > B > D chain.
+        still_active = {role_id for role_id in active
+                        if role_id not in displaced and role_id not in newly}
         for role_id in added:
             rule = rules["keep"].get(role_id)
-            if not rule or role_id in targets:
-                continue        # displaced, or not a keep role of this guild
+            if not rule or role_id not in still_active:
+                continue
             for conflict in rule["conflict_role_ids"]:
                 if conflict in after_ids and conflict not in targets:
                     targets[conflict] = rule
-                    changed = True
-        # 2. A conflicting role arrived while its keep role is held - but only
-        #    while that keep role is not itself being removed.
-        for role_id in added:
-            for rule in rules["conflict"].get(role_id, ()):
-                keep_role_id = rule["keep_role_id"]
-                if keep_role_id not in after_ids or keep_role_id in targets:
-                    continue
-                if role_id not in targets:
-                    targets[role_id] = rule
-                    changed = True
+                    newly.add(conflict)
+
+        if not newly:
+            break
 
     for role_id in sorted(targets):
         rule = targets[role_id]

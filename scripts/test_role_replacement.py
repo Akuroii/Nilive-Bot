@@ -222,6 +222,9 @@ class World:
 
     def __init__(self, held=(), *, guild_id=GUILD, **member_kwargs):
         self.guild = Guild(guild_id)
+        for role_id in held:
+            if int(role_id) not in self.guild.roles:
+                self.guild.add_role(role_id, position=5)
         self.bot = Bot(self.guild)
         self.member = Member(self.guild, roles=held, **member_kwargs)
         self.guild.members[self.member.id] = self.member
@@ -667,6 +670,256 @@ async def test_an_equip_holding_the_slot_lock_is_not_overtaken():
           str(result["events"]))
 
 
+async def _chain_world(keep, conflict, d_role, *, held, before, after):
+    """A > B > D with the ids handed in, so the caller controls ordering."""
+    await reset_database()
+    await add_rule(keep, [conflict])
+    await add_rule(conflict, [d_role])
+    world = World(held=held)
+    result = await world.event(before, after)
+    return world, result
+
+
+async def test_chain_b_added_while_a_and_d_are_held():
+    """A > B > D, A and D already held, B newly added: remove B, keep D.
+
+    B is being displaced by A, so B must not get to run its own rule and strip
+    D in the same pass. This is the reproduction from the review.
+    """
+    world, result = await _chain_world(
+        KEEP, CONFLICT_B, CONFLICT_D,
+        held=(KEEP, CONFLICT_D, CONFLICT_B),
+        before={KEEP, CONFLICT_D}, after={KEEP, CONFLICT_D, CONFLICT_B})
+    check("chain/held: B is removed", result["removed"] == [CONFLICT_B],
+          str(result))
+    check("chain/held: D is preserved", CONFLICT_D in world.member.role_ids(),
+          str(world.member.role_ids()))
+    check("chain/held: A survives", KEEP in world.member.role_ids(),
+          str(world.member.role_ids()))
+
+
+async def test_chain_a_and_b_arrive_together():
+    """Same chain, but A and B arrive in one update while D is held."""
+    world, result = await _chain_world(
+        KEEP, CONFLICT_B, CONFLICT_D,
+        held=(CONFLICT_D, KEEP, CONFLICT_B),
+        before={CONFLICT_D}, after={CONFLICT_D, KEEP, CONFLICT_B})
+    check("chain/simultaneous: B is removed", result["removed"] == [CONFLICT_B],
+          str(result))
+    check("chain/simultaneous: D is preserved",
+          CONFLICT_D in world.member.role_ids(), str(world.member.role_ids()))
+
+
+async def test_chain_is_independent_of_role_id_order():
+    """The same chain with the ids reversed must behave identically.
+
+    Iterating roles by id, or trusting set/dict order, makes the A > B > D
+    outcome depend on which role is looked at first. Swapping the numeric order
+    of the whole chain proves the result comes from the rules, not the ids.
+    """
+    # Low-to-high ids (the natural case).
+    forward, forward_result = await _chain_world(
+        4301, 4302, 4303,
+        held=(4301, 4303, 4302),
+        before={4301, 4303}, after={4301, 4303, 4302})
+    check("chain/id order forward: only B removed",
+          forward_result["removed"] == [4302], str(forward_result))
+    check("chain/id order forward: D preserved",
+          4303 in forward.member.role_ids(), str(forward.member.role_ids()))
+
+    # The same three roles with the numbers inverted: A > B > D stays A > B > D
+    # logically, but B now has the LOWEST id and D the HIGHEST.
+    reverse, reverse_result = await _chain_world(
+        4503, 4502, 4501,
+        held=(4503, 4501, 4502),
+        before={4503, 4501}, after={4503, 4501, 4502})
+    check("chain/id order reversed: only B removed",
+          reverse_result["removed"] == [4502], str(reverse_result))
+    check("chain/id order reversed: D preserved",
+          4501 in reverse.member.role_ids(), str(reverse.member.role_ids()))
+
+
+async def test_chain_outcome_does_not_use_set_iteration_order():
+    """Same ids, different insertion order into the added-role set."""
+    outcomes = []
+    for order in ((KEEP, CONFLICT_B), (CONFLICT_B, KEEP)):
+        await reset_database()
+        await add_rule(KEEP, [CONFLICT_B])
+        await add_rule(CONFLICT_B, [CONFLICT_D])
+        world = World(held=(CONFLICT_D,))
+        world.set_roles(CONFLICT_D, *order)
+        # The event snapshot's role order is what varies; the engine sees sets.
+        after = {CONFLICT_D}
+        for role in order:
+            after.add(role)
+        result = await world.event({CONFLICT_D}, after)
+        outcomes.append((tuple(sorted(result["removed"])),
+                         CONFLICT_D in world.member.role_ids()))
+    check("chain/iteration order: both snapshot orders agree",
+          outcomes[0] == outcomes[1] == ((CONFLICT_B,), True), str(outcomes))
+
+
+# ── 6b. Ownership source unavailable vs. confirmed entitlement ───────────
+
+class _OwnershipDown:
+    """Stand-in for utils.role_replacement.role_removal_verdict being unreadable."""
+
+    def __init__(self, message="ownership could not be verified (store unavailable)"):
+        self.message = message
+        self.calls = 0
+
+    async def __call__(self, *_args, **_kwargs):
+        self.calls += 1
+        raise RR.OwnershipUnavailable(self.message)
+
+
+async def test_unanswered_ownership_keeps_the_retry_row():
+    """A source we could not read must not erase the pending removal.
+
+    "Could not check" is not "nobody else owns it": the role stays, but the
+    retry has to survive so a later sweep can finish the job.
+    """
+    await reset_database()
+    rule = await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(KEEP, CONFLICT_B))
+    down = _OwnershipDown()
+    original = RR.role_removal_verdict
+    RR.role_removal_verdict = down
+    try:
+        result = await world.event({KEEP}, {KEEP, CONFLICT_B})
+    finally:
+        RR.role_removal_verdict = original
+
+    check("source down: the role is NOT removed",
+          result["removed"] == [] and CONFLICT_B in world.member.role_ids(),
+          str(result))
+    check("source down: never sent a removal to Discord",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("source down: the check was actually attempted", down.calls >= 1,
+          str(down.calls))
+    check("source down: reported as unverified, not as a keep decision",
+          result["events"] and result["events"][0]["status"] == "unverified",
+          str(result["events"]))
+    check("source down: the retry row SURVIVES",
+          pending_rows() == [(GUILD, USER, CONFLICT_B)], str(pending_rows()))
+
+
+async def test_transient_ownership_failure_then_success_completes():
+    """After the source recovers the retry completes, conditions permitting."""
+    await reset_database()
+    rule = await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(KEEP, CONFLICT_B))
+    down = _OwnershipDown()
+    original = RR.role_removal_verdict
+    RR.role_removal_verdict = down
+    try:
+        await world.event({KEEP}, {KEEP, CONFLICT_B})
+    finally:
+        RR.role_removal_verdict = original
+    check("recovery: precondition - a retry row exists",
+          pending_rows() == [(GUILD, USER, CONFLICT_B)], str(pending_rows()))
+    check("recovery: precondition - the role is still held",
+          CONFLICT_B in world.member.role_ids())
+
+    # The source is readable again; nothing else changed.
+    summary = await world.retry()
+    check("recovery: the retry now completes the removal",
+          summary["removed"] == 1 and pending_rows() == [], str(summary))
+    check("recovery: the role is gone",
+          CONFLICT_B not in world.member.role_ids(), str(world.member.role_ids()))
+
+
+async def test_recovery_does_not_remove_when_the_keep_role_is_gone():
+    """Recovery alone is not enough: the rule conditions are re-checked."""
+    await reset_database()
+    rule = await add_rule(KEEP, [CONFLICT_B])
+    world = World(held=(KEEP, CONFLICT_B))
+    down = _OwnershipDown()
+    original = RR.role_removal_verdict
+    RR.role_removal_verdict = down
+    try:
+        await world.event({KEEP}, {KEEP, CONFLICT_B})
+    finally:
+        RR.role_removal_verdict = original
+
+    world.set_roles(CONFLICT_B)          # the keep role is lost before retry
+    summary = await world.retry()
+    check("recovery/keep gone: the conflicting role survives",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("recovery/keep gone: nothing attempted",
+          world.member.remove_calls == [], str(world.member.remove_calls))
+    check("recovery/keep gone: the row is cancelled, not retried forever",
+          summary["cleared"] == 1 and pending_rows() == [], str(summary))
+
+
+async def test_confirmed_entitlement_is_terminal_not_an_endless_retry():
+    """A real entitlement keeps the role AND drops the row, permanently."""
+    await reset_database()
+    await add_rule(KEEP, [CONFLICT_B])
+    db_exec("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+            "reward_ref,track,status,payload_json,created_at) VALUES "
+            "(?,?,?,?,'role','fulfilled',?,CURRENT_TIMESTAMP)",
+            (GUILD, USER, 5, "member", json.dumps({"role_id": CONFLICT_B})))
+    world = World(held=(KEEP, CONFLICT_B))
+    result = await world.event({KEEP}, {KEEP, CONFLICT_B})
+    check("entitled: a terminal keep decision",
+          result["kept"] and result["events"][0]["status"] == "kept",
+          str(result["events"]))
+    check("entitled: no retry row is created", pending_rows() == [],
+          str(pending_rows()))
+    # Retrying must not resurrect the removal either.
+    summary = await world.retry()
+    check("entitled: a later sweep removes nothing",
+          summary["removed"] == 0 and CONFLICT_B in world.member.role_ids(),
+          str(summary))
+    check("entitled: still no retry row", pending_rows() == [],
+          str(pending_rows()))
+
+
+async def test_confirmed_entitlement_clears_an_existing_retry_row():
+    """A forced pending row is cancelled once ownership is confirmed."""
+    await reset_database()
+    rule = await add_rule(KEEP, [CONFLICT_B])
+    db_exec("INSERT INTO role_replacement_pending (guild_id,user_id,role_id,"
+            "rule_id,attempts,last_error,created_at,updated_at) VALUES (?,?,?,?,1,?,?,?)",
+            (GUILD, USER, CONFLICT_B, rule["id"], "boom", "x", "x"))
+    db_exec("INSERT INTO level_reward_claims (guild_id,user_id,reward_level,"
+            "reward_ref,track,status,payload_json,created_at) VALUES "
+            "(?,?,?,?,'role','fulfilled',?,CURRENT_TIMESTAMP)",
+            (GUILD, USER, 5, "member", json.dumps({"role_id": CONFLICT_B})))
+    world = World(held=(KEEP, CONFLICT_B))
+    summary = await world.retry()
+    check("entitled/retry: the role is kept",
+          CONFLICT_B in world.member.role_ids(), str(world.member.role_ids()))
+    check("entitled/retry: the row is cleared as a decision",
+          summary["cleared"] == 1 and pending_rows() == [], str(summary))
+
+
+async def test_unanswered_ownership_during_retry_keeps_the_row():
+    """The same distinction holds on the retry path, not just on events."""
+    await reset_database()
+    rule = await add_rule(KEEP, [CONFLICT_B])
+    db_exec("INSERT INTO role_replacement_pending (guild_id,user_id,role_id,"
+            "rule_id,attempts,last_error,created_at,updated_at) VALUES (?,?,?,?,1,?,?,?)",
+            (GUILD, USER, CONFLICT_B, rule["id"], "boom", "x", "x"))
+    world = World(held=(KEEP, CONFLICT_B))
+    down = _OwnershipDown()
+    original = RR.role_removal_verdict
+    RR.role_removal_verdict = down
+    try:
+        summary = await world.retry()
+    finally:
+        RR.role_removal_verdict = original
+    check("retry/source down: nothing removed",
+          CONFLICT_B in world.member.role_ids() and summary["removed"] == 0,
+          str(summary))
+    check("retry/source down: the row is NOT deleted",
+          summary["pending"] == 1 and pending_rows() == [(GUILD, USER, CONFLICT_B)],
+          str(summary))
+    check("retry/source down: the attempt was counted",
+          db_rows("SELECT attempts FROM role_replacement_pending")[0][0] >= 1)
+
+
 async def test_retry_respects_a_disabled_rule():
     async def disable(rule):
         await RR.set_rule_enabled(GUILD, rule["id"], False)
@@ -875,17 +1128,17 @@ async def test_unreadable_ownership_fails_closed():
     async def boom(*args, **kwargs):
         raise RuntimeError("store unavailable")
 
-    original = RR.role_removal_reason
-    RR.role_removal_reason = boom
+    original = RR.role_removal_verdict
+    RR.role_removal_verdict = boom
     try:
         result = await world.event({KEEP}, {KEEP, CONFLICT_B})
     finally:
-        RR.role_removal_reason = original
+        RR.role_removal_verdict = original
     check("fail closed: an unreadable ownership store keeps the role",
-          result["removed"] == [] and result["kept"], str(result))
+          result["removed"] == [] and result["failed"], str(result))
     check("fail closed: the reason says it could not be verified",
-          "could not be verified" in (result["kept"][0]["reason"] or ""),
-          str(result["kept"]))
+          "could not be verified" in (result["failed"][0]["reason"] or ""),
+          str(result["failed"]))
     check("fail closed: nothing was removed from the member",
           CONFLICT_B in world.member.role_ids(),
           str(world.member.role_ids()))
