@@ -48,6 +48,8 @@ previewed action), and must decide its blocking policy over these same
 warning codes.
 """
 
+import logging
+
 import aiosqlite
 from flask import jsonify, request
 
@@ -60,6 +62,8 @@ from dashboard.api import api_bp
 import utils.shop_publisher as SP
 from utils.currency import get_currency_config
 from utils.shop_emoji import attach_prepared_emojis
+
+log = logging.getLogger(__name__)
 
 # shop_items columns the preview needs: identity, the price line, every
 # token/state field, and the persisted one-level option relationship used by
@@ -137,7 +141,12 @@ def api_shop_publisher_catalog():
                                      (p["name"] or "").lower(), p["id"]))
         return templates, products
 
-    templates, products = run_async(fetch())
+    try:
+        templates, products = run_async(fetch())
+    except Exception:  # noqa: BLE001 - the API contract is JSON, never the HTML 500 page
+        log.exception("shop-publisher catalog failed for guild %s", guild_id)
+        return jsonify({"success": False, "code": "catalog_failed",
+                        "error": "The product catalog could not be loaded. Please try again."}), 500
     return jsonify({
         "templates": templates,
         "products": products,

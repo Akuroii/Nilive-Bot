@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.db
 .venv/
+
+# Node test-harness dependencies (declared in package.json, installed by `npm ci`).
+node_modules/

@@ -136,8 +136,13 @@ class ShopPublisherApiTests(unittest.TestCase):
             set(by_id[first]),
             {"id", "name", "type", "price", "price_diamonds", "enabled",
              "current_stock", "max_stock", "prestige_tier", "featured",
-             "category_id", "option_of_id"},
-            "category_id and root/option relationship are additive catalog metadata")
+             "category_id", "option_of_id",
+             # PR #121 added the read-only prepared-emoji token to this row. It
+             # is presentation metadata resolved from the local asset table; the
+             # catalog endpoint still performs no Discord call or write.
+             "app_emoji"},
+            "category_id, root/option and the prepared emoji token are additive "
+            "catalog metadata")
         self.assertIsNone(by_id[first]["option_of_id"])
         execute("UPDATE shop_items SET category_id = NULL WHERE id = ?", (first,))
         data = self.client.get("/api/shop-publisher/catalog").get_json()
