@@ -359,6 +359,16 @@ window.__GUILD_ID__ = {{ (session.get('guild_id')|string if session.get('guild_i
         <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-roles"></use></svg></span>
         <span class="nav-text">Reaction Roles</span>
     </a>
+    <a href="/role-replacement"
+       hx-get="/role-replacement"
+       hx-target="#content-area"
+       hx-swap="outerHTML"
+       hx-select="#content-area"
+       hx-push-url="true"
+       class="nav-link">
+        <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#nero-i-refresh"></use></svg></span>
+        <span class="nav-text">Role Replacement</span>
+    </a>
     <a href="/triggers"
        hx-get="/triggers"
        hx-target="#content-area"

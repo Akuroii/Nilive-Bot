@@ -1,0 +1,330 @@
+{% extends "base.html" %}
+{% block title %}Role Replacement{% endblock %}
+{% block content %}
+<span data-page-title="Role Replacement"></span>
+
+<div class="card" style="margin-bottom:20px;">
+    <div class="card-title">
+        <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-refresh"></use></svg>
+        Keep role vs conflicting roles
+    </div>
+    <p class="text-muted text-sm" style="margin:0 0 10px;">
+        When a member ends up holding both sides of a rule, the keep role wins and
+        <strong>only the conflicting roles listed here</strong> are removed. Rules are
+        evaluated when a role is <em>added</em> — saving or editing a rule never touches
+        members who already hold these roles.
+    </p>
+    <p class="text-muted text-sm" style="margin:0;">
+        A conflicting role is never removed while another Nilive system still grants it
+        (Level reward, Prestige, Booster, Shop/timed ownership, an active Twitch session,
+        the current MVP award, or a timed reaction role). Those removals are skipped and
+        logged instead of silently revoking an earned role. Roles managed by a
+        reaction-role panel cannot be used as conflicting roles at all, because an
+        untimed reaction role keeps no ownership record to verify against.
+    </p>
+</div>
+
+<div class="card" style="margin-bottom:20px;">
+    <div class="card-title">
+        <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-plus"></use></svg>
+        <span id="rr-form-title">New rule</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="form-group">
+            <label class="form-label" for="rr-keep">Keep role (priority)</label>
+            <select class="nero-role-picker form-input" id="rr-keep"
+                    data-assignable-only="true" data-value=""></select>
+            <div class="form-hint">The role that always wins. One rule per keep role.</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label" for="rr-conflict-one">Conflicting roles</label>
+            <!-- One picker per conflicting role. nero-select.js only upgrades
+                 single-select elements; a multi-select built here would never be
+                 populated, so the row is simply repeated instead. -->
+            <div class="form-group" id="rr-conflict-list">
+                <div class="rr-conflict-row" style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+                    <select class="nero-role-picker form-input rr-conflict-picker"
+                            id="rr-conflict-one" data-assignable-only="true"
+                            style="flex:1;"></select>
+                </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="addConflictPicker()">
+                + Add another conflicting role
+            </button>
+            <div class="form-hint">Removed only when this rule's keep role is held.</div>
+        </div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:6px;">
+        <button type="button" class="btn btn-primary" id="rr-save-btn" onclick="saveRule(this)">
+            Save Rule
+        </button>
+        <button type="button" class="btn btn-secondary" id="rr-cancel-btn"
+                onclick="resetForm()" style="display:none;">Cancel edit</button>
+        <span class="form-save-state" data-ux-save-state aria-live="polite"></span>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom:20px;">
+    <div class="card-title">
+        <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-roles"></use></svg>
+        Rules
+    </div>
+    <table class="table" id="rr-rules-table">
+        <thead>
+            <tr>
+                <th>Keep role</th>
+                <th>Conflicting roles</th>
+                <th>Status</th>
+                <th style="width:230px;">Actions</th>
+            </tr>
+        </thead>
+        <tbody id="rr-rules-body">
+        {% for rule in rules %}
+            <tr data-rule-id="{{ rule.id }}"
+                data-keep="{{ rule.keep_role_id }}"
+                data-conflicts="{{ rule.conflict_role_ids | join(',') }}"
+                data-enabled="{{ 1 if rule.enabled else 0 }}">
+                <td><code>{{ rule.keep_role_id }}</code></td>
+                <td>{% for r in rule.conflict_role_ids %}<code>{{ r }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</td>
+                <td>
+                    {% if rule.enabled %}
+                    <span class="badge badge-success">Enabled</span>
+                    {% else %}
+                    <span class="badge badge-warning">Disabled</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <button type="button" class="btn btn-sm btn-secondary"
+                            onclick="editRule({{ rule.id }})">Edit</button>
+                    <button type="button" class="btn btn-sm btn-secondary"
+                            onclick="toggleRule({{ rule.id }}, {{ 0 if rule.enabled else 1 }})">
+                        {{ 'Disable' if rule.enabled else 'Enable' }}
+                    </button>
+                    <button type="button" class="btn btn-sm btn-danger"
+                            onclick="removeRule({{ rule.id }})">Delete</button>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <p class="text-muted text-sm" id="rr-empty"
+       style="{% if rules %}display:none;{% endif %}margin:8px 0 0;">
+        No rules configured yet.
+    </p>
+</div>
+
+<div class="card">
+    <div class="card-title">
+        <svg class="card-title-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#nero-i-clock"></use></svg>
+        Removals awaiting confirmation
+    </div>
+    <p class="text-muted text-sm" style="margin:0 0 10px;">
+        Discord did not confirm these removals yet (permission, hierarchy, or an
+        unverified member read). They are retried automatically every 10 minutes and
+        disappear once the member's roles prove the removal happened.
+    </p>
+    <table class="table" id="rr-pending-table">
+        <thead>
+            <tr><th>Member</th><th>Role</th><th>Attempts</th><th>Last result</th></tr>
+        </thead>
+        <tbody id="rr-pending-body">
+        {% for row in pending %}
+            <tr>
+                <td><code>{{ row.user_id }}</code></td>
+                <td><code>{{ row.role_id }}</code></td>
+                <td>{{ row.attempts }}</td>
+                <td class="text-muted text-sm">{{ row.last_error or '—' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <p class="text-muted text-sm" id="rr-pending-empty"
+       style="{% if pending %}display:none;{% endif %}margin:8px 0 0;">
+        Nothing is waiting. Every removal has been confirmed.
+    </p>
+</div>
+
+<script>
+(function () {
+// Re-published for the markup's inline handlers (onclick) and for script-level
+// harnesses that call page functions directly: this script is evaluated inside
+// a function scope and re-evaluated on every htmx navigation, so the page API
+// is put back on the global object each time.
+var __neroGlobal = (typeof window !== 'undefined') ? window : globalThis;
+__neroGlobal.saveRule = saveRule;
+__neroGlobal.editRule = editRule;
+__neroGlobal.resetForm = resetForm;
+__neroGlobal.toggleRule = toggleRule;
+__neroGlobal.removeRule = removeRule;
+__neroGlobal.addConflictPicker = addConflictPicker;
+__neroGlobal.removeConflictPicker = removeConflictPicker;
+
+var editingId = null;
+
+function pickers() {
+    return Array.from(document.querySelectorAll('.rr-conflict-picker'));
+}
+
+function conflictValue(el) {
+    if (!el) return '';
+    // A single-select: NeroSelect.getMultiValues() assumes an array (it is
+    // built for <select multiple>), so ask jQuery/select2 directly instead.
+    var value = el.value || '';
+    if (window.jQuery && el.dataset && el.dataset.nsInit === '1') {
+        value = window.jQuery(el).val() || value;
+    }
+    return String(value || '');
+}
+
+function setPicker(el, value) {
+    if (!el) return;
+    el.value = value || '';
+    if (window.jQuery) window.jQuery(el).val(value || '').trigger('change.select2');
+}
+
+function ruleRow(id) {
+    return document.querySelector('[data-rule-id="' + id + '"]');
+}
+
+function addConflictPicker(value) {
+    var list = document.getElementById('rr-conflict-list');
+    if (!list) return null;
+    var row = document.createElement('div');
+    row.className = 'rr-conflict-row';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:8px;';
+    var select = document.createElement('select');
+    select.className = 'nero-role-picker form-input rr-conflict-picker';
+    select.setAttribute('data-assignable-only', 'true');
+    select.style.flex = '1';
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-sm btn-danger';
+    remove.textContent = 'Remove';
+    remove.setAttribute('onclick', 'removeConflictPicker(this)');
+    row.appendChild(select);
+    row.appendChild(remove);
+    list.appendChild(row);
+    // initOne() preselects from data-value on its first run, so the value has
+    // to be on the element before the (async) init starts.
+    if (value) select.setAttribute('data-value', String(value));
+    if (typeof NeroSelect !== 'undefined' && NeroSelect.initOne) {
+        NeroSelect.initOne(select, 'role');
+    }
+    if (value) setPicker(select, String(value));
+    return select;
+}
+
+function removeConflictPicker(button) {
+    var row = button && button.closest ? button.closest('.rr-conflict-row') : null;
+    var list = document.getElementById('rr-conflict-list');
+    if (!row || !list) return;
+    if (list.querySelectorAll('.rr-conflict-row').length <= 1) {
+        setPicker(row.querySelector('.rr-conflict-picker'), '');
+        return;
+    }
+    row.remove();
+}
+
+function resetForm() {
+    editingId = null;
+    var list = document.getElementById('rr-conflict-list');
+    if (list) {
+        var rows = Array.from(list.querySelectorAll('.rr-conflict-row'));
+        rows.slice(1).forEach(function (row) { row.remove(); });
+        setPicker(list.querySelector('.rr-conflict-picker'), '');
+    }
+    setPicker(document.getElementById('rr-keep'), '');
+    var title = document.getElementById('rr-form-title');
+    if (title) title.textContent = 'New rule';
+    var cancel = document.getElementById('rr-cancel-btn');
+    if (cancel) cancel.style.display = 'none';
+}
+
+function editRule(id) {
+    var row = ruleRow(id);
+    if (!row) return;
+    editingId = String(id);
+    setPicker(document.getElementById('rr-keep'), row.dataset.keep || '');
+    var conflicts = (row.dataset.conflicts || '').split(',').filter(Boolean);
+    var list = document.getElementById('rr-conflict-list');
+    if (!list) return;
+    Array.from(list.querySelectorAll('.rr-conflict-row')).forEach(function (extra, index) {
+        if (index > 0) extra.remove();
+    });
+    setPicker(list.querySelector('.rr-conflict-picker'), conflicts[0] || '');
+    conflicts.slice(1).forEach(function (roleId) { addConflictPicker(roleId); });
+    var title = document.getElementById('rr-form-title');
+    if (title) title.textContent = 'Edit rule';
+    var cancel = document.getElementById('rr-cancel-btn');
+    if (cancel) cancel.style.display = 'inline-block';
+}
+
+async function saveRule(btn) {
+    var keepEl = document.getElementById('rr-keep');
+    var keep = keepEl ? String(keepEl.value || '') : '';
+    if (!keep) { showToast('Choose a keep role first.', 'error'); return; }
+    var conflicts = pickers().map(conflictValue).filter(Boolean);
+    if (!conflicts.length) { showToast('Choose at least one conflicting role.', 'error'); return; }
+    var duplicate = conflicts.filter(function (v, i) { return conflicts.indexOf(v) !== i; });
+    if (duplicate.length) {
+        showToast('Role ' + duplicate[0] + ' is listed more than once.', 'error');
+        return;
+    }
+
+    var payload = { keep_role_id: keep, conflict_role_ids: conflicts };
+    var url = '/api/role-replacement/rule';
+    var method = 'POST';
+    if (editingId) {
+        url = '/api/role-replacement/rule/' + editingId;
+        method = 'PUT';
+    }
+    if (btn) setLoading(btn, true);
+    try {
+        var res = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        var data = await res.json().catch(function () { return null; });
+        if (!res.ok || !data || data.success === false) {
+            showToast((data && data.error) || ('Save failed (' + res.status + ')'), 'error', 12000);
+            return;
+        }
+        window.location.reload();
+    } catch (err) {
+        showToast('Connection error — the rule was not saved.', 'error', 12000);
+    } finally {
+        if (btn) setLoading(btn, false);
+    }
+}
+
+async function toggleRule(id, enabled) {
+    var res = await fetch('/api/role-replacement/rule/' + id + '/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !!enabled }),
+    });
+    var data = await res.json().catch(function () { return null; });
+    if (!res.ok || !data || data.success === false) {
+        showToast((data && data.error) || ('Update failed (' + res.status + ')'), 'error', 12000);
+        return;
+    }
+    window.location.reload();
+}
+
+async function removeRule(id) {
+    if (!confirm('Delete this rule? Members keep their roles — nothing is removed retroactively.')) {
+        return;
+    }
+    var res = await fetch('/api/role-replacement/rule/' + id, { method: 'DELETE' });
+    var data = await res.json().catch(function () { return null; });
+    if (!res.ok || !data || data.success === false) {
+        showToast((data && data.error) || ('Delete failed (' + res.status + ')'), 'error', 12000);
+        return;
+    }
+    window.location.reload();
+}
+
+})();
+</script>
+{% endblock %}
