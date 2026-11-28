@@ -1627,6 +1627,11 @@ async def init_db():
         await ensure_timed_ownership_schema(db)
         await ensure_purchase_journal_schema(db)
 
+        # Role Replacement (dashboard-managed keep/conflict role pairs). Purely
+        # additive: three new tables, no existing table or row is touched.
+        from utils.role_replacement import ensure_role_replacement_schema
+        await ensure_role_replacement_schema(db)
+
         # Publication identity/state only. The live message is always rebuilt
         # from shop_designs + current shop_items; never persist commerce or
         # rendered payload snapshots here. No Design/channel uniqueness:

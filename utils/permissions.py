@@ -178,6 +178,7 @@ PAGE_PERMISSIONS = {
     "shoppublisher":      LEVEL_OWNER,
 
     "reactionroles":      LEVEL_ADMIN,
+    "role_replacement":   LEVEL_ADMIN,
     "triggers":           LEVEL_ADMIN,
     "customcommands":     LEVEL_ADMIN,
 

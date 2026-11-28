@@ -62,6 +62,7 @@ PAGES = {
     "/custom-commands": "manage/customcommands.html",
     "/embed-builder": "manage/embedbuilder.html",
     "/reaction-roles": "manage/reactionroles.html",
+    "/role-replacement": "manage/role_replacement.html",
     "/tickets": "manage/tickets.html",
     "/triggers": "manage/triggers.html",
     "/server-select": "server_select.html",

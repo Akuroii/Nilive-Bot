@@ -1279,6 +1279,22 @@ def reaction_roles():
     return render("manage/reactionroles.html", **ctx)
 
 
+# ── Role Replacement ───────────────────────────────────────────────────────────
+# Configuration only: this page reads and writes rules. It never scans members,
+# so loading or saving it cannot retroactively strip a role from anyone.
+
+@app.route("/role-replacement")
+@require_page("role_replacement")
+def role_replacement():
+    from utils.role_replacement import list_rules, pending_removals
+    guild_id = get_session_guild_id()
+    rules = run_async(list_rules(guild_id))
+    pending = run_async(pending_removals(guild_id=guild_id, limit=50))
+    ctx = get_current_user_context()
+    return render("manage/role_replacement.html", rules=rules,
+                  pending=pending, **ctx)
+
+
 # ── Triggers ───────────────────────────────────────────────────────────────────
 
 @app.route("/triggers")

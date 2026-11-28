@@ -196,6 +196,7 @@ async def load_cogs():
         "cogs.boost",
         "cogs.botprofile",
         "cogs.reactionroles",
+        "cogs.rolereplacement",
         "cogs.tickets",
         "cogs.embedbuilder",
         "cogs.sticky",
