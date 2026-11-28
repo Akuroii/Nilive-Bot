@@ -584,20 +584,6 @@ async def role_removal_verdict(guild_id: int, user_id: int, role_id: int,
     return None
 
 
-async def role_removal_reason(guild_id: int, user_id: int, role_id: int,
-                              *, bot=None, member=None) -> str | None:
-    """Keep-reason for display and for callers that must never remove.
-
-    Flattens :class:`OwnershipUnavailable` into a keep reason, which is the
-    safe answer whenever the caller's only options are keep or remove.
-    """
-    try:
-        return await role_removal_verdict(guild_id, user_id, role_id,
-                                          bot=bot, member=member)
-    except OwnershipUnavailable as exc:
-        return exc.reason
-
-
 # ── Pending (unconfirmed) removals ───────────────────────────────────────
 
 async def _record_pending(guild_id: int, user_id: int, role_id: int, *,
@@ -647,15 +633,6 @@ async def pending_removals(*, guild_id: int | None = None,
     return [{"id": int(r[0]), "guild_id": int(r[1]), "user_id": int(r[2]),
              "role_id": int(r[3]), "rule_id": (int(r[4]) if r[4] is not None else None),
              "attempts": int(r[5] or 0), "last_error": r[6]} for r in rows]
-
-
-async def clear_pending_for_member(guild_id: int, user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
-            "DELETE FROM role_replacement_pending WHERE guild_id=? AND user_id=?",
-            (int(guild_id), int(user_id)))
-        await db.commit()
-        return int(cursor.rowcount or 0)
 
 
 # ── Removal ──────────────────────────────────────────────────────────────
